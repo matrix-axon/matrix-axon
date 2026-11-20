@@ -20,7 +20,7 @@ use crate::client::ClientOptions;
 use crate::media::{
     self, page_origin, parse_base, parse_content_range, ticket_of, upstream_url, MAX_BODY,
 };
-use crate::media_window::{MediaWindows, Spec, MAX_BLOCKS};
+use crate::media_window::{block_start, MediaWindows, Spec, MAX_BLOCKS};
 use crate::transport::Transport;
 
 const ORIGIN: &str = "axon://localhost";
@@ -227,6 +227,10 @@ async fn server() -> Server {
                         let ticket = path
                             .strip_prefix("/axon/v1/media-stream/")
                             .unwrap_or("unknown");
+                        // A server slow to answer at all.
+                        if ticket == "late" {
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                        }
                         Ok::<_, Infallible>(answer(ticket, request.headers()))
                     }
                 });
@@ -415,10 +419,10 @@ async fn an_absolute_range_goes_upstream_as_one_window_and_nothing_else_does() {
 }
 
 #[tokio::test]
-async fn an_open_range_is_cut_to_the_bound() {
+async fn an_open_range_ends_where_its_block_does() {
     let server = server().await;
     let response = get(&server, TICKET, &[("range", "bytes=1000-")]).await;
-    assert_partial(&response, 1000, MAX_BODY, LARGE);
+    assert_partial(&response, 1000, MAX_BODY - 1000, LARGE);
 }
 
 #[tokio::test]
@@ -661,7 +665,25 @@ impl Player {
     async fn range(&self, ticket: &str, range: &str) -> Response<Vec<u8>> {
         self.get(ticket, &[("range", range)]).await
     }
+
+    /// `range`, then the read-ahead the shell runs once it has answered.
+    async fn play(&self, ticket: &str, headers: &[(&str, &str)]) -> Response<Vec<u8>> {
+        let request = scheme_request("GET", ticket, headers);
+        let base = Some(self.base.clone());
+        let response = media::respond(
+            &self.transport,
+            &self.windows,
+            base.clone(),
+            &request,
+            Some(ORIGIN),
+        )
+        .await;
+        media::read_ahead(&self.transport, &self.windows, base, &request).await;
+        response
+    }
 }
+
+const BLOCK: usize = MAX_BODY;
 
 /// The `Range` of every request the server received, in order.
 fn upstream_ranges(server: &Server) -> Vec<String> {
@@ -736,8 +758,55 @@ async fn requests_that_arrive_together_share_one_fetch() {
     assert_eq!(server.seen().len(), 1);
 }
 
+#[test]
+fn blocks_sit_on_a_grid_of_the_bound() {
+    let bound = MAX_BODY as u64;
+    assert_eq!(block_start(0), 0);
+    assert_eq!(block_start(bound - 1), 0);
+    assert_eq!(block_start(bound), bound);
+    assert_eq!(block_start(3 * bound + 17), 3 * bound);
+}
+
 #[tokio::test]
-async fn a_range_past_the_window_fetches_the_next_one_from_its_start() {
+async fn ranges_starting_just_before_one_another_share_a_block() {
+    // AVFoundation's audio and video reads at 14:34:40 on production: three
+    // ranges a few KiB apart, which each fetched a block of their own.
+    let server = server().await;
+    let player = Player::new(&server);
+    for first in [4_482_858, 4_475_238, 4_473_738, 4_315_870] {
+        assert_partial(
+            &player
+                .range(TICKET, &format!("bytes={first}-{}", first + 9_999))
+                .await,
+            first,
+            10_000,
+            LARGE,
+        );
+    }
+    assert_eq!(
+        upstream_ranges(&server),
+        vec![format!("bytes={BLOCK}-{}", 2 * BLOCK - 1)]
+    );
+}
+
+#[tokio::test]
+async fn a_range_across_a_blocks_end_gets_the_blocks_part() {
+    let server = server().await;
+    let player = Player::new(&server);
+    let first = BLOCK - 100;
+    assert_partial(
+        &player
+            .range(TICKET, &format!("bytes={first}-{}", first + 999))
+            .await,
+        first,
+        100,
+        LARGE,
+    );
+    assert_eq!(server.seen().len(), 1);
+}
+
+#[tokio::test]
+async fn a_range_past_the_window_fetches_the_block_that_holds_it() {
     let server = server().await;
     let player = Player::new(&server);
     assert_partial(&player.range(TICKET, "bytes=0-1").await, 0, 2, LARGE);
@@ -761,7 +830,7 @@ async fn a_range_past_the_window_fetches_the_next_one_from_its_start() {
         upstream_ranges(&server),
         vec![
             format!("bytes=0-{}", MAX_BODY - 1),
-            format!("bytes={next}-{}", next + MAX_BODY - 1),
+            format!("bytes={BLOCK}-{}", 2 * BLOCK - 1),
         ]
     );
 }
@@ -828,6 +897,29 @@ async fn an_expired_ticket_reaches_every_waiting_request_as_a_404() {
 }
 
 #[tokio::test]
+async fn a_fetch_abandoned_before_its_headers_strands_no_one() {
+    let server = server().await;
+    let player = Player::new(&server);
+    // The request that claimed the block goes away while the server has yet
+    // to answer, as when the scheme's deadline drops it.
+    let claimer = {
+        let player = Arc::clone(&player);
+        tokio::spawn(async move { player.range("late", "bytes=0-99").await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    claimer.abort();
+    let _ = claimer.await;
+    // The next request does not wait on a fetch nobody is making.
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
+        player.range("late", "bytes=100-199"),
+    )
+    .await
+    .expect("the request waited on the abandoned fetch");
+    assert_partial(&response, 100, 100, LARGE);
+}
+
+#[tokio::test]
 async fn a_window_that_fails_serves_what_arrived_and_502s_the_rest() {
     let server = server().await;
     let player = Player::new(&server);
@@ -856,4 +948,97 @@ async fn at_most_a_fixed_number_of_windows_are_held() {
     assert_eq!(player.windows.len(), MAX_BLOCKS);
     player.windows.clear();
     assert_eq!(player.windows.len(), 0);
+}
+
+// ===== reading ahead =====
+
+#[tokio::test]
+async fn a_read_from_a_complete_block_fetches_the_next() {
+    let server = server().await;
+    let player = Player::new(&server);
+    // The block's last byte: answered only once the block is complete.
+    let last = BLOCK - 1;
+    assert_partial(
+        &player
+            .play(TICKET, &[("range", &format!("bytes={last}-{last}"))])
+            .await,
+        last,
+        1,
+        LARGE,
+    );
+    assert_eq!(
+        upstream_ranges(&server),
+        vec![
+            format!("bytes=0-{}", BLOCK - 1),
+            format!("bytes={BLOCK}-{}", 2 * BLOCK - 1),
+        ]
+    );
+    // The player's next read finds it held.
+    let next = BLOCK + 5;
+    assert_partial(
+        &player
+            .range(TICKET, &format!("bytes={next}-{}", next + 99))
+            .await,
+        next,
+        100,
+        LARGE,
+    );
+    // Reading on in the first block asks for nothing more.
+    player.play(TICKET, &[("range", "bytes=0-99")]).await;
+    assert_eq!(server.seen().len(), 2);
+}
+
+#[tokio::test]
+async fn nothing_is_read_ahead_while_a_block_is_still_arriving() {
+    let server = server().await;
+    let player = Player::new(&server);
+    // "slow" sends 320 KiB of the block and then holds.
+    assert_partial(
+        &player.play("slow", &[("range", "bytes=0-99")]).await,
+        0,
+        100,
+        LARGE,
+    );
+    assert_eq!(server.seen().len(), 1);
+}
+
+#[tokio::test]
+async fn nothing_is_read_ahead_past_the_end() {
+    let server = server().await;
+    let player = Player::new(&server);
+    let last = LARGE - 1;
+    assert_partial(
+        &player
+            .play(TICKET, &[("range", &format!("bytes={last}-{last}"))])
+            .await,
+        last,
+        1,
+        LARGE,
+    );
+    assert_eq!(
+        upstream_ranges(&server),
+        vec![format!(
+            "bytes={}-{}",
+            block_start(last as u64),
+            3 * BLOCK - 1
+        )]
+    );
+}
+
+#[tokio::test]
+async fn the_probe_never_reads_ahead() {
+    let server = server().await;
+    let player = Player::new(&server);
+    // A complete first block, without reading ahead from it.
+    let last = BLOCK - 1;
+    player.range(TICKET, &format!("bytes={last}-{last}")).await;
+    let before = server.seen().len();
+    // A read inside it would now fetch the next block; the probe does not.
+    player
+        .play(
+            TICKET,
+            &[("range", "bytes=0-0"), ("axon-stream-probe", "1")],
+        )
+        .await;
+    assert_eq!(upstream_ranges(&server)[before..], ["bytes=0-0".to_owned()]);
 }

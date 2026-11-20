@@ -282,6 +282,44 @@ pub(crate) fn forwarded_response_headers(upstream: &HeaderMap) -> HeaderMap {
     headers
 }
 
+/// The range of a request the read-ahead window answers: a plain `GET` of
+/// one range. The probe, a conditional request and anything else go upstream
+/// as sent.
+fn window_spec(request: &Request<Vec<u8>>) -> Option<Spec> {
+    let headers = request.headers();
+    if request.method() != Method::GET
+        || headers.contains_key(PROBE_HEADER)
+        || headers.contains_key(header::IF_NONE_MATCH)
+    {
+        return None;
+    }
+    headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(Spec::parse)
+}
+
+/// After [`respond`] has answered `request`, fetch the window's next block if
+/// the read calls for one ([`MediaWindows::read_ahead`]). The shell runs this
+/// once the response is on its way, so it never delays one.
+pub(crate) async fn read_ahead(
+    transport: &Transport,
+    windows: &MediaWindows,
+    base: Option<Url>,
+    request: &Request<Vec<u8>>,
+) {
+    let Some(spec) = window_spec(request) else {
+        return;
+    };
+    let Some((ticket, url)) = base.and_then(|base| {
+        let ticket = ticket_of(request.uri().path())?;
+        Some((ticket, upstream_url(&base, ticket)?))
+    }) else {
+        return;
+    };
+    let _ = tokio::time::timeout(DEADLINE, windows.read_ahead(transport, url, ticket, spec)).await;
+}
+
 async fn proxy(
     transport: &Transport,
     windows: &MediaWindows,
@@ -304,17 +342,7 @@ async fn proxy(
         return status(StatusCode::NOT_FOUND);
     };
 
-    // A plain `GET` of one range goes through the read-ahead window. The
-    // probe, a conditional request and anything else go upstream as sent.
-    let windowed = method == Method::GET
-        && !request.headers().contains_key(PROBE_HEADER)
-        && !request.headers().contains_key(header::IF_NONE_MATCH);
-    let spec = request
-        .headers()
-        .get(header::RANGE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(Spec::parse);
-    if let (true, Some(spec)) = (windowed, spec) {
+    if let Some(spec) = window_spec(request) {
         if let Outcome::Served(response) = windows.serve(transport, url.clone(), ticket, spec).await
         {
             return response;

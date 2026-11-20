@@ -4,13 +4,23 @@
 //! shells) asks for every audio and video sample by itself: about 60
 //! requests a second of a few KiB each, and never an open-ended range. Sent
 //! upstream one by one, each would cost the server a ticket, token and event
-//! check. So a range that no block covers fetches a block of up to
-//! [`MAX_BODY`] from its first byte, and later ranges inside that block are
-//! answered from memory.
+//! check. So the object is read in blocks of [`MAX_BODY`], and ranges inside a
+//! block are answered from memory.
 //!
+//! - Blocks sit on a grid of [`MAX_BODY`] ([`block_start`]). AVFoundation's
+//!   audio and video reads often start a few KiB apart, on either side of
+//!   wherever a block would otherwise begin; on the grid they share one
+//!   block, where blocks starting at each range fetched the same bytes two or
+//!   three times over, all at once on a slow link.
 //! - A request waits only for its own bytes, not the whole block, while the
 //!   block goes on filling in the background. Requests that arrive while a
-//!   block is being fetched share that fetch.
+//!   block is being fetched share that fetch. A range that runs past its
+//!   block's end gets the block's part, as a shorter `206`.
+//! - Once a read is served from a complete block, the next block is fetched
+//!   ([`MediaWindows::read_ahead`]), so a player reading front to back finds
+//!   its next bytes already arriving rather than waiting a round trip and a
+//!   block for them. That keeps at most one block ahead of what the player has
+//!   read, and nothing is fetched while it reads nothing.
 //! - Plaintext stays in memory, never on disk, as the server's `no-store`
 //!   asks. At most [`MAX_BLOCKS`] blocks are held, and a block unused for
 //!   [`IDLE`] is dropped, as is everything when the page reloads.
@@ -37,6 +47,11 @@ pub(crate) const MAX_BLOCKS: usize = 8;
 
 /// A block nothing has read from for this long is dropped.
 pub(crate) const IDLE: Duration = Duration::from_secs(60);
+
+/// The start of the block that holds byte `at`.
+pub(crate) fn block_start(at: u64) -> u64 {
+    at - at % MAX_BODY as u64
+}
 
 /// A `Range` request header the window can answer: one range, in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,17 +129,30 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Block {
-    /// Whether a request whose range starts at `at` belongs to this block.
-    /// Before the headers arrive the block's end is not known, so any start
-    /// within a full block's reach joins it, and is checked again once the
-    /// end is.
-    fn covers(&self, at: u64) -> bool {
-        let state = lock(&self.state);
-        match state.phase {
-            Phase::Failed | Phase::Refused => false,
-            Phase::Head => at >= self.first && at < self.first + MAX_BODY as u64,
-            Phase::Body | Phase::Done => at >= self.first && at <= state.last,
+    fn new(ticket: &str, first: u64) -> Self {
+        Self {
+            ticket: ticket.to_owned(),
+            first,
+            state: Mutex::new(State {
+                phase: Phase::Head,
+                last: 0,
+                total: None,
+                headers: HeaderMap::new(),
+                bytes: Vec::new(),
+                used: Instant::now(),
+            }),
+            changed: Notify::new(),
+            cancel: CancellationToken::new(),
         }
+    }
+
+    /// Whether the block has, or is still fetching, bytes to serve. A block
+    /// that failed or was refused is never joined.
+    fn live(&self) -> bool {
+        matches!(
+            lock(&self.state).phase,
+            Phase::Head | Phase::Body | Phase::Done
+        )
     }
 
     fn update(&self, change: impl FnOnce(&mut State)) {
@@ -159,13 +187,31 @@ impl MediaWindows {
         lock(&self.blocks).len()
     }
 
-    /// The block for `ticket` that covers `at`, preferring the latest start.
-    fn find(&self, ticket: &str, at: u64) -> Option<Arc<Block>> {
-        lock(&self.blocks)
+    /// The live block of `ticket` starting at `start`, or else a new one in
+    /// its place, with whether it is new and so the caller's to fetch. One
+    /// lock covers both, so requests that arrive together share one block.
+    fn claim(&self, ticket: &str, start: u64) -> (Arc<Block>, bool) {
+        let mut blocks = lock(&self.blocks);
+        if let Some(block) = blocks
             .iter()
-            .filter(|block| block.ticket == ticket && block.covers(at))
-            .max_by_key(|block| block.first)
-            .cloned()
+            .find(|block| block.ticket == ticket && block.first == start && block.live())
+        {
+            return (Arc::clone(block), false);
+        }
+        let block = Arc::new(Block::new(ticket, start));
+        make_room(&mut blocks);
+        blocks.push(Arc::clone(&block));
+        (block, true)
+    }
+
+    /// The first byte `spec` asks for, if it can be known here.
+    fn first_of(&self, ticket: &str, spec: Spec) -> Option<u64> {
+        match spec {
+            Spec::Closed(first, _) | Spec::From(first) => Some(first),
+            // Where it starts is the server's to say until a block has
+            // learned the length.
+            Spec::Suffix(n) => self.total(ticket).map(|total| total.saturating_sub(n)),
+        }
     }
 
     /// The object's length, if any block for `ticket` has learned it.
@@ -181,36 +227,8 @@ impl MediaWindows {
         block.cancel.cancel();
     }
 
-    /// Add `block`, first dropping idle ones and then, while over the limit,
-    /// the least recently used.
-    fn insert(&self, block: Arc<Block>) {
-        let now = Instant::now();
-        let mut blocks = lock(&self.blocks);
-        blocks.retain(|held| {
-            let state = lock(&held.state);
-            let keep = matches!(state.phase, Phase::Head | Phase::Body | Phase::Done)
-                && now.duration_since(state.used) < IDLE;
-            if !keep {
-                held.cancel.cancel();
-            }
-            keep
-        });
-        while blocks.len() >= MAX_BLOCKS {
-            let Some(oldest) = blocks
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, held)| lock(&held.state).used)
-                .map(|(i, _)| i)
-            else {
-                break;
-            };
-            blocks.remove(oldest).cancel.cancel();
-        }
-        blocks.push(block);
-    }
-
-    /// Answer a `GET` for `spec` of `ticket` (at `url`) from a block,
-    /// fetching one first if none covers it.
+    /// Answer a `GET` for `spec` of `ticket` (at `url`) from the block that
+    /// holds its first byte, fetching that block first if it is not held.
     pub(crate) async fn serve(
         &self,
         transport: &Transport,
@@ -218,51 +236,68 @@ impl MediaWindows {
         ticket: &str,
         spec: Spec,
     ) -> Outcome {
-        let first = match spec {
-            Spec::Closed(first, _) | Spec::From(first) => first,
-            Spec::Suffix(n) => match self.total(ticket) {
-                Some(total) => total.saturating_sub(n),
-                // Where it starts is the server's to say.
-                None => return Outcome::Bypass,
-            },
+        let Some(first) = self.first_of(ticket, spec) else {
+            return Outcome::Bypass;
         };
-        let block = match self.find(ticket, first) {
-            Some(block) => block,
-            None => match self.fetch(transport, url, ticket, first).await {
-                Ok(block) => block,
-                Err(response) => return Outcome::Served(response),
-            },
-        };
+        let (block, new) = self.claim(ticket, block_start(first));
+        if new {
+            if let Err(response) = self.fetch(transport, url, &block).await {
+                return Outcome::Served(response);
+            }
+        }
         self.read(&block, spec, first).await
     }
 
-    /// Fetch a block starting at `first`, and return it once its headers are
-    /// in. A response that is not a usable `206` is answered as the server
-    /// sent it and never held, which is how a `404` for an expired ticket or
-    /// a `416` past the end reaches the player.
-    async fn fetch(
+    /// After `serve` has answered `spec` of `ticket`, fetch the next block if
+    /// the one it read from is complete and the next is neither held nor past
+    /// the object's end. Returns once that fetch's headers are in, if there
+    /// is one.
+    pub(crate) async fn read_ahead(
         &self,
         transport: &Transport,
         url: Url,
         ticket: &str,
-        first: u64,
-    ) -> Result<Arc<Block>, Response<Vec<u8>>> {
-        let block = Arc::new(Block {
-            ticket: ticket.to_owned(),
-            first,
-            state: Mutex::new(State {
-                phase: Phase::Head,
-                last: 0,
-                total: None,
-                headers: HeaderMap::new(),
-                bytes: Vec::new(),
-                used: Instant::now(),
-            }),
-            changed: Notify::new(),
-            cancel: CancellationToken::new(),
+        spec: Spec,
+    ) {
+        let Some(first) = self.first_of(ticket, spec) else {
+            return;
+        };
+        let start = block_start(first);
+        let complete = lock(&self.blocks).iter().find_map(|block| {
+            (block.ticket == ticket && block.first == start)
+                .then(|| lock(&block.state))
+                .filter(|state| state.phase == Phase::Done)
+                .map(|state| state.total)
         });
-        self.insert(Arc::clone(&block));
+        let Some(total) = complete else {
+            return;
+        };
+        let next = start + MAX_BODY as u64;
+        if total.is_some_and(|total| next >= total) {
+            return;
+        }
+        let (block, new) = self.claim(ticket, next);
+        if new {
+            // A refusal reaches the player when it asks for these bytes
+            // itself.
+            let _ = self.fetch(transport, url, &block).await;
+        }
+    }
 
+    /// Fetch `block`, just claimed, returning once its headers are in. A
+    /// response that is not a usable `206` is answered as the server sent it
+    /// and the block is dropped, which is how a `404` for an expired ticket
+    /// reaches the player.
+    async fn fetch(
+        &self,
+        transport: &Transport,
+        url: Url,
+        block: &Arc<Block>,
+    ) -> Result<(), Response<Vec<u8>>> {
+        // If this future is dropped before the headers are in, the requests
+        // waiting on them go upstream themselves rather than wait for good.
+        let mut unsettled = Unsettled(Some((self, block)));
+        let first = block.first;
         let range = format!("bytes={first}-{}", first + MAX_BODY as u64 - 1);
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -281,12 +316,7 @@ impl MediaWindows {
                 body: None,
             })
             .await;
-        let fail = |block: &Arc<Block>| {
-            block.update(|state| state.phase = Phase::Refused);
-            self.remove(block);
-        };
         let Ok(response) = sent else {
-            fail(&block);
             return Err(media::bad_gateway());
         };
         let range = (response.status() == StatusCode::PARTIAL_CONTENT)
@@ -296,7 +326,6 @@ impl MediaWindows {
             .and_then(parse_content_range)
             .filter(|&(start, _, _)| start == first);
         let Some((_, last, total)) = range else {
-            fail(&block);
             return Err(media::shape(&Method::GET, true, response).await);
         };
         let headers = media::forwarded_response_headers(response.headers());
@@ -307,8 +336,9 @@ impl MediaWindows {
             state.headers = headers;
             state.bytes.reserve_exact((last - first + 1) as usize);
         });
-        tokio::spawn(fill(Arc::clone(&block), response));
-        Ok(block)
+        unsettled.0 = None;
+        tokio::spawn(fill(Arc::clone(block), response));
+        Ok(())
     }
 
     /// Wait for the bytes `spec` needs from `block`, then answer with them.
@@ -374,6 +404,45 @@ impl MediaWindows {
             )));
         }
         None
+    }
+}
+
+/// Before a new block joins `blocks`, drop the idle ones and then, while at
+/// the limit, the least recently used.
+fn make_room(blocks: &mut Vec<Arc<Block>>) {
+    let now = Instant::now();
+    blocks.retain(|held| {
+        let state = lock(&held.state);
+        let keep = matches!(state.phase, Phase::Head | Phase::Body | Phase::Done)
+            && now.duration_since(state.used) < IDLE;
+        if !keep {
+            held.cancel.cancel();
+        }
+        keep
+    });
+    while blocks.len() >= MAX_BLOCKS {
+        let Some(oldest) = blocks
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, held)| lock(&held.state).used)
+            .map(|(i, _)| i)
+        else {
+            break;
+        };
+        blocks.remove(oldest).cancel.cancel();
+    }
+}
+
+/// A block whose fetch has not yet got a usable `206`: refused and dropped
+/// when this is, unless the fetch cleared it first.
+struct Unsettled<'a>(Option<(&'a MediaWindows, &'a Arc<Block>)>);
+
+impl Drop for Unsettled<'_> {
+    fn drop(&mut self) {
+        if let Some((windows, block)) = self.0.take() {
+            block.update(|state| state.phase = Phase::Refused);
+            windows.remove(block);
+        }
     }
 }
 
