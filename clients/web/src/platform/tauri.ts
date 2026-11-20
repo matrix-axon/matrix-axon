@@ -553,6 +553,10 @@ export function tauriPlatform(
     },
     // A packaged build has no same-origin API to assume: it must be told.
     defaultApiBaseUrl: null,
+    // The CSP cannot list the server's origin in `media-src`, so video and
+    // audio keep the blob path until the `axon-media` scheme of ADR 0139
+    // phase 4 proxies ticket URLs.
+    mediaStreamSrc: null,
     // `dist` is compiled into this binary, so there is nothing for a reload to
     // fetch that is not already running. See the field's own note.
     updatesFromOrigin: false,

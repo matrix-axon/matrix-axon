@@ -8,11 +8,14 @@ import type { ParsedMedia } from './parse-media'
 export type PreviewKind = 'audio' | 'video' | 'pdf' | 'text'
 
 /**
- * Largest object each kind will load for preview, in bytes. The preview is
- * blob-backed — the whole object lands in memory before playback starts (there
- * is no `Range` streaming until the media service worker of ADR 0072's
- * follow-up) — so these are memory ceilings, not policy. Above them the card
- * keeps its Download-only behaviour.
+ * Largest object each kind will load for a blob-backed preview, in bytes. The
+ * whole object lands in memory before playback starts, so these are memory
+ * ceilings, not policy. Above them the card keeps its Download-only
+ * behaviour.
+ *
+ * A plan that streams from a ticket URL (`PreviewPlan.stream`, ADR 0139 § 6)
+ * has no ceiling here: the browser buffers it, not the page, and the server's
+ * own `max_stream_bytes` is the bound, answered as a load failure.
  *
  * Binary kinds sit at `MAX_UPLOAD_BYTES`, the largest object our own clients
  * can put in a room: a lower bar would have made a phone video — the single
@@ -99,6 +102,19 @@ export interface PreviewPlan {
    * plays in a media element or renders in a PDF viewer.
    */
   contentType: string | null
+  /**
+   * Whether the player loads a stream-ticket URL rather than a blob (ADR 0139
+   * § 6). Only for audio and video the server itself will serve as
+   * `video/*` or `audio/*`, on a platform whose media elements can load the
+   * URL. A plan that streams has no size ceiling.
+   */
+  stream: boolean
+}
+
+/** Options for [`previewPlan`]. */
+export interface PreviewPlanOptions {
+  /** Whether this platform can play from a stream ticket at all. */
+  streaming?: boolean
 }
 
 /** The bare `type/subtype`, lowercased. */
@@ -139,6 +155,25 @@ function kindFromMimetype(mime: string): PreviewKind | null {
   return null
 }
 
+/**
+ * Whether the media proxy serves this declared mimetype as `video/*` or
+ * `audio/*`, which is the only thing the server issues a stream ticket for.
+ *
+ * Mirrors `sanitize_mime` and `is_inline_safe` (`routes/media.rs`) exactly,
+ * case and all: a declaration with parameters (`video/mp4; codecs=…`), or
+ * whose major type is not a lowercase `audio/` or `video/` (`Video/mp4`), is
+ * served as `application/octet-stream`, which no ticket covers. The subtype's
+ * case does not matter: `video/MP4` is served as itself, and streams. A
+ * declaration that does not stream keeps the blob path and its re-type.
+ * Erring towards `false` costs only the streaming; erring towards `true` is
+ * caught by the ticket request's `400`, but would already have lifted the
+ * size ceiling.
+ */
+function servedAsStreamable(mimetype: string): boolean {
+  const raw = mimetype.trim()
+  return raw.length <= 255 && /^(audio|video)\/[A-Za-z0-9!#$&^_.+-]+$/.test(raw)
+}
+
 function fromFilename(
   filename: string,
 ): { kind: PreviewKind; mime: string } | null {
@@ -164,7 +199,10 @@ function fromFilename(
  * would drop previews for every sender that omits `info.size`, and a failed
  * fetch already renders as an error.
  */
-export function previewPlan(media: ParsedMedia): PreviewPlan | null {
+export function previewPlan(
+  media: ParsedMedia,
+  options: PreviewPlanOptions = {},
+): PreviewPlan | null {
   if (media.url === null || !media.url.startsWith('mxc://')) {
     return null
   }
@@ -209,10 +247,19 @@ export function previewPlan(media: ParsedMedia): PreviewPlan | null {
   if (kind === null) {
     return null
   }
-  if (media.size !== undefined && media.size > SIZE_CEILING[kind]) {
+  // Only a type the proxy already serves correctly can stream: a re-type
+  // (`contentType !== null`) means the proxy would send octet-stream, which
+  // the ticket route refuses.
+  const stream =
+    options.streaming === true &&
+    (kind === 'audio' || kind === 'video') &&
+    contentType === null &&
+    media.mimetype !== undefined &&
+    servedAsStreamable(media.mimetype)
+  if (!stream && media.size !== undefined && media.size > SIZE_CEILING[kind]) {
     return null
   }
-  return { kind, contentType }
+  return { kind, contentType, stream }
 }
 
 /** The byte ceiling for a kind — exported for the text reader's own cap. */

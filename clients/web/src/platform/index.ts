@@ -370,6 +370,19 @@ export interface Platform {
   defaultApiBaseUrl: string | null
 
   /**
+   * Turn a stream-ticket URL (`<server base>/v1/media-stream/<ticket>`) into
+   * a `src` this platform's `<video>` and `<audio>` elements can load, or
+   * `null` where they cannot load it at all (ADR 0139 § 6).
+   *
+   * The URL itself in a browser, where the server is the page's own origin.
+   * `null` in a shell until ADR 0139 phase 4: the shell CSP does not list a
+   * self-hosted server's origin in `media-src`, and a plain-http server is
+   * mixed content from the custom-scheme page. With `null`, video and audio
+   * keep the blob path and its size ceiling.
+   */
+  mediaStreamSrc: ((ticketUrl: string) => string) | null
+
+  /**
    * Set the page zoom factor (1 is 100%), or `null` where the client must not.
    *
    * `null` in a browser, which already zooms on the standard keys and keeps
@@ -630,6 +643,8 @@ export function browserPlatform(): Platform {
     appleSignIn: null,
     // Same-origin: the deployment that serves this bundle also proxies /v1.
     defaultApiBaseUrl: '/',
+    // Same origin again, so a media element loads a ticket URL as it is.
+    mediaStreamSrc: (ticketUrl) => ticketUrl,
     // A deploy replaces what this origin serves, which is what makes the
     // version manifest, the banner and the auto-reload meaningful.
     updatesFromOrigin: true,
