@@ -324,6 +324,8 @@ export function StreamPreview({
           poster={
             poster.state.status === 'ready' ? poster.state.url : undefined
           }
+          width={media.w}
+          height={media.h}
           elementRef={(el: HTMLMediaElement | null) => {
             if (el !== null) element.current = el
           }}

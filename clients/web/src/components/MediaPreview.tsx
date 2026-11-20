@@ -171,6 +171,8 @@ function BlobPreview({
         kind={kind}
         src={state.url}
         poster={poster.state.status === 'ready' ? poster.state.url : undefined}
+        width={media.w}
+        height={media.h}
         onError={() => setUnplayable(true)}
       />
     )
