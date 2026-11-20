@@ -124,7 +124,11 @@ export function createStreamTickets(deps: {
       let response: Response
       try {
         response = await probeFetch(src, {
-          headers: { Range: 'bytes=0-0' },
+          // The header tells the shell's `axon-media` scheme to ask the
+          // server rather than answer from its read-ahead window, which may
+          // still hold these bytes after the ticket has expired (ADR 0139
+          // § 7). The server ignores it.
+          headers: { Range: 'bytes=0-0', 'Axon-Stream-Probe': '1' },
           cache: 'no-store',
           referrerPolicy: 'no-referrer',
           signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
