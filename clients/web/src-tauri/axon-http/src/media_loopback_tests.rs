@@ -3,11 +3,12 @@
 //! use.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use reqwest::header::{self, HeaderMap};
 use reqwest::{Method, StatusCode, Url};
 
-use crate::media_loopback::{handle, new_token, same, Gate, Loopback, Upstream};
+use crate::media_loopback::{handle, new_token, same, serves_on, Gate, Loopback, Upstream};
 use crate::media_tests::{object, server, transport, Server, LARGE, SMALL};
 use crate::transport::Transport;
 
@@ -401,4 +402,82 @@ async fn one_listener_and_one_token_per_launch() {
     assert!(same(b"abc", b"abc"));
     assert!(!same(b"abc", b"abd"));
     assert!(!same(b"abc", b"ab"));
+}
+
+/// Wait up to 5 s for the server to stop sending every `slow` body.
+async fn released(server: &Server) -> bool {
+    let until = Instant::now() + Duration::from_secs(5);
+    while server.held() > 0 {
+        if Instant::now() > until {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    true
+}
+
+#[tokio::test]
+async fn a_player_that_hangs_up_ends_the_upstream_request() {
+    let server = server().await;
+    let prefix = loopback(&server).await;
+    // "slow" sends 320 KiB, then holds its body open: a download still
+    // running behind a slow homeserver.
+    let mut response = fetch(&format!("{prefix}slow"), &[("range", "bytes=0-")]).await;
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert!(!response.chunk().await.unwrap().unwrap().is_empty());
+    assert_eq!(server.held(), 1);
+    // As WebKitGTK does each time its buffer is full.
+    drop(response);
+    assert!(
+        released(&server).await,
+        "the upstream request outlived the player"
+    );
+}
+
+#[tokio::test]
+async fn an_upstream_body_that_stops_sending_fails_for_the_player_and_ends() {
+    let server = server().await;
+    let loopback = Loopback::with_stall(Duration::from_millis(300));
+    let prefix = loopback
+        .prefix(upstream(&server), Some(ORIGIN.to_owned()))
+        .await
+        .unwrap();
+    let started = Instant::now();
+    let response = fetch(&format!("{prefix}slow"), &[("range", "bytes=0-")]).await;
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    let read = tokio::time::timeout(Duration::from_secs(5), response.bytes())
+        .await
+        .expect("a stalled body held the player");
+    assert!(read.is_err(), "a stalled body ended cleanly");
+    assert!(started.elapsed() >= Duration::from_millis(300));
+    assert!(
+        released(&server).await,
+        "the stalled upstream request lived on"
+    );
+}
+
+#[tokio::test]
+async fn a_steady_body_slower_than_the_stall_still_arrives_whole() {
+    let server = server().await;
+    // "trickle" sends 256 KiB every 150 ms, about 2.4 s for 4 MiB, but never
+    // goes quiet for as long as the stall.
+    let loopback = Loopback::with_stall(Duration::from_millis(500));
+    let prefix = loopback
+        .prefix(upstream(&server), Some(ORIGIN.to_owned()))
+        .await
+        .unwrap();
+    let last = (4 << 20) - 1;
+    let range = format!("bytes=0-{last}");
+    let response = fetch(&format!("{prefix}trickle"), &[("range", &range)]).await;
+    assert_eq!(response.bytes().await.unwrap(), object(LARGE)[..=last]);
+}
+
+#[test]
+fn only_the_linux_shell_serves() {
+    assert!(serves_on("linux"));
+    // Android's kernel is Linux, but its WebView plays the scheme.
+    for os in ["android", "macos", "ios", "windows", "freebsd"] {
+        assert!(!serves_on(os), "{os}");
+    }
+    assert_eq!(serves_on(std::env::consts::OS), cfg!(target_os = "linux"));
 }

@@ -88,6 +88,8 @@ pub(crate) struct Gate {
     /// The page's origin, the only `Origin` accepted and the only one CORS
     /// headers name. Set by each [`Loopback::prefix`] call.
     origin: RwLock<Option<String>>,
+    /// [`STALL`], but shorter in tests.
+    stall: Duration,
 }
 
 impl Gate {
@@ -105,10 +107,32 @@ struct Listening {
 }
 
 /// The listener, started on first use.
-#[derive(Default)]
-pub struct Loopback(Mutex<Option<Listening>>);
+pub struct Loopback {
+    listening: Mutex<Option<Listening>>,
+    /// How long an upstream body may send nothing before the player's
+    /// connection is dropped: [`STALL`], but shorter in tests.
+    stall: Duration,
+}
+
+impl Default for Loopback {
+    fn default() -> Self {
+        Self {
+            listening: Mutex::default(),
+            stall: STALL,
+        }
+    }
+}
 
 impl Loopback {
+    /// A server whose responses fail after `stall` without an upstream byte.
+    #[cfg(test)]
+    pub(crate) fn with_stall(stall: Duration) -> Self {
+        Self {
+            stall,
+            ..Self::default()
+        }
+    }
+
     /// `http://127.0.0.1:<port>/<token>/`, which a ticket completes into the
     /// URL a media element loads. Binds and starts serving the first time.
     /// `origin` is the asking page's, which the server then answers CORS for.
@@ -117,7 +141,7 @@ impl Loopback {
         upstream: U,
         origin: Option<String>,
     ) -> Result<String, TransportError> {
-        let mut listening = self.0.lock().await;
+        let mut listening = self.listening.lock().await;
         if listening.is_none() {
             let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
                 .await
@@ -130,6 +154,7 @@ impl Loopback {
                 host: format!("127.0.0.1:{port}"),
                 token: new_token()?,
                 origin: RwLock::new(None),
+                stall: self.stall,
             });
             tokio::spawn(serve(listener, Arc::clone(&gate), upstream));
             *listening = Some(Listening { gate, port });
@@ -138,6 +163,14 @@ impl Loopback {
         *gate.origin.write().unwrap_or_else(PoisonError::into_inner) = origin;
         Ok(format!("http://127.0.0.1:{port}/{}/", gate.token))
     }
+}
+
+/// Whether the shell built for `os` (`std::env::consts::OS`) runs the
+/// loopback server. Only Linux does: every other shell's player loads the
+/// `axon-media` scheme, so nothing there should listen. Android is `android`,
+/// not `linux`, though its kernel is Linux.
+pub(crate) fn serves_on(os: &str) -> bool {
+    os == "linux"
 }
 
 /// 32 bytes from the system's generator, in hex.
@@ -268,7 +301,7 @@ pub(crate) async fn handle<U: Upstream, B>(
             status(StatusCode::FORBIDDEN)
         }
     } else {
-        proxy(upstream, &request, ticket).await
+        proxy(upstream, &request, ticket, gate.stall).await
     };
     if let Some(origin) = cors.and_then(|origin| HeaderValue::from_str(origin).ok()) {
         media::allow_origin(response.headers_mut(), origin);
@@ -280,6 +313,7 @@ async fn proxy<U: Upstream, B>(
     upstream: &U,
     request: &hyper::Request<B>,
     ticket: &str,
+    stall: Duration,
 ) -> hyper::Response<Body> {
     let method = request.method().clone();
     if method != Method::GET && method != Method::HEAD {
@@ -310,7 +344,7 @@ async fn proxy<U: Upstream, B>(
         body: None,
     });
     match tokio::time::timeout(DEADLINE, sent).await {
-        Ok(Ok(response)) => pass(&method, response),
+        Ok(Ok(response)) => pass(&method, response, stall),
         Ok(Err(_)) => status(StatusCode::BAD_GATEWAY),
         Err(_) => status(StatusCode::GATEWAY_TIMEOUT),
     }
@@ -318,7 +352,7 @@ async fn proxy<U: Upstream, B>(
 
 /// The upstream response as the player gets it: its status and the headers
 /// the scheme passes, with the body streamed through.
-fn pass(method: &Method, upstream: reqwest::Response) -> hyper::Response<Body> {
+fn pass(method: &Method, upstream: reqwest::Response, stall: Duration) -> hyper::Response<Body> {
     let code = upstream.status();
     // Never followed, and never handed to the player.
     if code.is_redirection() && code != StatusCode::NOT_MODIFIED {
@@ -333,7 +367,7 @@ fn pass(method: &Method, upstream: reqwest::Response) -> hyper::Response<Body> {
     let body = if *method == Method::HEAD || code == StatusCode::NOT_MODIFIED {
         Body::Empty
     } else {
-        Body::Stream(relay(upstream))
+        Body::Stream(relay(upstream, stall))
     };
     let mut response = hyper::Response::new(body);
     *response.status_mut() = code;
@@ -342,18 +376,21 @@ fn pass(method: &Method, upstream: reqwest::Response) -> hyper::Response<Body> {
 }
 
 /// Read `upstream`'s body into a channel the response body drains. Ends with
-/// an `Err` if the body fails or stalls for [`STALL`], and stops reading,
+/// an `Err` if the body fails or sends nothing for `stall`, and stops reading,
 /// which ends the upstream request, once the player hangs up. A body that
 /// ends cleanly short of its `Content-Length` needs nothing here: hyper
 /// drops the connection rather than end a response short.
-fn relay(mut upstream: reqwest::Response) -> mpsc::Receiver<Result<Bytes, std::io::Error>> {
+fn relay(
+    mut upstream: reqwest::Response,
+    stall: Duration,
+) -> mpsc::Receiver<Result<Bytes, std::io::Error>> {
     let (tx, rx) = mpsc::channel(CHUNKS_IN_FLIGHT);
     tokio::spawn(async move {
         loop {
             let chunk = tokio::select! {
                 biased;
                 () = tx.closed() => return,
-                chunk = tokio::time::timeout(STALL, upstream.chunk()) => chunk,
+                chunk = tokio::time::timeout(stall, upstream.chunk()) => chunk,
             };
             let failure = match chunk {
                 Ok(Ok(Some(bytes))) => {
@@ -382,6 +419,7 @@ impl Gate {
             host: format!("127.0.0.1:{port}"),
             token: token.to_owned(),
             origin: RwLock::new(origin.map(str::to_owned)),
+            stall: STALL,
         }
     }
 }
