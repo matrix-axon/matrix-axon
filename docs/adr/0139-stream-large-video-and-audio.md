@@ -469,10 +469,12 @@ So the 4 MiB bound never applied, and forwarding each range unchanged would cost
 
 The handler therefore no longer forwards a single-range `GET` unchanged:
 
-- A range that no held block covers fetches a block of up to 4 MiB from the range's first byte (`bytes=N-(N+4 MiB-1)`, which the server clamps at the end).
-  Later ranges inside the block are answered from memory, as `206`s with the object's total in `Content-Range`.
+- The object is read in 4 MiB blocks on a fixed grid: a range whose block is not held fetches that block (`bytes=K-(K+4 MiB-1)`, where `K` is the range's first byte rounded down to a multiple of 4 MiB, which the server clamps at the end).
+  Later ranges inside the block are answered from memory, as `206`s with the object's total in `Content-Range`, and a range that runs past the block's end gets the block's part.
 - A request waits only for its own bytes while the block goes on filling, and requests that arrive while a block is being fetched share it.
   So a 9 KB sample read does not wait for 4 MiB.
+- Once a read is served from a complete block, the next block is fetched, unless it is held or past the end.
+  That keeps one block ahead of what the player has read, and fetches nothing while the player reads nothing.
 - The window holds at most 8 blocks (32 MiB) across all tickets, drops a block unused for 60 s, and drops everything when the page reloads.
   It is memory only, so `no-store` (section 5) still means nothing reaches disk.
 - A block fetch that gets no usable `206` is not held.
@@ -481,6 +483,12 @@ The handler therefore no longer forwards a single-range `GET` unchanged:
 - A block outlives its ticket's revocation by at most its own 4 MiB, the same bound the Consequences accept for a response already in progress.
   The section 6 probe sends an `Axon-Stream-Probe` header, which the window never answers, so an expired ticket is seen as soon as the server refuses it.
   The server ignores the header.
+
+The first version started each block at the requested range's first byte.
+On production (2026-11-20), the iOS shell's audio and video reads often started a few KiB before a held block, and each such read fetched a block of its own: three overlapping 4 MiB blocks within a second, and 2.2–2.7 times the distinct bytes over a session.
+On a slow link those fetches split the connection between them, and the extra blocks pushed useful ones out of the 8.
+Blocks on the grid cannot overlap.
+The same version fetched the next block only when the player asked for it, which left the 1.4–2 s gaps seen on Windows; hence the read-ahead.
 
 A suffix range whose object length no block has learned yet, a multi-range request, a conditional request and a `HEAD` still go upstream as sent.
 Rewriting the outgoing `Range` also settles the connection-reuse question above: each block request is bounded, so the server's response ends where the handler stops reading.

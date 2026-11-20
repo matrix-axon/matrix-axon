@@ -282,15 +282,17 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                             .expect("a status and no headers"),
                     );
                 };
+                let base = base.get();
                 let response = media::respond(
                     &transport,
                     &windows,
-                    base.get(),
+                    base.clone(),
                     &request,
                     origin.as_deref(),
                 )
                 .await;
                 responder.respond(response);
+                media::read_ahead(&transport, &windows, base, &request).await;
             });
         })
         .setup(|app, _api| {
