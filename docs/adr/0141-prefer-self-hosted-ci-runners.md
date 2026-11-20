@@ -87,6 +87,29 @@ They include queue time and every job in the run, so they are rough.
 | Migrations forward-only |   25 |             3 |            13 |
 | Notify opened           |   13 |             1 |             9 |
 
+Run-level times overstate what one job costs in workflows with several jobs.
+The per-job times below come from the last 15 successful runs of each of these workflows, as of 2026-11-19.
+They measure only the time each job ran, with no queue time.
+Decision 4 uses them to choose which job holds the self-hosted slot.
+
+| Workflow and event                 | Job                            | Runs | Average (min) | Longest (min) |
+| ---------------------------------- | ------------------------------ | ---: | ------------: | ------------: |
+| Web e2e, `pull_request`            | `web-e2e (firefox)`            |   11 |           7.8 |            11 |
+|                                    | `web-e2e (webkit-desktop)`     |   11 |           7.0 |             9 |
+|                                    | `web-e2e (chromium)`           |   11 |           6.2 |             9 |
+| Web e2e, `push`                    | `web-e2e (webkit-desktop)`     |    4 |           8.8 |            11 |
+|                                    | `web-e2e-iphone`               |    4 |           8.2 |             9 |
+|                                    | `web-e2e (firefox)`            |    4 |           7.5 |             8 |
+|                                    | `web-e2e (chromium)`           |    4 |           5.8 |             8 |
+| smoke, `push`                      | `true-local`                   |    4 |          18.5 |            21 |
+|                                    | `matrix-oauth` (called)        |    4 |          14.8 |            16 |
+|                                    | `stub`                         |    4 |           1.8 |             3 |
+| smoke, `pull_request`              | `stub`                         |   11 |           0.6 |             3 |
+| Integration test, dispatch         | `matrix-oauth` (called)        |    8 |          10.6 |            14 |
+|                                    | `integration`                  |    7 |           6.1 |             7 |
+
+`gap-fill` had no successful run in that window.
+
 ### What already assumes a hosted runner
 
 - **`.github/actions/install-playwright`** rewrites the runner's apt sources file in place and runs `playwright install-deps` under `sudo`.
@@ -119,14 +142,19 @@ A caller adds a `pick` job and makes the heavy job depend on it:
 jobs:
   pick:
     uses: ./.github/workflows/pick-runner.yml
-    secrets: inherit
+    secrets:
+      RUNNER_PICKER_PRIVATE_KEY: # the expression secrets.RUNNER_PICKER_PRIVATE_KEY
 
   lint-and-test:
     needs: pick
     runs-on: # the expression fromJSON(needs.pick.outputs.linux)
 ```
 
-The comment stands in for the real expression, which this page cannot spell out: the site's Jekyll build would read the expression delimiters as Liquid (`scripts/check-liquid.sh`).
+Each comment stands in for the real expression, which this page cannot spell out: the site's Jekyll build would read the expression delimiters as Liquid (`scripts/check-liquid.sh`).
+
+The caller passes the picker exactly one secret, by name, rather than `secrets: inherit`, which would hand it every repository secret.
+The App's ID is not a secret.
+It lives in the repository variable `RUNNER_PICKER_APP_ID`, which the called workflow reads directly.
 
 `outputs.linux` is either `["self-hosted","axon-linux"]` or `"ubuntu-latest"`.
 `outputs.macos` is either `["self-hosted","axon-macos"]` or the job's hosted image.
@@ -138,12 +166,19 @@ The picker returns the self-hosted value only when all of these hold, checked in
    This is the kill switch for maintenance or an incident, and it takes effect without a commit.
 2. **The event is trusted.**
    Allowed events are `push`, `schedule`, `workflow_dispatch` and a `pull_request` whose head repository is this repository.
-   Everything else falls back, including fork PRs, `pull_request_target`, and Dependabot, which runs without the token secret.
+   Everything else falls back, including fork PRs and `pull_request_target`.
+   So does any run whose `github.actor` is `dependabot[bot]`.
+   GitHub withholds Actions secrets from those runs, so the picker could not authenticate anyway.
+   Its PRs come from branches in this repository, so the head-repository test alone would let them through to check 3.
 3. **The token secret is present.**
-4. **The pool's runner is `online` and not `busy`.**
-   The picker finds it by its custom label in `GET /orgs/matrix-axon/actions/runners`.
-5. **No job in this repository is already queued for that label.**
-   The picker lists the queued and in-progress runs, then their queued jobs' `labels`.
+   Every event that reaches this check is one that GitHub gives secrets to, so a missing secret here means a misconfiguration (see decision 2's warning).
+4. **More runners with the pool's label are idle than there are jobs already waiting for them.**
+   - The picker counts the runners in `GET /orgs/matrix-axon/actions/runners` that carry the label and are `online` and not `busy`.
+   - It counts the jobs in this repository that are queued for the label, by listing the queued and in-progress runs, then their queued jobs' `labels`.
+   - The pool is free only when the first count is larger than the second.
+
+   With one runner instance, that means the runner is idle and nothing is waiting for it.
+   With several, the rule holds without change, so a second instance (Open questions) needs no new logic.
 
 Any API error, timeout or unexpected response falls back.
 The step that makes the decision cannot fail the job: it writes the fallback output first and overwrites it only on a positive answer.
@@ -177,7 +212,8 @@ What decided it is how the picker fails: when the token stops working, every job
 Nothing turns red, so an expired PAT would show up only as CI getting slower.
 A fine-grained PAT stays the fallback if the App ever cannot be used.
 
-Whatever the token, the picker emits a `::warning::` annotation when the runners API rejects it (401 or 403) or the secret is missing on a trusted event.
+Whatever the token, the picker emits a `::warning::` annotation when the runners API rejects it (401 or 403) or the secret is missing on an event that passed decision 1's check 2.
+Dependabot runs never reach that check (decision 1, check 2), so they cannot raise a false warning.
 A broken token then shows on every run's summary.
 An offline or busy runner is the normal case and gets no warning.
 
@@ -192,11 +228,27 @@ A Linux job falls back only to a hosted Linux image, and a macOS job only to a h
 ### 4. One self-hosted slot per workflow run
 
 A single picker output is shared by every job that reads it.
-If each lane of a matrix read it, all the lanes would queue on one runner and finish one after another, later than on parallel hosted runners.
+If several jobs or matrix lanes read it, they would all queue on one runner and finish one after another, later than on parallel hosted runners.
 So in each workflow run, exactly one job, or one matrix lane, uses the pool's output.
-For `web-e2e.yml`, the lane's `runs-on` is the expression `matrix.project == 'webkit-desktop' && fromJSON(needs.pick.outputs.linux) || 'ubuntu-latest'`.
+Every other job in the run keeps its hosted `runs-on`.
 
-The lane given the slot is the one measured as slowest during the pilot.
+**Reusable workflows count against the caller's slot.**
+A reusable workflow that a long workflow calls (`matrix-oauth.yml`) does not run a picker of its own.
+It takes its `runs-on` as an input whose default is its hosted image.
+The caller passes the pool's output only when the called job is the one holding the slot.
+
+**Who holds the slot.**
+The holder is the longest job that runs in that run, from the per-job times in Context:
+
+| Workflow          | Slot holder                                                       | Why                                                                                                                        |
+| ----------------- | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `web-e2e.yml`     | the `firefox` lane                                                | Longest lane on pull requests, where most runs happen. The lanes differ by under two minutes, so the choice matters little. |
+| `smoke.yml`       | `true-local`, on pushes and schedules                             | 18.5 min, against 14.8 for the called `matrix-oauth`, which stays hosted. `stub` takes under a minute and stays hosted.    |
+| `integration.yml` | the one suite the dispatch selects; with `all`, `matrix-oauth`    | One dispatch normally runs one suite. With `all`, `matrix-oauth` (10.6 min) is longer than `integration` (6.1 min).         |
+| all others        | their one moving job                                              | —                                                                                                                          |
+
+For `web-e2e.yml`, the lane's `runs-on` is the expression `matrix.project == 'firefox' && fromJSON(needs.pick.outputs.linux) || 'ubuntu-latest'`.
+Before each workflow moves (decision 8), its holder is checked against current job timings, in case they have shifted.
 
 ### 5. Which jobs move
 
@@ -207,13 +259,13 @@ Jobs marked "Docker" need the rootless daemon from decision 6, so they move only
 | Workflow                | Job                       | Notes                                                                                                                         |
 | ----------------------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | `lint-and-clippy.yml`   | `lint-and-test`           | On every PR and every push to `main`. Needs no Docker and no system packages. The pilot.                                      |
-| `web-e2e.yml`           | one `web-e2e` lane        | Runs in the Playwright container image (decision 6), so the host's Ubuntu 26.04 does not matter. Docker.                      |
+| `web-e2e.yml`           | the `firefox` lane        | Runs in the Playwright container image (decision 6), so the host's Ubuntu 26.04 does not matter. Docker.                      |
 | `android-build.yml`     | `build`                   | Needs an Android SDK owned by the runner account; `sdkmanager` adds the pinned NDK to it.                                     |
 | `embed-web.yml`         | `embed-web`               | Docker. Needs a dynamic service port, since the host's own Postgres holds 5432.                                               |
 | `postgres-tests.yml`    | `postgres-tests`          | Scheduled. Docker, with a dynamic service port.                                                                               |
-| `smoke.yml`             | `stub`, `true-local`      | One slot per run, so `stub` on PRs and `true-local` on pushes and schedules. `true-local` is Docker.                          |
-| `matrix-oauth.yml`      | `matrix-oauth`            | Reusable, called from `smoke.yml` and `integration.yml`. Docker; pulls from ghcr.                                             |
-| `integration.yml`       | `integration`, `gap-fill` | Dispatch only. Docker, with the compose isolation in decision 6, since the host's own Synapse holds 8008.                     |
+| `smoke.yml`             | `true-local`              | Pushes and schedules. Docker. `stub` stays hosted: it takes under a minute.                                                   |
+| `matrix-oauth.yml`      | `matrix-oauth`            | Reusable. Gains a `runs-on` input (decision 4), which only `integration.yml` sets to the pool value. Docker; pulls from ghcr.  |
+| `integration.yml`       | one of `integration`, `gap-fill`, `matrix-oauth` | Dispatch only; the slot holder from decision 4. Docker, with the compose isolation in decision 6, since services unrelated to CI hold 8008. |
 | `desktop-build.yml`     | `checks`                  | Its apt packages are installed on the runner (decision 6). Ubuntu 26.04's webkit2gtk is newer than the hosted image's; `checks` only compiles and lints against it. |
 
 **macOS pool (`axon-macos`):**
@@ -324,8 +376,11 @@ A dedicated machine or VM comes first if either of these ever changes:
    For each run, record which pool the picker chose, why, the queue time, and the job time.
    The picker writes all of this to its step summary.
 3. **The remaining jobs in decision 5**, in a few PRs grouped by the decision 6 changes they need:
-   - jobs that need no Docker: `ios-sharing`, `smoke` `stub`, `desktop-build` `checks`, and `android-build` once the runner account has its SDK;
+   - jobs that need no Docker: `ios-sharing`, `desktop-build` `checks`, and `android-build` once the runner account has its SDK;
    - jobs that need Docker, after the runner account's rootless daemon is in place.
+
+   Before each of these PRs, re-read the moving workflow's per-job times from its recent runs (`gh api .../actions/runs/<id>/jobs`).
+   Confirm or change its slot holder (decision 4) in that PR.
 4. **Only if the pilot shows the need:**
    - **A sweeper.** A scheduled workflow that cancels any run whose job has waited for a self-hosted label longer than N minutes, then re-runs the whole run so the picker chooses again.
    - **Warm build state on the runners**, such as a local sccache, if restoring `actions/cache` over a home connection eats the gain.
