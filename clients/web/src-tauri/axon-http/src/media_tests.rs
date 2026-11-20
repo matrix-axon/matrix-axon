@@ -1207,14 +1207,21 @@ async fn a_full_window_drops_a_complete_block_before_one_still_arriving() {
 // ===== review round 2 =====
 
 #[tokio::test]
-async fn a_window_full_of_arriving_blocks_sends_the_next_request_upstream() {
+async fn a_window_full_of_waited_on_blocks_sends_the_next_request_upstream() {
     let server = server().await;
     let player = Player::new(&server);
-    // Every block held is still arriving, with requests free to wait on it.
+    // Every block held is still arriving, and a request waits on each for
+    // bytes "slow" has not sent.
+    let mut parked = Vec::new();
     for i in 0..MAX_BLOCKS {
         let ticket = format!("slow{i}");
         assert_partial(&player.range(&ticket, "bytes=0-99").await, 0, 100, LARGE);
+        let player = Arc::clone(&player);
+        parked.push(tokio::spawn(async move {
+            player.range(&ticket, "bytes=1000000-1000099").await
+        }));
     }
+    tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(player.windows.len(), MAX_BLOCKS);
     // Another object's request is answered, but not from a block of its own.
     assert_partial(&player.range(TICKET, "bytes=0-99").await, 0, 100, LARGE);
@@ -1233,6 +1240,44 @@ async fn a_window_full_of_arriving_blocks_sends_the_next_request_upstream() {
         );
     }
     assert_eq!(server.seen().len(), before);
+    // The waiting requests were never failed to make room.
+    for task in parked {
+        assert!(!task.is_finished());
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn a_full_window_drops_an_arriving_block_no_request_waits_on() {
+    let server = server().await;
+    let player = Player::new(&server);
+    // Arriving, with nothing waiting on them once each read is answered: as a
+    // seek leaves the block it moved away from.
+    for i in 0..MAX_BLOCKS {
+        let ticket = format!("slow{i}");
+        assert_partial(&player.range(&ticket, "bytes=0-99").await, 0, 100, LARGE);
+    }
+    assert_eq!(player.windows.len(), MAX_BLOCKS);
+    // Another object gets a block of its own, in place of the least recently
+    // used of them.
+    assert_partial(&player.range(TICKET, "bytes=0-99").await, 0, 100, LARGE);
+    assert_eq!(
+        upstream_ranges(&server).last().unwrap(),
+        &format!("bytes=0-{}", BLOCK - 1)
+    );
+    assert_eq!(player.windows.len(), MAX_BLOCKS);
+    let fetches = |ticket: &str| {
+        server
+            .seen()
+            .iter()
+            .filter(|(path, _)| path.ends_with(&format!("/{ticket}")))
+            .count()
+    };
+    // The dropped block is fetched anew; the rest still serve from memory.
+    player.range("slow0", "bytes=100-199").await;
+    assert_eq!(fetches("slow0"), 2);
+    player.range("slow7", "bytes=100-199").await;
+    assert_eq!(fetches("slow7"), 1);
 }
 
 #[tokio::test]

@@ -481,8 +481,8 @@ The handler therefore no longer forwards a single-range `GET` unchanged:
 - Once a read is served from a complete block, the next block is fetched, unless it is held or past the end.
   That keeps one block ahead of what the player has read, and fetches nothing while the player reads nothing.
 - The window holds at most 8 blocks (32 MiB) across all tickets, drops a complete block unused for 60 s, and drops everything when the page reloads.
-  To make room it drops the least recently used complete block, never one still arriving, since requests may be waiting on it.
-  When all 8 are still arriving, a request for another block goes upstream as sent.
+  To make room it drops the least recently used complete block, or else the least recently used block still arriving that no request is waiting on, such as one a seek moved away from.
+  It never drops a block a request is waiting on; when all 8 have one, a request for another block goes upstream as sent.
   It is memory only, so `no-store` (section 5) still means nothing reaches disk.
 - A block fetch fails once it receives nothing for 30 s, however long the whole block takes, so a slow but steady link still fills it.
 - A block fetch that gets no usable `206` is not held.
