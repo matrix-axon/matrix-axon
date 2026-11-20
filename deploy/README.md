@@ -294,7 +294,11 @@ automatically.
 - **Logs:** `docker compose logs -f axon-server`
 - **Graceful shutdown:** `docker compose stop axon-server` (SIGTERM → clean drain)
 - **Upgrade:** rebuild the image and recreate: `docker compose up -d --build axon-server`
-  (or, for prebuilt images, `docker compose pull && docker compose up -d`)
+  (or, for prebuilt images, `docker compose pull && docker compose up -d`). If
+  `web` or `caddy` then fails to start with `failed to write sysctl
+net.ipv4.tcp_congestion_control`, see
+  [Network tuning](../docs/server-admin.md#network-tuning): Linux older than 4.15
+  (some NAS systems) needs an override that removes the setting.
 - **Slow video or downloads for some clients:** see
   [Network tuning](../docs/server-admin.md#network-tuning). Behind a reverse proxy
   on the host, set BBR on the host itself.
