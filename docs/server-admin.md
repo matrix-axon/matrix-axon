@@ -174,13 +174,25 @@ Axon's connection to the proxy is local and gains nothing; its connection to a d
 
 **Docker stack.**
 The `web` and `caddy` containers already use BBR for the connections that end in them, through a per-container `sysctls` setting, and the kernel loads its BBR module when they start.
-If either container fails to start with `failed to write sysctl net.ipv4.tcp_congestion_control`, the container could not use BBR, for one of these reasons:
+If either container fails to start with `failed to write sysctl net.ipv4.tcp_congestion_control`, the cause and fix depend on the host (`uname -r` gives the kernel version):
 
-- The host kernel has no BBR. It arrived in Linux 4.9, and per-container settings in 4.15; some NAS kernels are older or leave it out.
-- The runtime cannot load the module. Rootless Docker and Podman cannot, so BBR works there only if the host has already loaded `tcp_bbr`.
+- **Linux older than 4.15.** The setting belongs to the whole host, not to each container, so a container cannot write it at all, whatever the value; `cubic` fails too.
+  Several NAS systems run such kernels; Synology DSM 7, for example, uses 4.4 on many models.
+  Remove the setting instead: create `docker-compose.override.yml` next to `docker-compose.yml` with
 
-Set `AXON_TCP_CONGESTION_CONTROL=cubic` in `.env` to start without it.
-A runtime that refuses container `sysctls` altogether needs them removed instead: in `docker-compose.override.yml`, give `web` and `caddy` each `sysctls: !reset {}` (Compose 2.24 or later).
+  ```yaml
+  services:
+    web:
+      sysctls: !reset {}
+    caddy:
+      sysctls: !reset {}
+  ```
+
+  (Compose 2.24 or later; it works with or without the `caddy` profile).
+  The same override suits a runtime that refuses container `sysctls` altogether.
+
+- **Linux 4.15 or later without BBR**, a kernel built without it: set `AXON_TCP_CONGESTION_CONTROL=cubic` in `.env`.
+- **Rootless Docker or Podman**, which cannot load the BBR module: set `AXON_TCP_CONGESTION_CONTROL=cubic`, or load `tcp_bbr` on the host first.
 
 Some connections reach the published port without ending in the container, and they keep the host's setting:
 
