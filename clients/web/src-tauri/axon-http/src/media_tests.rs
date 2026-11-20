@@ -84,6 +84,21 @@ fn body(chunks: Vec<Bytes>, end: Option<Result<(), ()>>) -> ChannelBody {
     ChannelBody(rx)
 }
 
+/// Feed `chunks` into a body `gap` apart, then close it: a slow but steady
+/// link.
+fn paced(chunks: Vec<Bytes>, gap: Duration) -> ChannelBody {
+    let (tx, rx) = mpsc::channel(1);
+    tokio::spawn(async move {
+        for chunk in chunks {
+            tokio::time::sleep(gap).await;
+            if tx.send(Ok(chunk)).await.is_err() {
+                return;
+            }
+        }
+    });
+    ChannelBody(rx)
+}
+
 /// Split a body into 64 KiB chunks, as a streamed response arrives.
 fn chunks(bytes: &[u8]) -> Vec<Bytes> {
     bytes.chunks(64 << 10).map(Bytes::copy_from_slice).collect()
@@ -206,23 +221,32 @@ fn answer(ticket: &str, headers: &HeaderMap) -> hyper::Response<ChannelBody> {
         last = len - 1;
     }
     let slice = &whole[first..=last];
+    let builder = builder
+        .status(206)
+        .header(header::CONTENT_RANGE, format!("bytes {first}-{last}/{len}"))
+        .header(header::CONTENT_LENGTH, slice.len());
+    // The whole slice, 256 KiB every 150 ms.
+    if ticket == "trickle" {
+        let sent = slice
+            .chunks(256 << 10)
+            .map(Bytes::copy_from_slice)
+            .collect();
+        return builder
+            .body(paced(sent, Duration::from_millis(150)))
+            .unwrap();
+    }
     let (sent, end) = match ticket {
         // The server's abort at the withheld tail (ADR 0139 § 3): some bytes,
         // then the body fails.
         "tampered" => (chunks(&slice[..slice.len().min(512 << 10)]), Some(Err(()))),
         // A download still running behind a slow homeserver: 320 KiB, then
-        // nothing more for now.
-        "slow" => (chunks(&slice[..320 << 10]), None),
+        // nothing more for now. `slow1`, `slow2` and so on are more of them.
+        t if t.starts_with("slow") => (chunks(&slice[..slice.len().min(320 << 10)]), None),
         // Ends cleanly but short of its own Content-Length.
         "short" => (chunks(&slice[..slice.len() / 2]), Some(Ok(()))),
         _ => (chunks(slice), Some(Ok(()))),
     };
-    builder
-        .status(206)
-        .header(header::CONTENT_RANGE, format!("bytes {first}-{last}/{len}"))
-        .header(header::CONTENT_LENGTH, slice.len())
-        .body(body(sent, end))
-        .unwrap()
+    builder.body(body(sent, end)).unwrap()
 }
 
 async fn server() -> Server {
@@ -663,9 +687,13 @@ struct Player {
 
 impl Player {
     fn new(server: &Server) -> Arc<Self> {
+        Self::with_windows(server, MediaWindows::default())
+    }
+
+    fn with_windows(server: &Server, windows: MediaWindows) -> Arc<Self> {
         Arc::new(Self {
             transport: transport(),
-            windows: MediaWindows::default(),
+            windows,
             base: server.base(),
         })
     }
@@ -1174,4 +1202,106 @@ async fn a_full_window_drops_a_complete_block_before_one_still_arriving() {
         LARGE,
     );
     assert_eq!(slow_fetches(&server), 1, "the arriving block was dropped");
+}
+
+// ===== review round 2 =====
+
+#[tokio::test]
+async fn a_window_full_of_arriving_blocks_sends_the_next_request_upstream() {
+    let server = server().await;
+    let player = Player::new(&server);
+    // Every block held is still arriving, with requests free to wait on it.
+    for i in 0..MAX_BLOCKS {
+        let ticket = format!("slow{i}");
+        assert_partial(&player.range(&ticket, "bytes=0-99").await, 0, 100, LARGE);
+    }
+    assert_eq!(player.windows.len(), MAX_BLOCKS);
+    // Another object's request is answered, but not from a block of its own.
+    assert_partial(&player.range(TICKET, "bytes=0-99").await, 0, 100, LARGE);
+    assert_eq!(upstream_ranges(&server).last().unwrap(), "bytes=0-99");
+    assert_eq!(player.windows.len(), MAX_BLOCKS);
+    // No arriving block was dropped for it: each still serves its own bytes
+    // without asking again.
+    let before = server.seen().len();
+    for i in 0..MAX_BLOCKS {
+        let ticket = format!("slow{i}");
+        assert_partial(
+            &player.range(&ticket, "bytes=100-199").await,
+            100,
+            100,
+            LARGE,
+        );
+    }
+    assert_eq!(server.seen().len(), before);
+}
+
+#[tokio::test]
+async fn a_closed_range_to_the_blocks_end_returns_early_on_a_slow_link() {
+    let server = server().await;
+    let player = Player::new(&server);
+    // "slow" sends 320 KiB of each block and then holds. Each range reaches
+    // or passes its block's end, the last block's being the object's.
+    for (first, last) in [(0, BLOCK - 1), (BLOCK, 3 * BLOCK), (2 * BLOCK, LARGE - 1)] {
+        let started = Instant::now();
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            player.range("slow", &format!("bytes={first}-{last}")),
+        )
+        .await
+        .expect("waited for the whole block");
+        assert_partial(&response, first, 320 << 10, LARGE);
+        assert!(started.elapsed() >= media::EARLY_AFTER);
+    }
+}
+
+#[tokio::test]
+async fn a_closed_range_short_of_the_blocks_end_still_waits_for_its_bytes() {
+    let server = server().await;
+    let player = Player::new(&server);
+    // Past the 320 KiB "slow" has sent, and short of the block's end.
+    let waiting = tokio::time::timeout(
+        media::EARLY_AFTER + Duration::from_secs(1),
+        player.range("slow", "bytes=0-399999"),
+    )
+    .await;
+    assert!(waiting.is_err(), "answered before its bytes arrived");
+}
+
+#[tokio::test]
+async fn a_slow_but_steady_block_fills_however_long_it_takes() {
+    let server = server().await;
+    // "trickle" takes about 2.4 s for a block, far past this stall, but
+    // never stops sending for longer than 150 ms.
+    let player = Player::with_windows(
+        &server,
+        MediaWindows::with_stall(Duration::from_millis(500)),
+    );
+    let last = BLOCK - 1;
+    assert_partial(
+        &player
+            .range("trickle", &format!("bytes={last}-{last}"))
+            .await,
+        last,
+        1,
+        LARGE,
+    );
+    assert_eq!(server.seen().len(), 1);
+}
+
+#[tokio::test]
+async fn a_block_that_stops_sending_fails_after_the_stall() {
+    let server = server().await;
+    let player = Player::with_windows(
+        &server,
+        MediaWindows::with_stall(Duration::from_millis(300)),
+    );
+    // "slow" sends 320 KiB of the block and then holds.
+    assert_partial(&player.range("slow", "bytes=0-99").await, 0, 100, LARGE);
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        player.range("slow", "bytes=1000000-1000099"),
+    )
+    .await
+    .expect("a stalled block held its request");
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
 }

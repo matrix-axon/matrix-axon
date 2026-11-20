@@ -22,8 +22,13 @@
 //!   block for them. That keeps at most one block ahead of what the player has
 //!   read, and nothing is fetched while it reads nothing.
 //! - Plaintext stays in memory, never on disk, as the server's `no-store`
-//!   asks. At most [`MAX_BLOCKS`] blocks are held, and a block unused for
-//!   [`IDLE`] is dropped, as is everything when the page reloads.
+//!   asks. At most [`MAX_BLOCKS`] blocks are held, and a complete block
+//!   unused for [`IDLE`] is dropped, as is everything when the page reloads.
+//!   A block still arriving is never dropped to make room, since requests
+//!   may be waiting on it: when every block held is still arriving, a request
+//!   for another goes upstream as it is.
+//! - A block whose upstream sends nothing for [`STALL`] fails, however long
+//!   its whole fetch has taken, so a slow but steady link still fills it.
 //! - A block outlives its ticket's revocation by at most its own bytes, the
 //!   same bound ADR 0139 § 7 accepts for a response already in progress. The
 //!   page's stall probe never reads from a block, so an expired ticket is
@@ -45,8 +50,11 @@ use crate::transport::{Outgoing, Transport};
 /// The most blocks held at once, across every ticket: 32 MiB at most.
 pub(crate) const MAX_BLOCKS: usize = 8;
 
-/// A block nothing has read from for this long is dropped.
+/// A complete block nothing has read from for this long is dropped.
 pub(crate) const IDLE: Duration = Duration::from_secs(60);
+
+/// A block's fetch that receives nothing for this long fails.
+pub(crate) const STALL: Duration = Duration::from_secs(30);
 
 /// The start of the block that holds byte `at`.
 pub(crate) fn block_start(at: u64) -> u64 {
@@ -174,12 +182,31 @@ pub(crate) enum Outcome {
     Bypass,
 }
 
-#[derive(Default)]
 pub struct MediaWindows {
     blocks: Mutex<Vec<Arc<Block>>>,
+    /// [`STALL`], but shorter in tests.
+    stall: Duration,
+}
+
+impl Default for MediaWindows {
+    fn default() -> Self {
+        Self {
+            blocks: Mutex::default(),
+            stall: STALL,
+        }
+    }
 }
 
 impl MediaWindows {
+    /// A window whose fetches fail after `stall` without a byte.
+    #[cfg(test)]
+    pub(crate) fn with_stall(stall: Duration) -> Self {
+        Self {
+            stall,
+            ..Self::default()
+        }
+    }
+
     /// Drop every block, as when the page that loaded them goes away.
     pub(crate) fn clear(&self) {
         for block in lock(&self.blocks).drain(..) {
@@ -204,18 +231,21 @@ impl MediaWindows {
     /// The live block of `ticket` starting at `start`, or else a new one in
     /// its place, with whether it is new and so the caller's to fetch. One
     /// lock covers both, so requests that arrive together share one block.
-    fn claim(&self, ticket: &str, start: u64) -> (Arc<Block>, bool) {
+    /// `None` when there is no room for a new one.
+    fn claim(&self, ticket: &str, start: u64) -> Option<(Arc<Block>, bool)> {
         let mut blocks = lock(&self.blocks);
         if let Some(block) = blocks
             .iter()
             .find(|block| block.ticket == ticket && block.first == start && block.live())
         {
-            return (Arc::clone(block), false);
+            return Some((Arc::clone(block), false));
+        }
+        if !make_room(&mut blocks) {
+            return None;
         }
         let block = Arc::new(Block::new(ticket, start));
-        make_room(&mut blocks);
         blocks.push(Arc::clone(&block));
-        (block, true)
+        Some((block, true))
     }
 
     /// The first byte `spec` asks for, if it can be known here.
@@ -253,7 +283,10 @@ impl MediaWindows {
         let Some(first) = self.first_of(ticket, spec) else {
             return Outcome::Bypass;
         };
-        let (block, new) = self.claim(ticket, block_start(first));
+        // Every block held is still arriving: no room for this one.
+        let Some((block, new)) = self.claim(ticket, block_start(first)) else {
+            return Outcome::Bypass;
+        };
         if new {
             match self.fetch(transport, url, &block).await {
                 Ok(()) => {}
@@ -295,7 +328,9 @@ impl MediaWindows {
         if total.is_some_and(|total| next >= total) {
             return;
         }
-        let (block, new) = self.claim(ticket, next);
+        let Some((block, new)) = self.claim(ticket, next) else {
+            return;
+        };
         if new {
             // A refusal reaches the player when it asks for these bytes
             // itself.
@@ -366,23 +401,20 @@ impl MediaWindows {
             state.bytes.reserve_exact((last - first) as usize + 1);
         });
         unsettled.0 = None;
-        tokio::spawn(fill(Arc::clone(block), response));
+        tokio::spawn(fill(Arc::clone(block), response, self.stall));
         Ok(())
     }
 
     /// Wait for the bytes `spec` needs from `block`, then answer with them.
     async fn read(&self, block: &Arc<Block>, spec: Spec, first: u64) -> Outcome {
-        // An open range takes the rest of the block, but returns early on a
-        // slow link, as a direct response does.
-        let open = !matches!(spec, Spec::Closed(..));
         let early_at = Instant::now() + EARLY_AFTER;
         loop {
             let changed = block.changed.notified();
-            match self.decide(block, spec, first, open, early_at) {
+            match self.decide(block, spec, first, early_at) {
                 Some(outcome) => return outcome,
                 // Wake at the early deadline too, in case nothing more comes.
                 // Past it, the next chunk is what can change the answer.
-                None if open && Instant::now() < early_at => {
+                None if Instant::now() < early_at => {
                     let _ = tokio::time::timeout_at(early_at, changed).await;
                 }
                 None => changed.await,
@@ -392,14 +424,7 @@ impl MediaWindows {
 
     /// What `read` does with the block as it stands: answer, or (`None`)
     /// wait for it to change.
-    fn decide(
-        &self,
-        block: &Block,
-        spec: Spec,
-        first: u64,
-        open: bool,
-        early_at: Instant,
-    ) -> Option<Outcome> {
+    fn decide(&self, block: &Block, spec: Spec, first: u64, early_at: Instant) -> Option<Outcome> {
         let mut state = lock(&block.state);
         state.used = Instant::now();
         if state.phase == Phase::Head {
@@ -423,6 +448,10 @@ impl MediaWindows {
             // Failed, or ended, before the bytes this request needs.
             return Some(Outcome::Served(media::bad_gateway()));
         }
+        // A range that takes the rest of the block, open or closed at or past
+        // its end (AVFoundation's `bytes=0-<length - 1>` over http), returns
+        // early on a slow link, as a direct response does.
+        let open = !matches!(spec, Spec::Closed(_, last) if last < state.last);
         let have = arrived.saturating_sub(first) as usize;
         if open && have >= EARLY_MIN && Instant::now() >= early_at {
             return Some(Outcome::Served(answer(
@@ -437,13 +466,13 @@ impl MediaWindows {
 }
 
 /// Before a new block joins `blocks`, drop the failed ones and complete ones
-/// unused for [`IDLE`], and then, while at the limit, the least recently used,
-/// complete blocks first.
+/// unused for [`IDLE`], and then, while at the limit, the least recently used
+/// complete one. Whether that left room for it.
 ///
-/// A block still fetching is never idle: requests parked on it do not touch
-/// `used` until bytes arrive, and `fill`'s own deadline ends a fetch that
-/// stops sending.
-fn make_room(blocks: &mut Vec<Arc<Block>>) {
+/// A block still fetching is never dropped here: requests parked on it do not
+/// touch `used` until bytes arrive, and would be failed for nothing. `fill`
+/// ends a fetch that stops sending ([`STALL`]).
+fn make_room(blocks: &mut Vec<Arc<Block>>) -> bool {
     let now = Instant::now();
     blocks.retain(|held| {
         let state = lock(&held.state);
@@ -462,16 +491,18 @@ fn make_room(blocks: &mut Vec<Arc<Block>>) {
         let Some(oldest) = blocks
             .iter()
             .enumerate()
-            .min_by_key(|(_, held)| {
+            .filter_map(|(i, held)| {
                 let state = lock(&held.state);
-                (state.phase != Phase::Done, state.used)
+                (state.phase == Phase::Done).then_some((state.used, i))
             })
-            .map(|(i, _)| i)
+            .min()
+            .map(|(_, i)| i)
         else {
-            break;
+            return false;
         };
         blocks.remove(oldest).cancel.cancel();
     }
+    true
 }
 
 /// A block whose fetch has not yet got a usable `206`: refused and dropped
@@ -507,13 +538,13 @@ fn answer(state: &State, start: u64, from: u64, to: u64) -> Response<Vec<u8>> {
 }
 
 /// Read the rest of a block's body in the background, waking readers as
-/// bytes arrive. Ends when the block is complete, fails, or is dropped.
-async fn fill(block: Arc<Block>, mut response: reqwest::Response) {
+/// bytes arrive. Ends when the block is complete, fails, is dropped, or gets
+/// nothing for `stall`.
+async fn fill(block: Arc<Block>, mut response: reqwest::Response, stall: Duration) {
     let want = {
         let state = lock(&block.state);
         (state.last - block.first + 1) as usize
     };
-    let deadline = Instant::now() + media::DEADLINE;
     loop {
         let chunk = tokio::select! {
             biased;
@@ -527,7 +558,7 @@ async fn fill(block: Arc<Block>, mut response: reqwest::Response) {
                 });
                 return;
             }
-            chunk = tokio::time::timeout_at(deadline, response.chunk()) => chunk,
+            chunk = tokio::time::timeout(stall, response.chunk()) => chunk,
         };
         let mut done = false;
         block.update(|state| match chunk {
@@ -539,7 +570,7 @@ async fn fill(block: Arc<Block>, mut response: reqwest::Response) {
                     done = true;
                 }
             }
-            // Ended short, failed, or ran out of time: the bytes so far
+            // Ended short, failed, or stalled: the bytes so far
             // still serve the requests they cover.
             _ => {
                 state.phase = Phase::Failed;
