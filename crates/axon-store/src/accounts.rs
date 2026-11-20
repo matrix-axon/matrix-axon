@@ -147,10 +147,12 @@ pub struct Account {
     pub state: AccountState,
     /// Whether axon's own device is currently cross-signed (orthogonal to
     /// [`state`](Self::state)). Derived from the SDK's cross-signing state and kept
-    /// fresh by the sync engine's verification watcher (ADR 0026), written via
-    /// [`Store::set_account_verified`]; `false` for a never-verified or
-    /// not-yet-synced device.
+    /// fresh by the sync engine's verification watcher (ADR 0026). Starts
+    /// `false` for a fresh or not-yet-synced device.
     pub verified: bool,
+    /// Whether Axon's device still needs to be cross-signed after a master-key
+    /// replacement (ADR 0136).
+    pub own_identity_changed: bool,
     /// Durable intent that a megolm backup enable/export is in flight (ADR 0098).
     /// Set true before `recovery().enable_backup()`; cleared only after
     /// `export_secrets` succeeds. Crash-resume uses this plus this device's
@@ -178,6 +180,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for Account {
             auth_kind: AccountAuthKind::from_db(&auth_kind)?,
             state: AccountState::from_db(&state)?,
             verified: row.try_get("verified")?,
+            own_identity_changed: row.try_get("own_identity_changed")?,
             backup_enable_intent: row.try_get("backup_enable_intent")?,
             sync_token: row.try_get("sync_token")?,
             created_at: row.try_get("created_at")?,
@@ -188,7 +191,21 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for Account {
 
 /// Columns selected for an [`Account`] (no encrypted token).
 pub(crate) const ACCOUNT_COLUMNS: &str = "account_id, user_id, homeserver_url, device_id, \
-    auth_kind, state, verified, backup_enable_intent, sync_token, created_at, updated_at";
+    auth_kind, state, verified, own_identity_changed, backup_enable_intent, sync_token, \
+    created_at, updated_at";
+
+const ACCOUNT_VERIFICATION_DIFF: &str = "verified IS DISTINCT FROM $2 \
+    OR ($3 IS NOT NULL AND (own_identity_master_key IS DISTINCT FROM $3 \
+        OR (own_identity_changed AND $2)))";
+
+/// Changes in the durable own-identity observation (ADR 0136).
+#[derive(Debug)]
+pub struct OwnIdentityUpdate {
+    pub own_identity_changed: bool,
+    pub was_identity_changed: bool,
+    /// A known master key was replaced, even if the new key already signs the device.
+    pub identity_replaced: bool,
+}
 
 impl Store {
     /// Insert the account for `(user_id, homeserver_url)`, or return the
@@ -333,13 +350,9 @@ impl Store {
         Ok(())
     }
 
-    /// Set whether axon's own device is currently cross-signed (ADR 0026),
-    /// orthogonal to lifecycle [`state`](Account::state). Unlike `state` this is a
-    /// *derived* value, not a verb-driven transition: it is re-derived from the
-    /// SDK's current cross-signing state (after `recover`/`verify` and whenever the
-    /// SDK's verification state changes) and written here, so the column tracks
-    /// reality rather than being written once. The `updated_at` trigger maintains
-    /// the timestamp.
+    /// Set device verification independently of the cross-signing identity.
+    /// Logout uses this to reset verification while retaining the account's
+    /// identity history.
     pub async fn set_account_verified(
         &self,
         account_id: Uuid,
@@ -351,6 +364,79 @@ impl Store {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Read-only preflight for the periodic recheck. A positive result must
+    /// be followed by a fresh observation under the lifecycle lock.
+    pub async fn account_verification_needs_update(
+        &self,
+        account_id: Uuid,
+        verified: bool,
+        master_key: Option<&[u8; 32]>,
+    ) -> Result<bool, StoreError> {
+        let sql = format!(
+            "SELECT EXISTS (SELECT 1 FROM accounts \
+             WHERE account_id = $1 AND state = 'active' AND ({ACCOUNT_VERIFICATION_DIFF}))"
+        );
+        Ok(sqlx_core::query_scalar::query_scalar(&sql)
+            .bind(account_id)
+            .bind(verified)
+            .bind(master_key.map(|key| key.as_slice()))
+            .fetch_one(&self.pool)
+            .await?)
+    }
+
+    /// Record the SDK's verification state for the active device. The caller
+    /// holds the per-identity lifecycle lock across the observation and write.
+    /// An unavailable master key preserves the baseline and any outstanding
+    /// alert. For a known key, `verified` must refer to that same identity.
+    pub async fn record_account_verification(
+        &self,
+        account_id: Uuid,
+        verified: bool,
+        master_key: Option<&[u8; 32]>,
+        sdk_verification_violation: bool,
+    ) -> Result<Option<OwnIdentityUpdate>, StoreError> {
+        // The SDK remembers a rotation of a previously trusted own identity.
+        // That evidence covers the first observation after upgrade, before
+        // Axon has its own master-key baseline.
+        let sql = format!(
+            "WITH previous AS ( \
+                 SELECT own_identity_master_key, own_identity_changed, \
+                        CASE WHEN $3 IS NULL THEN false \
+                             WHEN own_identity_master_key IS NULL THEN $4 \
+                             ELSE own_identity_master_key <> $3 END AS identity_replaced \
+                 FROM accounts \
+                 WHERE account_id = $1 AND state = 'active' AND ({ACCOUNT_VERIFICATION_DIFF}) \
+             ) \
+             UPDATE accounts AS account \
+             SET verified = $2, \
+                 own_identity_master_key = COALESCE($3, previous.own_identity_master_key), \
+                 own_identity_changed = CASE \
+                     WHEN $3 IS NOT NULL AND $2 THEN false \
+                     ELSE previous.own_identity_changed OR previous.identity_replaced \
+                 END \
+             FROM previous \
+             WHERE account.account_id = $1 AND account.state = 'active' \
+             RETURNING account.own_identity_changed, \
+                       previous.own_identity_changed AS was_identity_changed, \
+                       previous.identity_replaced",
+        );
+        let update = sqlx_core::query::query(&sql)
+            .bind(account_id)
+            .bind(verified)
+            .bind(master_key.map(|key| key.as_slice()))
+            .bind(sdk_verification_violation)
+            .try_map(|row: PgRow| {
+                Ok(OwnIdentityUpdate {
+                    own_identity_changed: row.try_get("own_identity_changed")?,
+                    was_identity_changed: row.try_get("was_identity_changed")?,
+                    identity_replaced: row.try_get("identity_replaced")?,
+                })
+            })
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(update)
     }
 
     /// Set the durable megolm-backup enable/export intent (ADR 0098).

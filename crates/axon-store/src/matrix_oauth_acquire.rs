@@ -278,6 +278,8 @@ impl Store {
     /// `verified` is derived here from the breadcrumb's durable presentation
     /// rather than passed in, so the live finalizer and boot reconciliation
     /// cannot disagree and no caller can mark a browser sign-in verified.
+    /// Verified QR adoption also clears any pending own-identity warning.
+    /// The watcher reports any replacement master key it subsequently observes.
     pub async fn finalize_matrix_oauth_acquire(
         &self,
         flow_id: Uuid,
@@ -301,7 +303,8 @@ impl Store {
         let presentation: String = breadcrumb.try_get("presentation")?;
         let verified = presentation_verifies_device(&presentation);
         let active = sqlx_core::query::query(
-            "UPDATE accounts SET state = 'active', verified = $2 \
+            "UPDATE accounts SET state = 'active', verified = $2, \
+                 own_identity_changed = own_identity_changed AND NOT $2 \
              WHERE account_id = $1 AND state = 'deactivated'",
         )
         .bind(account_id)
@@ -331,6 +334,19 @@ mod tests {
 
     fn user_id() -> String {
         format!("@qr{}:example.org", Uuid::new_v4().simple())
+    }
+
+    async fn retain_with_identity_warning(store: &Store, account_id: Uuid) {
+        for key in [[1; 32], [2; 32]] {
+            store
+                .record_account_verification(account_id, false, Some(&key), false)
+                .await
+                .unwrap();
+        }
+        store
+            .set_account_state(account_id, AccountState::Deactivated)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -508,10 +524,7 @@ mod tests {
             .upsert_account(&user_id, "https://old.example.org/")
             .await
             .unwrap();
-        store
-            .set_account_state(account.account_id, AccountState::Deactivated)
-            .await
-            .unwrap();
+        retain_with_identity_warning(&store, account.account_id).await;
         let flow_id = Uuid::new_v4();
         assert!(
             store
@@ -544,6 +557,7 @@ mod tests {
         };
         assert_eq!(committed.account_id, account.account_id);
         assert_eq!(committed.homeserver_url, "https://new.example.org/");
+        assert!(committed.own_identity_changed);
 
         assert_eq!(
             store
@@ -552,6 +566,21 @@ mod tests {
                 .unwrap(),
             FinalizeMatrixOAuthAcquire::Activated { verified: true }
         );
+        let active = store
+            .get_account(account.account_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(active.verified);
+        assert!(!active.own_identity_changed);
+        let replacement = store
+            .record_account_verification(account.account_id, true, Some(&[3; 32]), false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(replacement.identity_replaced);
+        assert!(!replacement.was_identity_changed);
+        assert!(!replacement.own_identity_changed);
         sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
             .bind(account.account_id)
             .execute(store.pool())
@@ -575,6 +604,11 @@ mod tests {
         let store = store().await;
         let flow_id = Uuid::new_v4();
         let user_id = user_id();
+        let retained = store
+            .upsert_account(&user_id, "https://example.org/")
+            .await
+            .unwrap();
+        retain_with_identity_warning(&store, retained.account_id).await;
         assert!(store
             .create_matrix_oauth_acquire_breadcrumb(
                 flow_id,
@@ -629,7 +663,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(active.state, AccountState::Active);
+        assert_eq!(active.account_id, retained.account_id);
         assert!(!active.verified, "browser sign-in makes no trust claim");
+        assert!(active.own_identity_changed);
 
         sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
             .bind(account.account_id)

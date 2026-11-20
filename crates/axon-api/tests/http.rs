@@ -2339,6 +2339,12 @@ async fn accounts_read_api() {
         .upsert_account(&deactivated_user, hs)
         .await
         .expect("deactivated");
+    for key in [[1; 32], [2; 32]] {
+        store
+            .record_account_verification(deactivated.account_id, false, Some(&key), false)
+            .await
+            .expect("record identity observation");
+    }
     let deleting = store
         .upsert_account(&deleting_user, hs)
         .await
@@ -2380,6 +2386,7 @@ async fn accounts_read_api() {
     // account is unverified until a recover/verify derives otherwise, so it reads
     // a concrete `false` rather than the old always-`null` stub.
     assert_eq!(active_row["verified"], false);
+    assert_eq!(active_row["own_identity_changed"], false);
     assert_eq!(active_row["user_id"], active_user);
     assert_eq!(active_row["homeserver_url"], hs);
     // No `SyncStateProvider` was injected (this router uses the plain `new`
@@ -2393,10 +2400,14 @@ async fn accounts_read_api() {
     assert_eq!(active_row["backup"]["recovery_state"], "unknown");
     // The token is never exposed, under any key.
     assert!(active_row.get("access_token").is_none());
+    assert!(active_row.get("own_identity_master_key").is_none());
     assert!(active_row.get("access_token_encrypted").is_none());
 
     let deactivated_row = find(deactivated.account_id).expect("deactivated listed");
     assert_eq!(deactivated_row["state"], "deactivated");
+    assert_eq!(deactivated_row["verified"], false);
+    assert_eq!(deactivated_row["own_identity_changed"], true);
+    assert!(deactivated_row.get("own_identity_master_key").is_none());
 
     assert!(
         find(deleting.account_id).is_none(),
@@ -2414,6 +2425,7 @@ async fn accounts_read_api() {
         get(&app, &format!("/v1/accounts/{}", deactivated.account_id)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(deactivated_by_id["data"]["state"], "deactivated");
+    assert_eq!(deactivated_by_id["data"]["own_identity_changed"], true);
 
     // The `deleting` account is absent from the list but still readable by id —
     // the by-id read is unfiltered.

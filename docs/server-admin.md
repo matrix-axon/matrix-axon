@@ -115,6 +115,25 @@ AXON_TOKEN=<token> AXON_BASE_URL=<axon-server-url> axon utd redecrypt --account-
 `AXON_BASE_URL` defaults to `http://127.0.0.1:8080` if unset — set it explicitly whenever the server isn't on localhost, or the request silently goes nowhere useful and fails with a 401 (the token is fine; it's just being checked against the wrong server).
 See [Environment variables](technical-reference.md#environment-variables) for the full list of vars axon reads.
 
+## Changes to an account's Matrix identity
+
+[ADR 0136](adr/0136-exclude-insecure-devices-msc4153.md) adds `own_identity_changed` to `GET /v1/accounts` and `GET /v1/accounts/{account_id}`.
+The first observed master key establishes a baseline.
+On upgrade, Axon can also report an earlier replacement when a consistent SDK read contains both the master key and the retained verification violation for the account's own identity.
+Detection of a pre-baseline replacement depends on that retained evidence being available at the first complete observation.
+The warning is true when the key has been replaced and Axon's device still needs to be cross-signed by the replacement identity.
+Use the existing recovery-key or interactive verification flow to re-verify Axon.
+The server retains a pending warning across restarts and logout, and clears it when it observes that the device is cross-signed by the current identity.
+Recovery normally clears the warning in its response.
+If the SDK's identity is temporarily unavailable, the watcher clears it once it can confirm the signature.
+Verified QR sign-in clears the warning on activation.
+If the account's key changed while it was signed out, the watcher can subsequently announce the replacement with the warning already clear.
+
+On `/v1/ws`, `account.own_identity_changed` carries the account ID in the envelope and two booleans in the payload.
+`own_identity_changed` is the current warning state.
+`identity_replaced` is true when this update observed a replacement key, including when the device is already cross-signed by that identity.
+Clients can re-read the account on reconnect to recover its pending warning.
+
 ## Managing the server from a client
 
 A signed-in client can administer the server through the management API under `/v1/management/` (ADR 0109), so the common jobs do not need a shell on the machine.

@@ -18,6 +18,94 @@ use uuid::Uuid;
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn own_identity_warning_survives_missing_observations_and_logout() {
+    let store = common::migrated_store().await;
+    let user = format!("@own-identity-{}:localhost", Uuid::new_v4());
+    let account = store
+        .upsert_account(&user, "https://hs.example.org")
+        .await
+        .unwrap();
+    let id = account.account_id;
+    assert!(!account.own_identity_changed);
+
+    // A legacy verified flag alone is not evidence of a master-key replacement.
+    store.set_account_verified(id, true).await.unwrap();
+    let baseline = store
+        .record_account_verification(id, false, Some(&[1; 32]), false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!baseline.identity_replaced);
+    assert!(!baseline.own_identity_changed);
+    assert!(!store
+        .account_verification_needs_update(id, false, Some(&[1; 32]))
+        .await
+        .unwrap());
+    assert!(store
+        .account_verification_needs_update(id, false, Some(&[2; 32]))
+        .await
+        .unwrap());
+
+    let rotation = store
+        .record_account_verification(id, false, Some(&[2; 32]), false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(rotation.identity_replaced);
+    assert!(rotation.own_identity_changed);
+    assert!(store
+        .account_verification_needs_update(id, true, Some(&[2; 32]))
+        .await
+        .unwrap());
+    assert!(store
+        .record_account_verification(id, false, Some(&[2; 32]), false)
+        .await
+        .unwrap()
+        .is_none());
+
+    // A verified read without a matching master key cannot clear the warning.
+    let missing = store
+        .record_account_verification(id, true, None, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!missing.identity_replaced);
+    assert!(missing.own_identity_changed);
+
+    store
+        .set_account_state(id, AccountState::Deactivated)
+        .await
+        .unwrap();
+    store.set_account_verified(id, false).await.unwrap();
+    assert!(store
+        .record_account_verification(id, true, Some(&[1; 32]), false)
+        .await
+        .unwrap()
+        .is_none());
+    let deactivated = store.get_account(id).await.unwrap().unwrap();
+    assert!(deactivated.own_identity_changed);
+    assert!(!deactivated.verified);
+
+    store
+        .set_account_state(id, AccountState::Active)
+        .await
+        .unwrap();
+    let cleared = store
+        .record_account_verification(id, true, Some(&[2; 32]), false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!cleared.identity_replaced);
+    assert!(cleared.was_identity_changed);
+    assert!(!cleared.own_identity_changed);
+    let account = store.get_account(id).await.unwrap().unwrap();
+    assert!(account.verified);
+    assert!(!account.own_identity_changed);
+    common::cleanup_account(&common::raw_pool().await, id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn upsert_is_idempotent_and_listable() {
     let store = common::migrated_store().await;
     // Unique user per run so repeated runs don't collide.

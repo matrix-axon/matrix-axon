@@ -47,6 +47,7 @@ pub use preview_generation::{AcquiredPreview, HomeserverPreviewGenerator, Previe
 mod member_counts;
 mod member_profiles;
 mod meta;
+mod own_identity;
 mod push;
 mod reconcile;
 mod redecrypt;

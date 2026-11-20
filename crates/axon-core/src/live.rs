@@ -31,6 +31,9 @@ pub enum LiveFrame {
     Timeline(LiveEvent),
     /// A state change in an interactive (SAS) device-verification flow.
     Verification(VerificationFrame),
+    /// The account's own cross-signing master key was replaced or its
+    /// re-verification warning was cleared (ADR 0136).
+    OwnIdentityChanged(OwnIdentityFrame),
     /// A sender's *current* device trust changed (M7c) — e.g. their identity
     /// entered a verification violation. An overlay distinct from the immutable
     /// per-event snapshot: it names the affected sender so clients re-evaluate
@@ -258,6 +261,16 @@ pub struct SyncStateFrame {
     pub account_id: Uuid,
     /// The new state: `"connecting"`, `"syncing"`, `"ready"`, or `"offline"`.
     pub sync_state: &'static str,
+}
+
+/// Live change to an account's own cross-signing identity (ADR 0136).
+#[derive(Debug, Clone)]
+pub struct OwnIdentityFrame {
+    pub account_id: Uuid,
+    /// Whether Axon's device still needs to be cross-signed by the new identity.
+    pub own_identity_changed: bool,
+    /// Whether this observation found a replacement master key.
+    pub identity_replaced: bool,
 }
 
 /// A pending invite appeared or its display snapshot changed (ADR 0091).
