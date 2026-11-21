@@ -18,7 +18,9 @@ const auth: AuthProvider = {
   getToken: () => Promise.resolve('tok'),
 } as unknown as AuthProvider
 
-function tickets(mediaStreamSrc: ((url: string) => string) | null) {
+function tickets(
+  mediaStreamSrc: ((url: string) => string | Promise<string>) | null,
+) {
   return createStreamTickets({
     api: createApiClient(auth, BASE),
     baseUrl: BASE,
@@ -89,6 +91,39 @@ describe('createStreamTickets', () => {
         kind,
       })
     }
+  })
+
+  it('waits for a platform that maps the URL asynchronously', async () => {
+    issuePath('/v1/media-stream/abc')
+    const outcome = await tickets((url) =>
+      Promise.resolve(`scheme:${url.slice(url.lastIndexOf('/') + 1)}`),
+    ).issue(ACCOUNT, 'mxc://hs/clip')
+    expect(outcome).toEqual({ ok: true, src: 'scheme:abc' })
+  })
+
+  it('reports a platform that cannot map the URL as a failure', async () => {
+    issuePath('/v1/media-stream/abc')
+    const outcome = await tickets(() =>
+      Promise.reject(new Error('refused')),
+    ).issue(ACCOUNT, 'mxc://hs/clip')
+    expect(outcome).toEqual({ ok: false, kind: 'failed' })
+  })
+
+  it('marks its probe, so the shell asks the server rather than its window', async () => {
+    const seen: Headers[] = []
+    const streams = createStreamTickets({
+      api: createApiClient(auth, BASE),
+      baseUrl: BASE,
+      platform: { mediaStreamSrc: (url) => url },
+      fetch: (_input, init) => {
+        seen.push(new Headers(init?.headers))
+        return Promise.resolve(new Response(null, { status: 404 }))
+      },
+    })
+    expect(await streams.probe(`${BASE}/v1/media-stream/abc`)).toBe('expired')
+    expect(
+      seen.map((h) => [h.get('range'), h.get('axon-stream-probe')]),
+    ).toEqual([['bytes=0-0', '1']])
   })
 
   it('reads an unreachable server as a failure', async () => {

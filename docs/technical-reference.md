@@ -242,8 +242,12 @@ Two configurations change this:
   `max_bytes` still bounds the staging files that streams in flight hold, so the `max_stream_bytes` check and the small-cache fallback above apply as they do with the cache on.
 
 Clients keep their own limits.
-In a browser, the web client plays video and audio from a stream ticket (below), so playback starts before the download finishes and the client sets no size limit of its own.
-The desktop and mobile shells still buffer a whole object, up to 100 MiB, until ADR 0139 phase 4 lands, and the TUI still refuses media over 20 MiB.
+The web client plays video and audio from a stream ticket (below), so playback starts before the download finishes and the client sets no size limit of its own.
+In the macOS, Windows, iOS and Android shells the media element loads the ticket through the shell's `axon-media` scheme, which forwards it to the ticket route ([ADR 0139](adr/0139-stream-large-video-and-audio.md) section 7).
+The Linux shell's player cannot load it, so there video and audio still buffer a whole object, up to 100 MiB ([issue 1192](https://github.com/matrix-axon/matrix-axon/issues/1192), [issue 1197](https://github.com/matrix-axon/matrix-axon/issues/1197)).
+The scheme returns at most 4 MiB per response, and reads the object in 4-MiB-aligned blocks of up to 4 MiB, held in memory only (at most 32 MiB), so a player that reads one sample at a time costs the server one request per block rather than per sample.
+Once a read is served from a complete block, the next block is fetched ahead of the player.
+The TUI still refuses media over 20 MiB.
 A video or audio event whose `info.mimetype` is missing, generic (`application/octet-stream`), has parameters or does not start with a lowercase `audio/` or `video/` is served as `application/octet-stream`, which no ticket covers, so every client buffers it as before ([issue 1182](https://github.com/matrix-axon/matrix-axon/issues/1182)).
 
 ### Stream tickets
