@@ -86,7 +86,18 @@ JPEG and PNG are the two formats every Matrix client decodes.
 The declared type is kept for `image`, `video` and `audio`, so other clients play the media and ADR 0139 streams it.
 A kind that does not match its type is a `400`, as `image` already is.
 `file` keeps its rewrite, so an existing client that stages a video as `file` sends exactly what it sends today.
-Clients stage `video/*` and `audio/*` files with the new kinds; a client that does not is unaffected.
+
+**Clients find the new kinds through `GET /v1/capabilities`.**
+An older server rejects `kind=video` or `kind=audio` while parsing the staging query, so a newer client that used them unconditionally would lose sends an older client makes successfully as `file`.
+The web shells and the TUI can connect to any server, so they meet this in both upgrade orders.
+
+- `CapabilitiesDto` gains `media_upload_kinds`, the kinds staging accepts (`["image", "file", "video", "audio"]`), and `send_media_thumbnails: true` for section 4's fields.
+- A client stages `video/*` and `audio/*` files with the new kinds only when `media_upload_kinds` lists them.
+  Otherwise it uses `file`, as today.
+  It sends section 4's `info` and `thumbnail_upload_id`, and makes posters, only when `send_media_thumbnails` is true.
+  An older server ignores unknown `send-media` fields, so without the flag a poster would be uploaded, never attached, and left staged until it expires.
+- A server without the route (a `404`), or without the field, supports neither.
+- Both orders are tested: a new client against an old server sends `file` and no thumbnail, and an old client against a new server is unchanged.
 
 Voice messages (MSC3245, with a waveform) are not part of this ADR.
 
@@ -98,11 +109,13 @@ Whichever side makes a thumbnail, it follows the same rules.
 - **Format.** JPEG at quality 78.
   PNG only when the source has an alpha channel with at least one pixel that is not fully opaque, since JPEG would paint the transparent area black.
   No WebP or AVIF thumbnails: JPEG and PNG are the only formats every Matrix client decodes, and at 800 × 600 the size gap is small.
-- **Orientation.** Apply the EXIF orientation before scaling.
-  The thumbnail is upright and has no EXIF data, so a thumbnail never leaks the original's metadata.
+- **Orientation.** The thumbnail is upright: the EXIF orientation is applied to it, and its own bytes have no EXIF data, so a thumbnail never leaks the original's metadata.
+  A producer that rotates pixels rotates the scaled thumbnail, not the full-size image (section 5).
 - **Image thumbnails are skipped when they don't help**, using Element Web's rule.
   No thumbnail when the original is at most 32 KiB, or when the thumbnail saves at most 64 KiB _and_ at most 10 % of the original.
-  A WebP original always gets one, because some clients cannot render WebP.
+  The rule applies only to JPEG, PNG and GIF originals.
+  Any other format (WebP, AVIF, HEIC/HEIF, SVG) always gets a thumbnail when its producer can make one, however small the original, because some clients cannot render the original at all.
+  Element Web exempts WebP, AVIF and SVG for the same reason.
 - **Video posters are always sent**, whatever their size: there is no other way to show a frame without downloading the video.
 - **Poster frame.** The frame at 1 s, or at half the duration for a video shorter than 2 s.
   Frame 0 is often black or a fade-in.
@@ -119,7 +132,7 @@ Whichever side makes a thumbnail, it follows the same rules.
 | PDF (first page)                                     | **the client**                          | The web client already ships pdf.js. The server would need a PDF renderer.                                                                                                                                                                                                                          |
 | HEIC, AVIF and other images the server cannot decode | **the client**, when it can decode them | ADR 0101 left the HEIC decoder open: every practical one is libheif with libde265, which are LGPL-3.0 and would be the first copyleft component Axon ships. Safari decodes it natively.                                                                                                             |
 
-The server validates every thumbnail a client supplies (section 4) and never passes client bytes through unchecked.
+The server validates and re-encodes every thumbnail a client supplies (section 4), so it never publishes client bytes unchecked.
 
 A client that makes no thumbnail still gets one for any image the server can decode.
 The TUI makes none of its own: it has no video decoder, and the server covers its images.
@@ -140,15 +153,25 @@ The TUI makes none of its own: it has no video decoder, and the server covers it
   `duration_ms` must be positive and fit a Matrix integer.
   `duration_ms` is accepted for `video` and `audio`, `width` and `height` for `image` and `video`; anything else is a `400`.
 - **`thumbnail_upload_id`.** A second staged upload, staged with kind `image`.
-  It is claimed with `claim_preview_upload`, so it must be PNG, JPEG or WebP, at most 2 MiB and 4,000,000 pixels, with a type matching its bytes.
-  Its `thumbnail_info` dimensions and type come from the verified bytes, not from the client.
   It is accepted for `image`, `video` and `file`, and refused for `audio`, which has no thumbnail in the Matrix spec.
-  It must differ from `upload_id`.
-- **Validation before anything is sent.** A malformed `info`, an invalid thumbnail or a wrong kind is a `400`, and neither upload is consumed.
-- **The thumbnail upload shares the send's fate.** It is consumed when the send succeeds and released when it fails, as `image_upload_id` already is on the link-preview path.
+  - **What the wire accepts.** It is claimed with `claim_preview_upload`, so it must be PNG, JPEG or WebP, at most 2 MiB and 4,000,000 pixels, with a type matching its bytes.
+  - **What the server publishes.** The server does not forward the client's bytes.
+    The validator has already decoded them, so the server applies their EXIF orientation, scales them into the section 2 box if they are larger, and re-encodes them as section 2's JPEG or PNG.
+    So every published thumbnail meets section 2 whoever made it, carries no EXIF, and has a `thumbnail_info` that describes the bytes actually sent.
+    This runs where the validation already does: in `spawn_blocking`, under the staging semaphore that `claim_preview_upload` holds.
+- **Distinct ids.** `upload_id`, `thumbnail_upload_id` and every link preview's `image_upload_id` must all differ.
+  This extends the check `bundled_previews::send` already makes, and runs before any claim, so a collision is a `400` that consumes nothing.
+- **Validation before anything is sent.** A malformed `info`, an invalid thumbnail or a wrong kind is a `400`, and every upload the send had claimed is released.
+- **One owner for every claim.** Today the plain `send-media` handler claims in the request future, and releases only by returning through the handler.
+  A client that disconnects after the claim leaves the upload `sending` until the next boot, because the expiry sweeper removes only `staged` rows.
+  So every `send-media`, not only the link-preview one, runs its claims, validation, send and settlement in one spawned task, as `bundled_previews::send` already does.
+  The request future only waits for that task.
+  The task settles every id it acquired: consumed on success, released on any failure, including a thumbnail that fails validation after the original was claimed.
+  A disconnect therefore cannot strand an upload, and the same task becomes the send itself under section 8.
+- **The thumbnail upload shares the send's fate.** It is consumed when the event is sent, including a send where the thumbnail's own upload failed (section 6), and released when the send fails.
 - **Precedence.**
   - When the server can read an image's header, the dimensions it reads win; a client's `width` and `height` are used only for formats the server cannot read.
-  - A supplied thumbnail is used as it is, and the server generates none.
+  - A supplied thumbnail is used, normalised as above, and the server generates none.
   - `duration_ms` and a video's dimensions always come from the client.
 - **The link-preview path takes the same fields.** A media send with `url_previews` goes through `bundled_previews::send`, which accepts and applies `info` and `thumbnail_upload_id` the same way.
 
@@ -156,18 +179,40 @@ The TUI makes none of its own: it has no video decoder, and the server covers it
 
 When an `image` send arrives without a thumbnail, the server derives what it can.
 
-- **Dimensions, always.** Read from the header and the EXIF orientation (`ImageDecoder::dimensions` and `ImageDecoder::orientation`) with no full decode, and swapped for orientations that rotate by 90°.
-  This also covers images too large to thumbnail and sends where the thumbnail pool is busy.
+- **Dimensions, always, from a bounded probe.** The probe reads the format, the dimensions, the EXIF orientation and, for a JPEG, whether it is progressive.
+  Dimensions are swapped for orientations that rotate by 90°.
+  It never copies the file: the `image` crate's `JpegDecoder::new` copies its whole input into a new `Vec` before it parses the headers, so the probe gives it only the first 1 MiB.
+  The headers and EXIF sit before the first scan, and that is the only part a header parse reads.
+  A JPEG whose headers end past 1 MiB is probed again from the whole file, inside the decode permit and budget below.
+  The probe also covers images too large to thumbnail, sends where the pool is busy, and `media.send_thumbnails = false`.
 - **A thumbnail, when section 2 says one helps.** For PNG, JPEG, WebP and GIF; this adds the `image` crate's `gif` feature.
   - A dedicated pool of **one** decode permit, separate from link previews' four.
-    One permit bounds the worst case to a single full-size decode.
-  - **A 50 MP cap**, which covers 48 MP phone sensors.
+    Everything below that holds more than the probe's bytes runs inside that permit.
+  - **Pixel caps from the probe, checked before decoding.** 50 MP for PNG, WebP, GIF and baseline JPEG, which covers 48 MP phone sensors.
+    25 MP for progressive JPEG, whose decoder keeps a coefficient buffer for the whole image, up to 6 more bytes per pixel.
     A larger image gets dimensions and no thumbnail.
-    `Limits::max_alloc` is set to 256 MiB, which fits a 50 MP decode with RGBA pixels.
+    These caps are the real bound; `Limits::max_alloc` (256 MiB) is a backstop, because the `image` crate applies it on a best-effort basis.
+  - **Rotate after scaling.** The decoded image is scaled to the box, with the bounds swapped for a 90° orientation, and only the scaled image is rotated.
+    `DynamicImage::apply_orientation` allocates a second full-size buffer for a quarter turn, which this avoids.
   - **A 5 s budget** for waiting for the permit and for the decode.
     The decode runs in `spawn_blocking` and keeps its permit until it finishes, even after the budget expires, as `PreviewGenerationService` does.
     When the budget expires, the image is sent without a thumbnail.
+    Generation starts when the send starts and runs while the original uploads (section 6), so on any upload of more than a few seconds it adds no time.
   - **A failure never fails the send.** A decode error, a busy pool or an expired budget sends the image without a thumbnail and logs the reason as an `error_kind`.
+- **The memory budget of one decode**, all inside the single permit:
+
+  | Held                                           | At most                                           |
+  | ---------------------------------------------- | ------------------------------------------------- |
+  | The decoder's copy of the compressed file      | the file's size; about 30 MiB for a 48 MP JPEG    |
+  | Decoded pixels                                 | 4 bytes per pixel: 200 MiB at 50 MP               |
+  | Progressive JPEG coefficients                  | up to 6 bytes per pixel: 150 MiB at the 25 MP cap |
+  | The scaled, rotated thumbnail and its encoding | under 2 MiB                                       |
+
+  So one decode peaks near 250 MiB.
+  The staged file the send already holds is not in this table.
+  The `send-media` route reads the whole staged file into memory today, for every kind, before any of this runs.
+  That is the send path's existing cost, not this ADR's, and [issue 1185](https://github.com/matrix-axon/matrix-axon/issues/1185) removes it.
+
 - **Placement.** A consumer-owned port in `axon-api` (`SendThumbnailer`, called by the `send-media` route), with its adapter in `axon-server` next to `validate_preview_image` (ADR 0021).
   `axon-api` and `axon-sync` take no `image` dependency.
 - **A kill switch.** `media.send_thumbnails` (default `true`) turns generation off.
@@ -176,16 +221,32 @@ When an `image` send arrives without a thumbnail, the server derives what it can
 
 The thumbnail adds no work for any other kind: a `file`, `video` or `audio` send is unchanged unless the client supplied a thumbnail.
 
-### 6. The gateway attaches the metadata on every send path
+### 6. One send path builds every media event, and a thumbnail upload is best-effort
 
 `MediaAttachment` gains the optional width, height, duration and a verified thumbnail (bytes, type, width, height).
+`attachment_info` builds `BaseImageInfo`, `BaseVideoInfo`, `BaseAudioInfo` or `BaseFileInfo` from them.
 
-- `attachment_info` builds `BaseImageInfo`, `BaseVideoInfo`, `BaseAudioInfo` or `BaseFileInfo` from them.
-- The SDK path passes the thumbnail to `AttachmentConfig::thumbnail`.
-- The two hand-built paths (`send_thread_member_attachment`, `send_with_previews`) upload the thumbnail with the room's encryption state, as they already upload the main object.
-  They set `thumbnail_source` and `thumbnail_info` themselves.
-  A test pins each path, so the three paths cannot drift apart.
-- An edit of a media caption already carries the original content forward, so it keeps the thumbnail without any change.
+**`Room::send_attachment` is no longer used.**
+With a thumbnail, it uploads the original and the thumbnail together (`try_join`), in plaintext and encrypted rooms alike, and returns an error before sending the event if either fails.
+So a rejected thumbnail upload, for example one that alone hits a rate limit, would fail an attachment that sends today.
+Retrying without the thumbnail would upload the original a second time.
+Instead, every media send takes the steps the two hand-built paths (`send_thread_member_attachment`, `send_with_previews`) already take, `upload_media_source` and then `media_message_type`, in one shared function:
+
+1. Upload the original with the room's encryption state (`upload_media_source`).
+   A failure fails the send, as today.
+2. If there is a thumbnail, upload it the same way, bounded by 10 s.
+   A failure or timeout sends the event without a thumbnail, and is logged with an `error_kind`.
+   This holds for a client-supplied thumbnail too.
+   A thumbnail is optional metadata, and the client's thumbnail already passed section 4's validation.
+3. Build the content with `thumbnail_source` and `thumbnail_info` when the thumbnail uploaded, and with the relation the request asked for.
+   A thread member keeps its existing hand-built relation.
+   A reply uses the SDK's public `Room::make_reply_event`, which is what `send_attachment` calls internally.
+4. Send it.
+
+Tests pin a rejected thumbnail upload with an accepted original, in a plaintext room and an encrypted room, on each relation shape, and check that the event is sent without `thumbnail_*`.
+The streamed upload of [issue 1185](https://github.com/matrix-axon/matrix-axon/issues/1185) also needs this hand-built send, so it replaces step 1 and keeps the rest.
+
+An edit of a media caption already carries the original content forward, so it keeps the thumbnail without any change.
 
 ### 7. Client-side posters and thumbnails (web)
 
@@ -200,9 +261,10 @@ The web client generates, stages and attaches what the server cannot.
 - **PDF.** Render page 1 with the lazily loaded pdf.js.
   This step comes last (section 9): few other clients show a thumbnail on `m.file`, so it mostly helps Axon's own file cards, which must learn to show it.
 - Each thumbnail is staged as an ordinary `image` upload before `send-media`, and a generation failure only means the send goes without one.
+- All of this, and the new kinds, only against a server whose capabilities list them (section 1).
 
 Native share extensions (issues 819 and 820) may use the OS's thumbnailers instead (`QLThumbnailGenerator` or `AVAssetImageGenerator` on iOS, `ThumbnailUtils` on Android).
-The API does not care who made the thumbnail, only that it meets section 2 and passes section 4's validation.
+The API does not care who made the thumbnail, only that it passes section 4's validation; the server's re-encoding then makes it meet section 2.
 
 ### 8. The asynchronous send
 
@@ -210,7 +272,10 @@ The API does not care who made the thumbnail, only that it meets section 2 and p
 This ADR is written so that change does not alter it.
 Section 4's validation happens when the request is accepted, so its errors stay immediate `400`s.
 Section 5's generation and section 6's upload run in the send itself, so in the asynchronous model they no longer delay the response.
-Until then, section 5's budget bounds the extra latency of a synchronous send to 5 s at worst.
+Until then, a synchronous send can take longer by at most section 5's 5 s budget, less the time the original's upload took.
+It can also take longer by the thumbnail's own upload, bounded at 10 s, which runs inside the gateway call and its existing `media.upstream_upload_timeout_secs` bound.
+Client-thumbnail normalisation (section 4) adds a decode and an encode of at most 4 MP.
+The 15 s worst case needs a slow or failing homeserver; a healthy one adds well under a second.
 
 ### 9. Not in this ADR
 
@@ -227,10 +292,14 @@ Until then, section 5's budget bounds the extra latency of a synchronous send to
 - Images sent from any Axon client, encrypted or not, carry `w`, `h` and a thumbnail that Element, Element X and Axon render, as soon as the server steps land and with no client change.
 - Videos sent from the web client arrive as `m.video` with a poster, dimensions and duration, and are streamed by ADR 0139.
   Videos sent from the TUI arrive as `m.video` too, without a poster.
-- An image send costs one header read, and, when a thumbnail helps, one bounded decode.
+- An image send costs a probe of at most 1 MiB, and, when a thumbnail helps, one bounded decode.
   With one permit, a burst of large photos takes turns, and any send that waits more than 5 s goes without a thumbnail.
   How often that happens should be measured on production before the pool is changed.
-- A full-size decode can briefly take about 200 MiB of server memory; the single permit keeps it to one at a time.
+- A full-size decode can briefly take about 250 MiB of server memory (section 5's table); the single permit keeps it to one at a time.
+- Axon stops using `send_attachment` for media and builds every media event itself.
+  That is more of the event under Axon's control, and one path for issue 1185 to change.
+- A client disconnect can no longer strand a claimed upload as `sending` until the next boot.
+- Clients check `GET /v1/capabilities` before using the new kinds and fields.
 - The upload API grows by two kinds and two optional fields.
   The change is additive: an existing client is unaffected (AGENTS.md, ADR 0099).
 - A thumbnail is a second upload to the homeserver, of tens of KiB.
@@ -256,6 +325,12 @@ Until then, section 5's budget bounds the extra latency of a synchronous send to
   Rejected because an opaque PNG screenshot makes a PNG thumbnail several times larger than the JPEG; alpha is the only reason to keep PNG.
 - **Relying on the homeserver's thumbnails.**
   Synapse thumbnails unencrypted media on request, but cannot read encrypted media, which is most of what Axon sends.
+- **Keeping `send_attachment` and retrying without the thumbnail when it fails.**
+  Rejected because the retry uploads the original again, which for a large video is the expensive part.
+- **Treating a validated client thumbnail as required.**
+  Rejected: a send that would succeed without the thumbnail should not fail because of it.
+- **Forwarding a validated client thumbnail unchanged.**
+  Rejected because the validator accepts WebP, up to 4 MP and EXIF-tagged bytes, so the published thumbnail would not meet section 2.
 - **Letting the client's dimensions win.**
   Rejected for formats the server can read, because the bytes are authoritative and a client bug would otherwise reach every recipient.
 
@@ -264,11 +339,11 @@ Until then, section 5's budget bounds the extra latency of a synchronous send to
 One silo per pull request (AGENTS.md).
 
 1. This ADR ([1205](https://github.com/matrix-axon/matrix-axon/issues/1205)).
-2. **Server:** the `video` and `audio` kinds (section 1, [1207](https://github.com/matrix-axon/matrix-axon/issues/1207)).
-3. **Server:** `info` and `thumbnail_upload_id` on every send path (sections 4 and 6, [11](https://github.com/matrix-axon/matrix-axon/issues/11)).
+2. **Server:** the `video` and `audio` kinds and the `media_upload_kinds` capability (section 1, [1207](https://github.com/matrix-axon/matrix-axon/issues/1207)).
+3. **Server:** `info` and `thumbnail_upload_id`, the claim-owning task, the single hand-built send with best-effort thumbnail upload, and the `send_media_thumbnails` capability (sections 1, 4 and 6, [11](https://github.com/matrix-axon/matrix-axon/issues/11)).
 4. **Server:** dimensions and image thumbnails (section 5, [1208](https://github.com/matrix-axon/matrix-axon/issues/1208)); needs step 3.
 5. **Web:** the new kinds, video posters and audio durations (section 7, [24](https://github.com/matrix-axon/matrix-axon/issues/24)); needs steps 2 and 3.
-6. **TUI:** the new kinds ([1212](https://github.com/matrix-axon/matrix-axon/issues/1212)); needs step 2.
+6. **TUI:** the new kinds, used only when the server's capabilities list them ([1212](https://github.com/matrix-axon/matrix-axon/issues/1212)); needs step 2.
 7. **Web, last:** HEIC/AVIF thumbnails and PDF first pages, with thumbnails on Axon's file cards (section 7, [1209](https://github.com/matrix-axon/matrix-axon/issues/1209)); needs step 3.
 
 Each step regenerates `openapi/openapi.json` and `clients/web/src/api/schema.d.ts` where it changes the API, and updates `docs/client-parity.md` and `docs/demo-coverage.md` where it changes what a client shows.
