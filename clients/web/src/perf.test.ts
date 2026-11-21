@@ -675,6 +675,40 @@ describe('room-open summary', () => {
     return marks
   }
 
+  it('collapses every path parameter in a route, encoded or not', () => {
+    const base = `https://axon.test/v1/accounts/${ACCOUNT}`
+    const urls = [
+      // The client percent-encodes `$` and `@`, which the old sigil check
+      // missed: these event and user ids reached persisted telemetry.
+      `${base}/events/%24liYxpRqhUAwbDyTJdIYUF`,
+      `${base}/rooms/${encodeURIComponent(ROOM)}/threads/%24root/timeline`,
+      `${base}/users/${encodeURIComponent('@alice:hs')}/profile`,
+      `${base}/rooms/${encodeURIComponent(ROOM)}/tags/m.favourite`,
+      `https://axon.test/v1/media/${ACCOUNT}/local.beeper.com/mackid1993_GgfaE/thumbnail?width=96`,
+      `${base}/rooms/${encodeURIComponent(ROOM)}/timeline?limit=50`,
+    ]
+    const marks = captured(() => {
+      for (const url of urls) {
+        const trace = perfTraceRequest(url)!
+        trace.sent()
+        trace.end('timeout')
+      }
+    })
+
+    expect(
+      marks
+        .filter((mark) => mark.name === 'api:deadline')
+        .map((mark) => mark.detail.route),
+    ).toEqual([
+      'accounts/{account}/events/{id}',
+      'accounts/{account}/rooms/{id}/threads/{id}/timeline',
+      'accounts/{account}/users/{id}/profile',
+      'accounts/{account}/rooms/{id}/tags/{id}',
+      'media/{account}/{id}/{id}/thumbnail',
+      'accounts/{account}/rooms/{id}/timeline',
+    ])
+  })
+
   const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
   const timelineUrl = (room: string) =>
     `https://axon.test/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(room)}/timeline?limit=50`

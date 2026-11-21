@@ -1554,7 +1554,29 @@ function roomTimelinePage(url: string): boolean {
   return timelinePage(url) && !url.includes('/threads/')
 }
 
-/** A route shape short enough to read on a phone: ids collapsed, query dropped. */
+/**
+ * A fixed word of an API route. Every literal segment under `/v1/` in
+ * `openapi.json` has this shape; ids, server names, media ids and tag names
+ * do not (mixed case, digits, dots, a sigil).
+ */
+const ROUTE_WORD = /^[a-z]+(?:[_-][a-z]+)*$/
+
+/** A Matrix id's sigil, as written or as `encodeURIComponent` leaves it. */
+const ID_SIGIL = /^[!@$#+]/
+
+/**
+ * A route shape short enough to read on a phone: ids collapsed, query dropped.
+ *
+ * Its output reaches disk (`stores/telemetry.ts` persists `route` fields), so
+ * it keeps what is known safe rather than removing what is known bad. Under
+ * `/v1/`, a segment survives only if it is a route word; anything else is a
+ * path parameter and becomes `{id}`. A sigil check alone was the old rule, and
+ * it let event ids through: the client percent-encodes `$` as `%24`, so
+ * `events/%24abc…` never started with `$`.
+ *
+ * Other paths (the app's own assets) keep their names, minus any segment that
+ * decodes to a Matrix id.
+ */
 function shortRoute(url: string): string {
   let path = url
   try {
@@ -1562,13 +1584,33 @@ function shortRoute(url: string): string {
   } catch {
     // A relative or malformed name: fall back to the raw string.
   }
+  const api = path.startsWith('/v1/')
   return path
     .replace(
       /\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi,
       '/{account}',
     )
-    .replace(/\/[!@$][^/]+/g, '/{id}')
+    .split('/')
+    .map((segment, index) => {
+      if (segment === '' || segment === '{account}' || (api && index === 1)) {
+        return segment
+      }
+      if (ID_SIGIL.test(decodeSegment(segment))) {
+        return '{id}'
+      }
+      return api && !ROUTE_WORD.test(segment) ? '{id}' : segment
+    })
+    .join('/')
     .replace(/^\/v1\//, '')
+}
+
+/** `decodeURIComponent`, or the raw segment when it is not valid encoding. */
+function decodeSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment)
+  } catch {
+    return segment
+  }
 }
 
 /**

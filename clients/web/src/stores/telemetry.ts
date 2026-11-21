@@ -135,10 +135,18 @@ export interface TelemetryStore {
  * shapes, so they can be rejected on sight — the same "mechanism, not a
  * promise" reasoning behind `room-list-cache.ts`'s projection.
  */
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
+
+/**
+ * A sigil opening the value or any path segment of it, written or
+ * percent-encoded. A route is a path, and an id one segment into it is as much
+ * an id as one at the front: `accounts/{account}/events/%24abc…` reached disk
+ * under the start-only check this replaces.
+ */
+const SIGIL = /(?:^|\/)(?:[!@#$+]|%2[134b]|%40)/i
 
 function identifierish(value: string): boolean {
-  return /^[!@#$+]/.test(value) || UUID.test(value)
+  return SIGIL.test(value) || UUID.test(value)
 }
 
 /** Keep numbers, booleans and null; keep strings only if they name nothing. */
