@@ -674,6 +674,9 @@ export function RoomPage() {
   }, [openJump, setJumpAction])
 
   useEffect(() => {
+    // Drained whether or not marks are on, so the count always starts at
+    // this room's last leave rather than accumulating across visits.
+    const liveAway = timeline.takeLiveAppended()
     perfMark('room-page:initial-load-effect', {
       accountId,
       roomId,
@@ -683,6 +686,9 @@ export function RoomPage() {
       // input the ADR says differs sharply between phone and desktop, and it
       // rides on the mark that is already here rather than a new one.
       warm: timeline.events.peek().length > 0,
+      // Rows the warm-store cache fed in from live frames while the room was
+      // closed: what re-entry could paint before the gap-fill answered.
+      liveAway,
     })
     // The room list store also feeds this page's title; populate it on a
     // hard load straight into the room URL. `ensureLoaded` rather than a
@@ -710,7 +716,11 @@ export function RoomPage() {
     ) {
       void timeline.loadLatest().finally(releasePreviews)
     }
-    return releasePreviews
+    return () => {
+      releasePreviews()
+      // Leaving: what arrived while mounted is not "while away" next time.
+      timeline.takeLiveAppended()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per room instance
   }, [timeline])
 

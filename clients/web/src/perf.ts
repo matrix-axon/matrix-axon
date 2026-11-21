@@ -570,6 +570,20 @@ interface RoomOpen {
   loading: boolean | null
   /** Socket reconnects that landed during this open. */
   reconnects: number
+  /**
+   * Rows the live feed appended to this room's warm store while it was
+   * closed — what re-entry painted before the gap-fill answered. Null when the
+   * mark did not carry it.
+   */
+  liveAway: number | null
+  /**
+   * Rows the first applied gap-fill added that the warm store lacked: what
+   * the live feed missed. Zero means the live feed alone was complete. Null
+   * for a cold open, or one whose gap-fill did not apply.
+   */
+  gapAdded: number | null
+  /** The gap-fill shared nothing with the slice: the gap exceeded a page. */
+  gapReplaced: boolean
   /** When the head fetch settled — the request that alone gates first paint. */
   head: number | null
   /**
@@ -730,6 +744,9 @@ function noteRoomOpen(
       heads: [],
       loading: null,
       reconnects: 0,
+      liveAway: typeof detail?.liveAway === 'number' ? detail.liveAway : null,
+      gapAdded: null,
+      gapReplaced: false,
       head: null,
       headAt: null,
       via: null,
@@ -793,6 +810,14 @@ function noteRoomOpen(
         !(typeof detail.startedAt === 'number' && detail.startedAt < open.start)
       ) {
         open.heads.push(`${detail.outcome}@${since()}`)
+        if (
+          open.gapAdded === null &&
+          detail.outcome === 'applied' &&
+          typeof detail.added === 'number'
+        ) {
+          open.gapAdded = detail.added
+          open.gapReplaced = detail.replaced === true
+        }
       }
       break
     case 'live:open':
@@ -974,6 +999,12 @@ function emitRoomOpen(phase: 'settled' | 'waiting'): void {
     loading: open.loading,
     live: liveState,
     reconnects: open.reconnects,
+    // Warm opens only (ADR 0085 phase 1 plus live ingest): what the live feed
+    // delivered while the room was closed, and what the gap-fill still had to
+    // add. `gapAdded=0` with a long `net` means the wait was hidden from view.
+    liveAway: open.liveAway,
+    gapAdded: open.gapAdded,
+    gapReplaced: open.gapReplaced,
     // Wall clock, because the offset cannot be dated: iOS pauses
     // `performance.now()` while the phone sleeps, so offset + session start
     // drifts from real time by however long it slept.

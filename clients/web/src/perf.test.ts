@@ -1144,6 +1144,73 @@ describe('room-open summary', () => {
     }
   })
 
+  it('says what the live feed delivered to a warm room and what the gap-fill added', async () => {
+    perfMark('room-page:initial-load-effect', {
+      accountId: 'a',
+      roomId: ROOM,
+      highlighted: false,
+      warm: true,
+      liveAway: 3,
+    })
+    const head = { kind: 'head', roomId: ROOM, thread: false }
+    perfMark('timeline:fetch:start', head)
+    settleCompetitors()
+    perfMark('timeline:fetch:end', { ...head, ok: true })
+    // Only the first *applied* head of this open speaks for the gap.
+    perfMark('timeline:head:settled', {
+      roomId: ROOM,
+      thread: false,
+      outcome: 'superseded',
+      added: null,
+      replaced: false,
+    })
+    perfMark('timeline:head:settled', {
+      roomId: ROOM,
+      thread: false,
+      outcome: 'applied',
+      added: 0,
+      replaced: false,
+    })
+    perfMark('timeline:head:settled', {
+      roomId: ROOM,
+      thread: false,
+      outcome: 'applied',
+      added: 5,
+      replaced: true,
+    })
+    perfMark('room-page:timeline-render', { hasRows: true, visible: 30 })
+    await frames()
+
+    expect(roomOpenSummary()).toMatchObject({
+      warm: true,
+      liveAway: 3,
+      gapAdded: 0,
+      gapReplaced: false,
+    })
+  })
+
+  it('leaves the gap fields empty on a cold open', async () => {
+    openRoom()
+    perfMark('timeline:fetch:start', { kind: 'head', thread: false })
+    settleCompetitors()
+    perfMark('timeline:fetch:end', { kind: 'head', thread: false, ok: true })
+    perfMark('timeline:head:settled', {
+      roomId: ROOM,
+      thread: false,
+      outcome: 'applied',
+      added: null,
+      replaced: false,
+    })
+    perfMark('room-page:timeline-render', { hasRows: true, visible: 30 })
+    await frames()
+
+    expect(roomOpenSummary()).toMatchObject({
+      liveAway: null,
+      gapAdded: null,
+      gapReplaced: false,
+    })
+  })
+
   it('names the three requests the timeline page competed with', async () => {
     openRoom()
     perfMark('timeline:fetch:start', { kind: 'head', thread: false })

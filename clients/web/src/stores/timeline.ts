@@ -322,6 +322,14 @@ export interface TimelineStore {
   ingestLive(event: EventDto): void
 
   /**
+   * Rows `ingestLive` appended since the last call, then reset to zero. The
+   * room-open readout reads it on entry (and drains it on leave), so a warm
+   * open reports how many messages the live feed delivered while the room was
+   * closed. Diagnostic only.
+   */
+  takeLiveAppended(): number
+
+  /**
    * Abandon a slice parked in history, keeping local echoes, so the next head
    * load lands on the newest page (ADR 0085 phase 1).
    *
@@ -417,6 +425,17 @@ function redactsEventId(event: EventDto): string | null {
  * With `threadRoot` set, the store reads the thread-scoped timeline
  * (`…/threads/{root}/timeline`) and its sends target the thread (M-W7).
  */
+/**
+ * What a head fold did to a populated slice, for the room-open readout.
+ * `added` counts head rows the slice did not hold, so a warm open's gap-fill
+ * says how much the live feed missed. `replaced` means the head shared nothing
+ * with the slice, so the gap was wider than a page.
+ */
+interface FoldReport {
+  added: number | null
+  replaced: boolean
+}
+
 export function createTimelineStore(
   api: ApiClient,
   media: MediaService,
@@ -484,6 +503,8 @@ export function createTimelineStore(
   const liveLog: { seq: number; event: EventDto }[] = []
   /** The arrival sequence of the newest live event logged. */
   let liveSeq = 0
+  /** Rows `ingestLive` appended since `takeLiveAppended` last drained it. */
+  let liveAppended = 0
   /**
    * The arrival sequence of each live-applied row still in the slice, by event
    * id. The log answers "what arrived since this load issued" for a replay; a
@@ -850,7 +871,7 @@ export function createTimelineStore(
   /// three ways this declines — a failed fetch, a superseded generation, and the
   /// deliberate no-op on a parked slice below — which a caller cannot otherwise
   /// tell apart from success, since the no-op leaves every signal untouched.
-  async function refreshHead(): Promise<HeadLoadOutcome> {
+  async function refreshHead(report?: FoldReport): Promise<HeadLoadOutcome> {
     const generation = sliceGeneration
     const liveIssuedAt = liveSeq
     const page = await fetchPage({})
@@ -866,7 +887,7 @@ export function createTimelineStore(
     if (generation !== sliceGeneration) {
       return 'superseded'
     }
-    return foldHead(page, generation, liveIssuedAt)
+    return foldHead(page, generation, liveIssuedAt, report)
   }
 
   /**
@@ -883,6 +904,7 @@ export function createTimelineStore(
     page: { events: EventDto[]; next: string | null },
     issued: number,
     liveIssuedAt: number,
+    report?: FoldReport,
   ): HeadLoadOutcome {
     const painted = (): HeadLoadOutcome => {
       headGeneration = Math.max(headGeneration, issued)
@@ -914,6 +936,11 @@ export function createTimelineStore(
         page.events,
       )
       events.value = [...page.events, ...echoes]
+      if (report !== undefined) {
+        // The gap was wider than a page, so this is a lower bound.
+        report.added = page.events.length
+        report.replaced = true
+      }
       nextCursor.value = page.next
       reachedStart.value = page.next === null
       // The slice *is* the head now, wherever it was parked before.
@@ -924,6 +951,12 @@ export function createTimelineStore(
     }
     // Overlap: merge. No generation bump — an in-flight `loadOlder` prepend
     // still applies, since the old history and cursor survive.
+    if (report !== undefined) {
+      const loadedIds = new Set(loaded.map((e) => e.event_id))
+      report.added = page.events.filter(
+        (e) => !loadedIds.has(e.event_id),
+      ).length
+    }
     const rest = dropConfirmedEchoes(
       loaded.filter((e) => !headIds.has(e.event_id)),
       page.events,
@@ -1135,6 +1168,7 @@ export function createTimelineStore(
     applyLive(event)
     if (!known && events.value.some((e) => e.event_id === event.event_id)) {
       liveArrivals.set(event.event_id, liveSeq)
+      liveAppended += 1
     }
   }
 
@@ -1749,7 +1783,11 @@ export function createTimelineStore(
       // abandoned open of this room apart from one belonging to the current
       // open: this store outlives the page, and nothing aborts its fetch.
       const startedAt = performance.now()
-      const load = events.value.length === 0 ? replaceSlice({}) : refreshHead()
+      // Filled only by a gap-fill merge: how many head rows the slice did not
+      // already hold, i.e. what the live feed missed while the room was away.
+      const report: FoldReport = { added: null, replaced: false }
+      const load =
+        events.value.length === 0 ? replaceSlice({}) : refreshHead(report)
       // The room-open readout needs the outcome, because `timeline:fetch:end`
       // only says the request came back, not whether its page was applied.
       // Marked beside the returned promise rather than chained into it: an
@@ -1762,6 +1800,8 @@ export function createTimelineStore(
             thread: threadRoot !== undefined,
             outcome,
             startedAt,
+            added: report.added,
+            replaced: report.replaced,
           }),
         // Defensive: neither loader rejects today (both resolve `'failed'`),
         // but this chain is discarded, so a future rejection must not surface
@@ -1788,6 +1828,11 @@ export function createTimelineStore(
     loadNewer,
 
     ingestLive,
+    takeLiveAppended() {
+      const appended = liveAppended
+      liveAppended = 0
+      return appended
+    },
 
     threadRoot,
     send,

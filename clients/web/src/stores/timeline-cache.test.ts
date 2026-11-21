@@ -12,6 +12,7 @@ import {
 } from 'vitest'
 import { createApiClient } from '../api/client'
 import { createMediaService } from '../media/media-service'
+import { setPerfEnabled, setTelemetrySink } from '../perf'
 import { createTimelineStoreCache } from './timeline-cache'
 import type { EventDto } from './timeline'
 
@@ -400,6 +401,84 @@ describe('createTimelineStoreCache', () => {
 
       // Had the frame counted as a use, `b` would have been evicted instead.
       expect(sameStore(cache.acquire(ACCOUNT, '!a:hs'), a)).toBe(false)
+    })
+
+    it('counts what the live feed appended while away, then drains', async () => {
+      server.use(
+        http.get(timelinePath(ROOM), () =>
+          HttpResponse.json({
+            data: { events: [event('$1', 100)], next_cursor: 'c1' },
+          }),
+        ),
+      )
+      const cache = makeCache()
+      const store = cache.acquire(ACCOUNT, ROOM)
+      await store.loadLatest()
+      expect(store.takeLiveAppended()).toBe(0)
+      cache.acquire(ACCOUNT, '!other:hs')
+
+      cache.ingestLive(event('$2', 200))
+      cache.ingestLive(event('$3', 300))
+      // A known id is an in-place update, not a new row.
+      cache.ingestLive({ ...event('$1', 100), body: 'edited', edited: true })
+
+      expect(store.takeLiveAppended()).toBe(2)
+      expect(store.takeLiveAppended()).toBe(0)
+    })
+
+    describe('gap-fill report on timeline:head:settled', () => {
+      let settled: Record<string, unknown>[]
+      beforeEach(() => {
+        settled = []
+        setPerfEnabled(true)
+        setTelemetrySink((name, _at, detail) => {
+          if (name === 'timeline:head:settled') settled.push(detail ?? {})
+        })
+      })
+      afterEach(() => {
+        setTelemetrySink(null)
+        setPerfEnabled(false)
+      })
+
+      /** A store at `$1`, fed `$2` live, whose re-entry head is `second`. */
+      async function reenter(second: EventDto[]) {
+        const heads = [[event('$1', 100)], second]
+        let served = 0
+        server.use(
+          http.get(timelinePath(ROOM), () =>
+            HttpResponse.json({
+              data: { events: heads[served++], next_cursor: 'c1' },
+            }),
+          ),
+        )
+        const cache = makeCache()
+        const store = cache.acquire(ACCOUNT, ROOM)
+        await store.loadLatest()
+        cache.ingestLive(event('$2', 200))
+        expect(await store.loadLatest()).toBe('applied')
+        await Promise.resolve()
+        return settled.at(-1)
+      }
+
+      it('counts only the head rows the live feed missed', async () => {
+        // Newest first, as the read API pages: `$3` was lost, `$2` was not.
+        const report = await reenter([
+          event('$3', 300),
+          event('$2', 200),
+          event('$1', 100),
+        ])
+        expect(report).toMatchObject({ added: 1, replaced: false })
+      })
+
+      it('reports zero when the live feed already had everything', async () => {
+        const report = await reenter([event('$2', 200), event('$1', 100)])
+        expect(report).toMatchObject({ added: 0, replaced: false })
+      })
+
+      it('flags a gap wider than a page', async () => {
+        const report = await reenter([event('$9', 900), event('$8', 800)])
+        expect(report).toMatchObject({ added: 2, replaced: true })
+      })
     })
 
     it('updates a parked slice in place but never appends to it', async () => {

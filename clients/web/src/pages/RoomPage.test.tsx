@@ -19,6 +19,7 @@ import {
   onTestFinished,
   vi,
 } from 'vitest'
+import { setPerfEnabled, setTelemetrySink } from '../perf'
 import { ServicesContext } from '../services'
 import { ShellActionsContext } from '../shell-actions'
 import type { MemberDto, RoomDto } from '../stores/room-list'
@@ -5019,6 +5020,15 @@ describe('RoomPage', () => {
     })
 
     it('shows a message that arrived while away before the head fetch answers', async () => {
+      const entries: Record<string, unknown>[] = []
+      setPerfEnabled(true)
+      setTelemetrySink((name, _at, detail) => {
+        if (name === 'room-page:initial-load-effect') entries.push(detail ?? {})
+      })
+      onTestFinished(() => {
+        setTelemetrySink(null)
+        setPerfEnabled(false)
+      })
       // The slow-link complaint: the room-list preview showed `$2`, then the
       // room opened without it until the re-entry head fetch came back. The
       // frame reached the client either way; the warm store now takes it.
@@ -5051,6 +5061,11 @@ describe('RoomPage', () => {
 
       // Painted while the head fetch is still held open.
       expect(await findByText('body of $2')).toBeTruthy()
+      // And the room-open readout says the live feed delivered it.
+      // The row paints before the mount effect marks, so wait for the
+      // return visit's mark (A, B, then A again).
+      await waitFor(() => expect(entries).toHaveLength(3))
+      expect(entries[2]).toMatchObject({ warm: true, liveAway: 1 })
       expect(await findByText('body of $1')).toBeTruthy()
       await waitFor(() => expect(heads()).toBe(2))
 
