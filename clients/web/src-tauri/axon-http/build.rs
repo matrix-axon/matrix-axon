@@ -6,6 +6,7 @@ const COMMANDS: &[&str] = &[
     "reset",
     "stats",
     "set_media_stream_base",
+    "media_loopback",
 ];
 
 fn main() {

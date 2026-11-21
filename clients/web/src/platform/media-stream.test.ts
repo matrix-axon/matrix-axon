@@ -2,11 +2,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const calls: { cmd: string; args: unknown }[] = []
 let refuse = false
+/** What `media_loopback` answers: its prefix, or a rejection. */
+let loopback: () => Promise<string> = () =>
+  Promise.resolve('http://127.0.0.1:41234/tok/')
 /** When set, each invoke waits here until the test releases it. */
 let held: (() => void)[] | null = null
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (cmd: string, args: unknown) => {
     calls.push({ cmd, args })
+    if (cmd === 'plugin:axon-http|media_loopback') return loopback()
     if (refuse) return Promise.reject(new Error('scope'))
     if (held === null) return Promise.resolve()
     const queue = held
@@ -18,7 +22,9 @@ vi.mock('@tauri-apps/api/core', () => ({
     `${protocol}://localhost/${encodeURIComponent(path)}`,
 }))
 
+import { StreamUnavailableError } from '../media/stream-ticket'
 import {
+  loopbackMediaStreamSrc,
   mediaStreamSrcFor,
   resetMediaStreamBaseForTests,
   shellMediaStreamSrc,
@@ -30,6 +36,7 @@ beforeEach(() => {
   calls.length = 0
   refuse = false
   held = null
+  loopback = () => Promise.resolve('http://127.0.0.1:41234/tok/')
   resetMediaStreamBaseForTests()
 })
 
@@ -114,8 +121,46 @@ describe('shellMediaStreamSrc', () => {
   })
 })
 
+describe('loopbackMediaStreamSrc', () => {
+  it('sends the base, asks for the prefix once, and appends the ticket', async () => {
+    const url = `https://axon.example/v1/media-stream/${TICKET}`
+    expect(await loopbackMediaStreamSrc(url)).toBe(
+      `http://127.0.0.1:41234/tok/${TICKET}`,
+    )
+    expect(await loopbackMediaStreamSrc(url)).toBe(
+      `http://127.0.0.1:41234/tok/${TICKET}`,
+    )
+    expect(calls).toEqual([
+      {
+        cmd: 'plugin:axon-http|set_media_stream_base',
+        args: { base: 'https://axon.example' },
+      },
+      { cmd: 'plugin:axon-http|media_loopback', args: undefined },
+    ])
+  })
+
+  it('reports a server that cannot start as unavailable, and asks again next time', async () => {
+    const url = `https://axon.example/v1/media-stream/${TICKET}`
+    loopback = () => Promise.reject(new Error('other'))
+    await expect(loopbackMediaStreamSrc(url)).rejects.toBeInstanceOf(
+      StreamUnavailableError,
+    )
+    loopback = () => Promise.resolve('http://127.0.0.1:5/t/')
+    expect(await loopbackMediaStreamSrc(url)).toBe(
+      `http://127.0.0.1:5/t/${TICKET}`,
+    )
+  })
+
+  it('refuses a URL that is not a ticket URL before asking for anything', async () => {
+    await expect(
+      loopbackMediaStreamSrc('https://axon.example/v1/media/x'),
+    ).rejects.toThrow('not a stream ticket URL')
+    expect(calls).toEqual([])
+  })
+})
+
 describe('mediaStreamSrcFor', () => {
-  it('streams on macOS, iOS, Windows and Android, whose players load the scheme', () => {
+  it('streams on macOS, iOS, Windows and Android through the scheme', () => {
     for (const target of [
       'darwin',
       'ios',
@@ -127,7 +172,7 @@ describe('mediaStreamSrcFor', () => {
     }
   })
 
-  it('keeps Linux on the blob path', () => {
-    expect(mediaStreamSrcFor('linux')).toBeNull()
+  it('streams on Linux through the loopback server', () => {
+    expect(mediaStreamSrcFor('linux')).toBe(loopbackMediaStreamSrc)
   })
 })

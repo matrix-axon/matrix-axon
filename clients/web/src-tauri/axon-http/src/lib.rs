@@ -23,6 +23,9 @@
 //! The plugin also serves the `axon-media` scheme (ADR 0139 § 7, see
 //! [`media`]), which proxies stream tickets for `<video>` and `<audio>` on the
 //! same pooled client. [`set_media_stream_base`] tells it where the server is.
+//! WebKitGTK cannot play a custom scheme, so the Linux shell's media elements
+//! load the same proxy from a loopback HTTP server instead
+//! ([`media_loopback`], see [`media_loopback`](crate::media_loopback)).
 //!
 //! Failures reject with `{ kind, detail }` and no free text (see [`error`]).
 //! Any `http` or `https` URL is reachable: the authority is unchanged from the
@@ -31,6 +34,7 @@
 mod client;
 mod error;
 mod media;
+mod media_loopback;
 mod media_window;
 mod transport;
 
@@ -41,11 +45,12 @@ use serde::Deserialize;
 use tauri::ipc::{InvokeBody, Request, Response};
 use tauri::plugin::{Builder, TauriPlugin};
 use tauri::webview::PageLoadEvent;
-use tauri::{Manager, RunEvent, Runtime, State, Webview, WindowEvent};
+use tauri::{AppHandle, Manager, RunEvent, Runtime, State, Webview, WindowEvent};
 
 pub use client::{Retries, Stats};
 pub use error::{Kind, TransportError};
 pub use media::{MediaBase, SCHEME as MEDIA_SCHEME};
+pub use media_loopback::Loopback as MediaLoopback;
 pub use media_window::MediaWindows;
 pub use transport::{Head, Transport};
 
@@ -241,6 +246,24 @@ fn set_media_stream_base(media: State<'_, MediaBase>, base: String) -> Result<()
     media.set(&base)
 }
 
+/// The prefix a ticket completes into a URL the Linux shell's media
+/// elements load: `http://127.0.0.1:<port>/<token>/`, served by a loopback
+/// server started on the first call (ADR 0139 § 7, loopback amendment). The
+/// page calls `set_media_stream_base` first, as for the scheme. Refused on
+/// every other platform, whose players load the `axon-media` scheme.
+#[tauri::command]
+async fn media_loopback<R: Runtime>(
+    app: AppHandle<R>,
+    webview: Webview<R>,
+    loopback: State<'_, MediaLoopback>,
+) -> Result<String> {
+    if !media_loopback::serves_on(std::env::consts::OS) {
+        return Err(TransportError::new(Kind::Scope));
+    }
+    let origin = webview.url().ok().and_then(|url| media::page_origin(&url));
+    loopback.prefix(app, origin).await
+}
+
 #[tauri::command]
 fn stats(transport: State<'_, Transport>) -> Stats {
     transport.stats()
@@ -261,7 +284,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             drop_body,
             reset,
             stats,
-            set_media_stream_base
+            set_media_stream_base,
+            media_loopback
         ])
         .register_asynchronous_uri_scheme_protocol(media::SCHEME, |ctx, request, responder| {
             let app = ctx.app_handle().clone();
@@ -307,6 +331,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             app.manage(Transport::with_store(options, store)?);
             app.manage(MediaBase::default());
             app.manage(MediaWindows::default());
+            app.manage(MediaLoopback::default());
             Ok(())
         })
         .on_page_load(|webview, payload| {
@@ -338,6 +363,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         .build()
 }
 
+#[cfg(test)]
+mod media_loopback_tests;
 #[cfg(test)]
 mod media_tests;
 #[cfg(test)]

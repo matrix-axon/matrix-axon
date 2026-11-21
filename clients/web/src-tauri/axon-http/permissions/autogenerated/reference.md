@@ -1,6 +1,6 @@
 ## Default Permission
 
-Everything the shell's HTTP transport needs: send a request, read or release its body, cancel it, swap in a fresh client after resume, read the connection counters, and tell the `axon-media` scheme which server base its stream tickets belong to (ADR 0139 § 7). Any `http` or `https` URL is reachable (ADR 0127 § 8; narrowing it is issue 893).
+Everything the shell's HTTP transport needs: send a request, read or release its body, cancel it, swap in a fresh client after resume, read the connection counters, and tell the `axon-media` scheme which server base its stream tickets belong to, and start the Linux shell's loopback media server (ADR 0139 § 7). Any `http` or `https` URL is reachable (ADR 0127 § 8; narrowing it is issue 893).
 
 #### This default permission set includes the following:
 
@@ -11,6 +11,7 @@ Everything the shell's HTTP transport needs: send a request, read or release its
 - `allow-reset`
 - `allow-stats`
 - `allow-set-media-stream-base`
+- `allow-media-loopback`
 
 ## Permission Table
 
@@ -69,6 +70,32 @@ Enables the drop_body command without any pre-configured scope.
 <td>
 
 Denies the drop_body command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`axon-http:allow-media-loopback`
+
+</td>
+<td>
+
+Enables the media_loopback command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`axon-http:deny-media-loopback`
+
+</td>
+<td>
+
+Denies the media_loopback command without any pre-configured scope.
 
 </td>
 </tr>

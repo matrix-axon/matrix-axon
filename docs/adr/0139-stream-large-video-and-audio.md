@@ -508,22 +508,23 @@ That server serves a 147 MB, 5-minute 720p H.264 and AAC MP4 with `no-store`, th
 The harness plays for 15 s, seeks to 60 %, plays 10 s, seeks back to 5 s, plays 10 s, then has the server expire the ticket and plays on for 20 s.
 It then plays the same file as audio, and loads an already-expired ticket.
 
-| Platform                                                   | First requests                                                | Start                        | Seek to 60 % / back | Upstream requests                          | Probe through the scheme              | Expired ticket                                                                                                                                                                                 |
-| ---------------------------------------------------------- | ------------------------------------------------------------- | ---------------------------- | ------------------- | ------------------------------------------ | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| macOS 26 (WKWebView), unwindowed                           | `bytes=0-1`, then per-sample closed ranges                    | 1.2 s                        | 0.24 s / 0.23 s     | 4,505 video, 2,861 audio                   | `206` and `404` readable (CORS works) | at load: `error` (code 4) at once                                                                                                                                                              |
-| macOS 26 (WKWebView), windowed                             | the same                                                      | 0.38 s                       | 0.44 s / 0.21 s     | 9 video (4 MiB each), 5 audio              | the same; skips the window            | mid-play: plays on from its buffer, 2 upstream `404`s in 20 s and no request loop; probe sees `404`                                                                                            |
-| iOS (device)                                               | not yet run                                                   |                              |                     |                                            |                                       |                                                                                                                                                                                                |
-| Windows (WebView2), real server                            | not visible in the server log (the window rewrites ranges)    |                              |                     | 4 MiB blocks, one at a time, 1.4–2 s apart |                                       | plays, but buffers often on a link that delivered 0.4–0.5 MB/s to every client on it, against the 1.37 MB/s the 557 MB, 408 s test video needs                                                 |
-| Android 15 emulator (WebView 124), harness, wry 0.57.0     | `bytes=0-`                                                    | 1.1 s (video), 1.8 s (audio) | —                   | 1 per block, as on macOS                   | `206` and `404` readable from byte 0  | every range after byte 0 fails with `net::ERR_FAILED`, so playback stops at the first 4 MiB and seeking never completes ([issue 1194](https://github.com/matrix-axon/matrix-axon/issues/1194)) |
-| Android 15 emulator (WebView 124), harness, wry 0.57.3     | `bytes=0-`                                                    | 1.1 s (video), 1.3 s (audio) | 2.72 s / 1.69 s     | 13 video, 7 audio (4 MiB, on the grid)     | `206` and `404` readable              | mid-play: plays on from its buffer, then the WebView retries the `404` about twice a second (12 in 14 s) until the source changes; the probe sees `404`                                        |
-| Linux (WebKitGTK 2.52, GStreamer 1.28), harness under Xvfb | none: the player refuses the scheme before it sends a request | —                            | —                   | —                                          | `206` and `404` readable              | every media element fails with `MEDIA_ERR_SRC_NOT_SUPPORTED` within 150 ms; Linux keeps the blob path ([issue 1192](https://github.com/matrix-axon/matrix-axon/issues/1192))                   |
+| Platform                                                   | First requests                                                                                   | Start                          | Seek to 60 % / back | Upstream requests                                                   | Probe through the scheme                                 | Expired ticket                                                                                                                                                                                 |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------ | ------------------- | ------------------------------------------------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS 26 (WKWebView), unwindowed                           | `bytes=0-1`, then per-sample closed ranges                                                       | 1.2 s                          | 0.24 s / 0.23 s     | 4,505 video, 2,861 audio                                            | `206` and `404` readable (CORS works)                    | at load: `error` (code 4) at once                                                                                                                                                              |
+| macOS 26 (WKWebView), windowed                             | the same                                                                                         | 0.38 s                         | 0.44 s / 0.21 s     | 9 video (4 MiB each), 5 audio                                       | the same; skips the window                               | mid-play: plays on from its buffer, 2 upstream `404`s in 20 s and no request loop; probe sees `404`                                                                                            |
+| iOS (device)                                               | not yet run                                                                                      |                                |                     |                                                                     |                                                          |                                                                                                                                                                                                |
+| Windows (WebView2), real server                            | not visible in the server log (the window rewrites ranges)                                       |                                |                     | 4 MiB blocks, one at a time, 1.4–2 s apart                          |                                                          | plays, but buffers often on a link that delivered 0.4–0.5 MB/s to every client on it, against the 1.37 MB/s the 557 MB, 408 s test video needs                                                 |
+| Android 15 emulator (WebView 124), harness, wry 0.57.0     | `bytes=0-`                                                                                       | 1.1 s (video), 1.8 s (audio)   | —                   | 1 per block, as on macOS                                            | `206` and `404` readable from byte 0                     | every range after byte 0 fails with `net::ERR_FAILED`, so playback stops at the first 4 MiB and seeking never completes ([issue 1194](https://github.com/matrix-axon/matrix-axon/issues/1194)) |
+| Android 15 emulator (WebView 124), harness, wry 0.57.3     | `bytes=0-`                                                                                       | 1.1 s (video), 1.3 s (audio)   | 2.72 s / 1.69 s     | 13 video, 7 audio (4 MiB, on the grid)                              | `206` and `404` readable                                 | mid-play: plays on from its buffer, then the WebView retries the `404` about twice a second (12 in 14 s) until the source changes; the probe sees `404`                                        |
+| Linux (WebKitGTK 2.52, GStreamer 1.28), harness under Xvfb | none: the player refuses the scheme before it sends a request                                    | —                              | —                   | —                                                                   | `206` and `404` readable                                 | every media element fails with `MEDIA_ERR_SRC_NOT_SUPPORTED` within 150 ms; Linux keeps the blob path ([issue 1192](https://github.com/matrix-axon/matrix-axon/issues/1192))                   |
+| Linux, loopback server (amendment below), same harness     | no `Range`, answered with a streamed `200`; then `bytes=N-` each time the player resumes reading | 0.32 s (video), 0.20 s (audio) | 0.93 s / 1.05 s     | 11 video in 37 s, each ended by the player once its buffer was full | `206` and `404` readable (CORS from the loopback server) | mid-play: `error` (code 2) at the first `404`, at once; at load: `error` (code 4)                                                                                                              |
 
 **Linux cannot play through the scheme, so it keeps the blob path.**
 WebKitGTK's GStreamer player admits only the URL schemes in its allow-list (`isProtocolAllowed` in WebKit's `GStreamerCommon.cpp`: `blob`, `data`, `file`, `http`, `https`, and any named in `WEBKIT_GST_ALLOWED_URI_PROTOCOLS`).
 With the scheme added through that variable, the URL reaches GStreamer's `uridecodebin`, which has no source element for `axon-media`.
 That pipeline runs in WebKit's web process, where the shell cannot register one.
 The page's `fetch` of the same URL works, which is how the probe gets through, but the media element cannot use it.
-So `platform/tauri.ts` sets `mediaStreamSrc` to `null` on Linux, as this section provides for a platform that cannot play through the scheme, and the options for streaming there are [issue 1192](https://github.com/matrix-axon/matrix-axon/issues/1192); the proposed one, a loopback HTTP server in the shell, is [issue 1197](https://github.com/matrix-axon/matrix-axon/issues/1197).
+So the Linux shell plays the same proxy from a loopback HTTP server instead (the amendment below, [issue 1192](https://github.com/matrix-axon/matrix-axon/issues/1192), [issue 1197](https://github.com/matrix-axon/matrix-axon/issues/1197)), and its row above shows that run.
 
 **Android streams once wry is 0.57.1 or later.**
 Android WebView applies a request's `Range` to an intercepted response itself: it treats the response body as the whole resource and skips to the range's first byte ([Chromium issue 571186732](https://issues.chromium.org/issues/571186732)).
@@ -531,7 +532,6 @@ Under wry 0.57.0 the WebView got a byte-array stream over the body the handler r
 wry 0.57.1 ([wry PR 1865](https://github.com/tauri-apps/wry/pull/1865)) puts a prefix as long as the `Content-Range` start in front of a single-range `206` body, so the WebView's skip consumes the prefix rather than the bytes ([issue 1194](https://github.com/matrix-axon/matrix-axon/issues/1194)).
 The shell takes wry 0.57.3, and with it the run above plays, seeks and recovers as on macOS, so Android streams like the other shells.
 On an expired ticket the WebView retries the `404` about twice a second; the section 6 probe runs one second after the `stalled` that follows and replaces the ticket, which ends it.
-The loopback server that Linux needs is [issue 1197](https://github.com/matrix-axon/matrix-axon/issues/1197).
 No physical Android device was available for this phase; the emulator run stands in for it until tester builds reach one.
 
 **An OAuth access token expiring mid-play is recovered without a visible stall** (Windows shell, real server, 2026-11-20).
@@ -562,6 +562,50 @@ If that count turns out to matter, the follow-up is a streaming response body in
 iOS (`WKURLSchemeHandler` feeding AVFoundation) and Android (`shouldInterceptRequest`) are the platforms where media through a custom scheme is least predictable.
 If one of them cannot play through the scheme, that platform keeps the blob path, which phase 1 has already improved, and the gap is filed as an issue.
 
+#### Amendment (2026-11-20): a loopback server for the Linux shell
+
+WebKitGTK cannot play a custom scheme at all (the Linux row and paragraph above), and its only GStreamer source, `webkitwebsrc`, handles `http`, `https` and `blob` and nothing else.
+So no scheme-based route exists on Linux.
+Tauri's maintainers recommend a Rust-side HTTP server for large media there ([tauri#3725](https://github.com/tauri-apps/tauri/issues/3725)), and other Tauri apps do the same.
+The Linux shell does that ([issue 1197](https://github.com/matrix-axon/matrix-axon/issues/1197)):
+
+- The `axon-http` plugin's `media_loopback` command starts an HTTP/1.1 server on `127.0.0.1`, on a port the system picks, the first time the page calls it, and returns `http://127.0.0.1:<port>/<token>/`.
+  The command is refused on every other platform, so nothing else listens.
+- The page completes that prefix with the ticket, and the media element loads `http://127.0.0.1:<port>/<token>/<ticket>`.
+  The server proxies it to `<base>/v1/media-stream/<ticket>` with the base from `set_media_stream_base`, on the same pooled client and with the same headers forwarded each way as the scheme.
+- It streams the upstream body through as it arrives, since a socket can and Tauri's responder cannot.
+  So the 4 MiB bound and the read-ahead window do not apply. A Range-less request, which is how WebKitGTK opens a media element ([issue 1184](https://github.com/matrix-axon/matrix-axon/issues/1184)), gets the server's own streamed `200`.
+  When the player hangs up, which WebKitGTK does each time its buffer is full, the upstream request ends with it.
+- A body that fails upstream, or sends nothing for 30 s, drops the player's connection, and one that ends short of its `Content-Length` does too.
+  So the withheld tail (section 3) still reaches the player as an error, never as a short but clean response.
+- A redirect is a `502`, never followed or passed on, as on the scheme.
+
+Any local process, and any other local user, can reach a loopback port, so the server checks each request before anything goes upstream:
+
+- The first path segment must be a per-launch token of 256 random bits, compared in constant time.
+  Anything else, including a path that is not exactly the token and one bare ticket, gets an empty `404`.
+  The ticket after it is a second credential, which expires and is bound to its account (section 5).
+- `Host` must be exactly `127.0.0.1:<port>`, against DNS rebinding, and an absolute-form request target is refused the same way.
+- A request with an `Origin` other than the page's is refused with `403`.
+  A media element sends none; the section 6 probe sends the page's, and gets `Access-Control-Allow-Origin` for it and the same preflight answer as the scheme.
+- Only `GET` and `HEAD` are proxied.
+  At most 64 connections are served at once, and a connection has 30 s to send its request's headers.
+- Nothing logs a token, a ticket or a path.
+
+WebKit does not treat a load from `127.0.0.1` as mixed content, so the `axon://` page, a secure context, can load it.
+That was checked on WebKitGTK 2.52 before the server was written: the media element played from a plain-HTTP loopback server, and the page's `fetch` reached it and failed only on CORS.
+The section 6 probe is therefore the page's own `fetch` of the same URL, as on the scheme.
+
+The CSP gains `http://127.0.0.1:*` in `media-src` and `connect-src`, on every platform.
+The port changes with each launch, so it cannot be named, and Tauri's per-platform configuration would mean a second copy of the whole CSP string for Linux, to drift from the first.
+On the other platforms nothing listens, and the page can already reach any `http` or `https` URL through the plugin's `send` command (ADR 0127 § 8), so the source gives a compromised page nothing new.
+
+If the server cannot start, `mediaStreamSrc` rejects with `StreamUnavailableError`, `issue` answers `refused`, and the player falls back to the blob path.
+The listener lives as long as the shell does; the shell has one window, and quits with it.
+
+The Linux row in the results table above is this server through the real plugin and CSP.
+Its numbers are close to the browsers' over plain HTTP in section 6, which is what a streamed proxy should give.
+
 ### 8. Phase 5, deferred: seeking ahead of the download
 
 Some MP4s, commonly ones recorded on Android, put their index (`moov`) at the end of the file.
@@ -591,12 +635,14 @@ This phase begins by checking that support against production Synapse, and gets 
   Redaction relies on a prefix rule in the `TraceLayer` plus an audit and a test; a router-owned redaction helper is #1140.
 - A ticket's checks run when a request starts, not while its response streams.
   So a response already in progress when its token is revoked, or its event redacted, runs to the end of its range.
-  In the shells that is at most 4 MiB.
-  In the browser, an open-ended range can deliver the rest of the object.
+  Through the shells' `axon-media` scheme that is at most 4 MiB.
+  In the browser, and through the Linux shell's loopback server, which streams unbounded (section 7, loopback amendment), an open-ended or Range-less request can deliver the rest of the object.
   This is accepted: the token's holder was entitled to that object when the response began, and the next request is refused.
 - `axon-media` adds a second custom scheme to the shells and widens their CSP by one source.
-- Each shell scheme response is buffered in the shell process, up to 4 MiB, so a 1 GiB video takes about 256 scheme requests (section 7).
-  A request without `Range` for an object larger than that is refused (section 7), so the device check is what confirms no platform's player sends one.
+- The Linux shell listens on a loopback port while it runs, guarded by a per-launch token, and the CSP of every shell admits `http://127.0.0.1:*` (section 7, loopback amendment).
+- Each `axon-media` scheme response is buffered in the shell process, up to 4 MiB, so a 1 GiB video takes about 256 scheme requests (section 7).
+  A scheme request without `Range` for an object larger than that is refused (section 7), so the device check is what confirms that no player on a scheme platform sends one.
+  The Linux shell's player does, which is one reason it uses the loopback server, which streams the server's `200` through instead (section 7, loopback amendment).
 - The Download button is unchanged: a large download is still buffered in the page and limited to 120 s.
   Making it stream, by pointing it at the ticket route in the browser and saving through the shell's own download path in the shells, is a follow-up.
 - The TUI is unchanged by this plan.

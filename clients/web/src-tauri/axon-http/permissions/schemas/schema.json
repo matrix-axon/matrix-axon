@@ -319,6 +319,18 @@
           "markdownDescription": "Denies the drop_body command without any pre-configured scope."
         },
         {
+          "description": "Enables the media_loopback command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-media-loopback",
+          "markdownDescription": "Enables the media_loopback command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the media_loopback command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-media-loopback",
+          "markdownDescription": "Denies the media_loopback command without any pre-configured scope."
+        },
+        {
           "description": "Enables the read_body command without any pre-configured scope.",
           "type": "string",
           "const": "allow-read-body",
@@ -379,10 +391,10 @@
           "markdownDescription": "Denies the stats command without any pre-configured scope."
         },
         {
-          "description": "Everything the shell's HTTP transport needs: send a request, read or release its body, cancel it, swap in a fresh client after resume, read the connection counters, and tell the `axon-media` scheme which server base its stream tickets belong to (ADR 0139 § 7). Any `http` or `https` URL is reachable (ADR 0127 § 8; narrowing it is issue 893).\n#### This default permission set includes:\n\n- `allow-send`\n- `allow-read-body`\n- `allow-cancel`\n- `allow-drop-body`\n- `allow-reset`\n- `allow-stats`\n- `allow-set-media-stream-base`",
+          "description": "Everything the shell's HTTP transport needs: send a request, read or release its body, cancel it, swap in a fresh client after resume, read the connection counters, and tell the `axon-media` scheme which server base its stream tickets belong to, and start the Linux shell's loopback media server (ADR 0139 § 7). Any `http` or `https` URL is reachable (ADR 0127 § 8; narrowing it is issue 893).\n#### This default permission set includes:\n\n- `allow-send`\n- `allow-read-body`\n- `allow-cancel`\n- `allow-drop-body`\n- `allow-reset`\n- `allow-stats`\n- `allow-set-media-stream-base`\n- `allow-media-loopback`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Everything the shell's HTTP transport needs: send a request, read or release its body, cancel it, swap in a fresh client after resume, read the connection counters, and tell the `axon-media` scheme which server base its stream tickets belong to (ADR 0139 § 7). Any `http` or `https` URL is reachable (ADR 0127 § 8; narrowing it is issue 893).\n#### This default permission set includes:\n\n- `allow-send`\n- `allow-read-body`\n- `allow-cancel`\n- `allow-drop-body`\n- `allow-reset`\n- `allow-stats`\n- `allow-set-media-stream-base`"
+          "markdownDescription": "Everything the shell's HTTP transport needs: send a request, read or release its body, cancel it, swap in a fresh client after resume, read the connection counters, and tell the `axon-media` scheme which server base its stream tickets belong to, and start the Linux shell's loopback media server (ADR 0139 § 7). Any `http` or `https` URL is reachable (ADR 0127 § 8; narrowing it is issue 893).\n#### This default permission set includes:\n\n- `allow-send`\n- `allow-read-body`\n- `allow-cancel`\n- `allow-drop-body`\n- `allow-reset`\n- `allow-stats`\n- `allow-set-media-stream-base`\n- `allow-media-loopback`"
         }
       ]
     }
