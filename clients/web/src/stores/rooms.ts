@@ -350,6 +350,11 @@ export interface RoomsStoreOptions {
   previewHoldMaxMs?: number
   /** Overrides `PREVIEW_RETRY_DELAYS_MS`. */
   previewRetryDelaysMs?: readonly number[]
+  /**
+   * Every member list this store reads (DM avatars, preview names), handed on
+   * so the account-wide name directory learns from them too.
+   */
+  onMembers?: (accountId: string, members: readonly MemberDto[]) => void
 }
 
 /**
@@ -552,6 +557,7 @@ export function createRoomsStore(
     if (generation !== sessionGeneration) {
       return
     }
+    options.onMembers?.(room.account_id, data.data)
     setCachedDmAvatar(
       roomKey(room),
       dmPeerAvatarFromMembers(room.account_user_id, data.data),
@@ -708,6 +714,7 @@ export function createRoomsStore(
       .then((result) => {
         const list = result.data?.data ?? []
         resolvedMembers.set(key, list)
+        options.onMembers?.(room.account_id, list)
         return list
       })
       .catch(() => {

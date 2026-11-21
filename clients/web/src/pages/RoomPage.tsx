@@ -87,7 +87,7 @@ import {
   slashCommandUsage,
   type SlashCommandName,
 } from '../slash-commands'
-import { createMembersStore, type MembersStore } from '../stores/members'
+import type { MembersStore } from '../stores/members'
 import { roomKey, roomTitle, type MemberDto } from '../stores/room-list'
 import { FORGET_PENDING_MESSAGE, LEAVE_PENDING_MESSAGE } from '../stores/rooms'
 import {
@@ -243,6 +243,7 @@ export function RoomPage() {
     messageGestures,
     search,
     timelines,
+    memberStores,
     attachments: staging,
     linkPreviews: linkPreviewCache,
     capabilities,
@@ -281,9 +282,11 @@ export function RoomPage() {
   // A long thread list is still fetching its roots when the reader moves on;
   // the next room's requests should not queue behind this one's (#662).
   useEffect(() => () => threads.stop(), [threads])
+  // Warm across room switches, like the timeline: a return visit paints the
+  // names it had, and the mount effect's `refresh()` updates them in place.
   const members = useMemo(
-    () => createMembersStore(api, accountId, roomId),
-    [api, accountId, roomId],
+    () => memberStores.acquire(accountId, roomId),
+    [memberStores, accountId, roomId],
   )
   // A persisted preference, not per-room view state (Settings → Timeline).
   const stateEvents = settings.stateEvents.value

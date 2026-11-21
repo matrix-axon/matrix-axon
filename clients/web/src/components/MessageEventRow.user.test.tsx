@@ -14,6 +14,7 @@ const ME = '@me:hs'
 const members = {
   displayName: (userId: string) => (userId === ALICE ? 'Alice' : userId),
   members: signal(new Map()),
+  profile: () => undefined,
 } as unknown as MembersStore
 
 function event(overrides: Partial<TimelineEvent> = {}): TimelineEvent {

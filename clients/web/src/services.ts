@@ -128,6 +128,14 @@ import {
   type TimelineStoreCache,
 } from './stores/timeline-cache'
 import {
+  createMemberDirectory,
+  type MemberDirectory,
+} from './stores/member-directory'
+import {
+  createMembersStoreCache,
+  type MembersStoreCache,
+} from './stores/members'
+import {
   createUpdateChecker,
   fetchVersionManifest,
   VERSION_MANIFEST_PATH,
@@ -194,6 +202,16 @@ export interface AppServices {
    * `RoomPage` acquires from here instead of building a store per mount.
    */
   timelines: TimelineStoreCache
+  /**
+   * Warm per-room member stores across room switches, so a return visit paints
+   * names rather than raw ids. `RoomPage` acquires from here.
+   */
+  memberStores: MembersStoreCache
+  /**
+   * Names and avatars learned from every member list, lent to a room whose own
+   * list has not landed yet.
+   */
+  memberDirectory: MemberDirectory
   /**
    * The durable on-device content cache (ADR 0085 phase 2). Stores reach it
    * through narrow ports (`RoomListCache`); it is exposed here for the
@@ -1360,6 +1378,29 @@ export function connectTimelineCacheReset(
 }
 
 /**
+ * Drop the warm member stores and the name directory when the session ends,
+ * for the reason `connectTimelineCacheReset` gives: the service graph outlives
+ * a sign-out, so without this a signed-out tab keeps every warm room's roster
+ * in memory. Both clears are idempotent, so the effect settles inside the
+ * reactive flush.
+ *
+ * Returns the disposer; the app graph keeps the subscription for its life.
+ */
+export function connectMembersCacheReset(
+  auth: CompositeAuthProvider,
+  memberStores: MembersStoreCache,
+  memberDirectory: MemberDirectory,
+): () => void {
+  return effect(() => {
+    if (auth.signedIn.value) {
+      return
+    }
+    memberStores.clear()
+    memberDirectory.clear()
+  })
+}
+
+/**
  * Wipe the **whole** durable cache when the session ends (ADR 0085 phase 2).
  *
  * Not just the records belonging to the account that signed out: the keys are
@@ -1780,6 +1821,8 @@ export function createServices(
     enabled: platform.updatesFromOrigin,
   })
   const timelines = createTimelineStoreCache(api, media)
+  const memberDirectory = createMemberDirectory()
+  const memberStores = createMembersStoreCache(api, memberDirectory)
   const incomingShares =
     platform.incomingShare == null
       ? null
@@ -1867,7 +1910,10 @@ export function createServices(
       namespace,
       enabled: () => settings.cacheRoomList.peek(),
     }),
-    { holdPreviewsAtStart: isRoomRoute(window.location.pathname) },
+    {
+      holdPreviewsAtStart: isRoomRoute(window.location.pathname),
+      onMembers: (accountId, list) => memberDirectory.record(accountId, list),
+    },
   )
   const search = createSearchStore(api)
   const threadUnread = createThreadUnreadStore()
@@ -2034,6 +2080,7 @@ export function createServices(
   connectRoomListCacheFlush(rooms)
   connectTimelineCacheLive(live, timelines)
   connectTimelineCacheReset(auth, timelines)
+  connectMembersCacheReset(auth, memberStores, memberDirectory)
   connectCacheReset(auth, cache)
   connectRoomsSessionReset(auth, rooms)
   connectMatrixOAuthQrSessionReset(
@@ -2058,6 +2105,8 @@ export function createServices(
     streamTickets,
     updates,
     timelines,
+    memberStores,
+    memberDirectory,
     cache,
     telemetry,
     attachments,

@@ -5086,6 +5086,71 @@ describe('RoomPage', () => {
       )
     })
 
+    it("labels senders from known names while a room's member list is in flight", async () => {
+      // The slow-link complaint: every room open showed raw ids until its own
+      // `/members` answered, even for people another room had already named.
+      let holdMembers = false
+      server.use(
+        http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+          HttpResponse.json({ data: [] }),
+        ),
+        http.get(
+          `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/timeline`,
+          ({ params }) =>
+            HttpResponse.json({
+              data: {
+                events:
+                  decodeURIComponent(String(params.roomId)) === OTHER_ROOM
+                    ? [event('$b', T0, { room_id: OTHER_ROOM })]
+                    : [event('$1', T0)],
+                next_cursor: null,
+              },
+            }),
+        ),
+        http.get(
+          `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/members`,
+          () =>
+            holdMembers
+              ? new Promise<Response>(() => {})
+              : HttpResponse.json({
+                  data: [member('@alice:hs', 'join', 'Alice')],
+                }),
+        ),
+      )
+      const go = (roomId: string) => {
+        window.history.pushState(
+          null,
+          '',
+          `/${ACCOUNT}/rooms/${encodeURIComponent(roomId)}`,
+        )
+        window.dispatchEvent(new PopStateEvent('popstate'))
+      }
+      window.history.replaceState(
+        null,
+        '',
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      )
+      const { findByText, findAllByText, queryByText } = render(
+        routedRoomPage(testServices()),
+      )
+      await findByText('body of $1')
+      expect((await findAllByText('Alice')).length).toBeGreaterThan(0)
+
+      // From here on no member list answers.
+      holdMembers = true
+      go(OTHER_ROOM)
+      await findByText('body of $b')
+      // A room never opened before borrows the name room A taught.
+      expect((await findAllByText('Alice')).length).toBeGreaterThan(0)
+      expect(queryByText('@alice:hs')).toBeNull()
+
+      go(ROOM)
+      await findByText('body of $1')
+      // And the warm store for A still has its own list.
+      expect((await findAllByText('Alice')).length).toBeGreaterThan(0)
+      expect(queryByText('@alice:hs')).toBeNull()
+    })
+
     it('gap-fills on re-entry through a ?event= link the slice already holds', async () => {
       // The jump effect fetches nothing when its target is already loaded, so
       // on this path the warm slice has no other route back to the present.

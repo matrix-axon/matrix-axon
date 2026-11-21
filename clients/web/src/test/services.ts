@@ -1,3 +1,5 @@
+import { createMemberDirectory } from '../stores/member-directory'
+import { createMembersStoreCache } from '../stores/members'
 import { signal } from '@preact/signals'
 import { createServerCapabilities } from '../stores/capabilities'
 import { createApiClient } from '../api/client'
@@ -23,6 +25,7 @@ import {
   connectLinkPreviewCacheReset,
   connectLinkedEventCacheReset,
   connectThreadReadMarkers,
+  connectMembersCacheReset,
   connectTimelineCacheLive,
   connectTimelineCacheReset,
   connectUnreadCounts,
@@ -145,6 +148,8 @@ export function testServices(
   const api = createApiClient(auth, TEST_BASE_URL)
   const media = createMediaService({ auth, baseUrl: TEST_BASE_URL })
   const timelines = createTimelineStoreCache(api, media)
+  const memberDirectory = createMemberDirectory()
+  const memberStores = createMembersStoreCache(api, memberDirectory)
   const attachments = createAttachmentStaging()
   const settings = createSettingsStore(storage)
   // Mirrors `createServices`: instrumentation on before the stores that mark.
@@ -185,6 +190,9 @@ export function testServices(
         ),
       enabled: () => settings.cacheRoomList.peek(),
     }),
+    {
+      onMembers: (accountId, list) => memberDirectory.record(accountId, list),
+    },
   )
   const search = createSearchStore(api)
   const threadUnread = createThreadUnreadStore(
@@ -272,6 +280,7 @@ export function testServices(
   connectThreadReadMarkers(live, threadUnread, deviceState)
   connectTimelineCacheLive(live, timelines)
   connectTimelineCacheReset(auth, timelines)
+  connectMembersCacheReset(auth, memberStores, memberDirectory)
   connectCacheReset(auth, cache)
   connectRoomsSessionReset(auth, rooms)
   connectMatrixOAuthQrSessionReset(
@@ -301,6 +310,8 @@ export function testServices(
     }),
     updates,
     timelines,
+    memberStores,
+    memberDirectory,
     cache,
     telemetry,
     attachments,
