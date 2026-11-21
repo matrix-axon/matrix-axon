@@ -612,6 +612,54 @@ describe('createRoomsStore', () => {
   })
 
   it.each([
+    ['missing replacement', {}, {}, 'fallback text'],
+    [
+      'fallback spoiler',
+      {
+        format: 'org.matrix.custom.html',
+        formatted_body: '<span data-mx-spoiler>fallback text</span>',
+      },
+      { 'm.new_content': { msgtype: 'm.text', body: 42 } },
+      '(spoiler)',
+    ],
+    [
+      'replacement spoiler without a body',
+      {},
+      {
+        'm.new_content': {
+          format: 'org.matrix.custom.html',
+          formatted_body: '<span data-mx-spoiler>fallback text</span>',
+        },
+      },
+      '(spoiler)',
+    ],
+  ])(
+    'uses the live edit fallback for %s',
+    async (_case, fallbackFields, replacementFields, expected) => {
+      server.use(
+        http.get(`${BASE_URL}/v1/rooms`, () =>
+          HttpResponse.json({ data: [NAMED] }),
+        ),
+      )
+      const store = makeStore()
+      await store.refresh()
+      store.noteTimelineEvent({
+        ...liveMessage('$incomplete-replacement', '@adam:example.org'),
+        body: '* fallback text',
+        content: {
+          msgtype: 'm.text',
+          body: '* fallback text',
+          ...fallbackFields,
+          ...replacementFields,
+        } as never,
+        relates_to: { rel_type: 'm.replace', event_id: '$original' } as never,
+      })
+
+      expect(store.preview(roomKey(NAMED))?.body).toBe(expected)
+    },
+  )
+
+  it.each([
     { type: 'm.room.redaction' },
     { state_key: '' },
     { redacted: true },

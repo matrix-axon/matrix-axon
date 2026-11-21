@@ -2677,20 +2677,24 @@ function hasSpoiler(content: unknown): boolean {
 }
 
 function eventPreviewBody(event: EventDto): string | undefined {
-  let content = event.content as Record<string, unknown> | null | undefined
-  let body: unknown = event.body
+  const content = event.content as Record<string, unknown> | null | undefined
   const relation = event.relates_to as { rel_type?: unknown } | null
-  // A live edit carries both fallback and replacement content. Use the
-  // replacement's body and spoiler marker together, as timeline reads do.
-  if (relation?.rel_type === 'm.replace') {
-    content = content?.['m.new_content'] as
-      Record<string, unknown> | null | undefined
-    body = content?.body
-  }
+  const replacement =
+    relation?.rel_type === 'm.replace'
+      ? (content?.['m.new_content'] as Record<string, unknown> | undefined)
+      : undefined
+  const replacementBody =
+    typeof replacement?.body === 'string' ? replacement.body : undefined
+  const body = replacementBody ?? event.body
   if (typeof body !== 'string' || body.trim() === '') {
     return undefined
   }
-  return hasSpoiler(content) ? '(spoiler)' : previewBody(body)
+  // A complete edit supplies both the body and its spoiler marker. An
+  // incomplete edit uses the live fallback, which either marker may cover.
+  const spoiler =
+    hasSpoiler(replacement) ||
+    (replacementBody === undefined && hasSpoiler(content))
+  return spoiler ? '(spoiler)' : previewBody(body)
 }
 
 function previewBody(body: string | null | undefined): string | undefined {
