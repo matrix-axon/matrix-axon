@@ -45,7 +45,7 @@ The rule sits beside ADR 0132's static check, not inside it.
 The web test that reads the fixture calls `isPreviewLink` rather than `nativePreviewLinks`, so the fixture never has to know about Matrix links, and a separate web-only test covers the exclusion.
 A new `isMatrixLink` (in `matrix-to.ts`) is applied together with `isPreviewLink` wherever the web client chooses links for cards: the composer, `nativePreviewLinks`, and therefore share recovery.
 Share recovery takes both its "Try homeserver" offers and its check of a staged card from `nativePreviewLinks`, so it neither offers the homeserver for a matrix.to link nor sends a card the iOS Share Extension built for one.
-The Share Extension's Swift reader still fetches the page; teaching it the same rule is iOS work, tracked in [#1121](https://github.com/matrix-axon/matrix-axon/issues/1121).
+The Share Extension's Swift reader applies the same rule beside `devicePreviewURL`, which stays the static check the shared fixture describes.
 
 **What is sent** (ADR 0132 § 6).
 Matrix links are left out of § 6 entirely: the rules there are applied as if the body's Matrix links were not in it.

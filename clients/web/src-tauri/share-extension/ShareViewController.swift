@@ -140,7 +140,9 @@ final class ShareComposer: ObservableObject {
     draft.text = text
     Self.applyCaptions(photoCaptions, to: &draft)
     let links = Set(TextShare.links(text))
-    draft.previews = draft.previews?.filter { links.contains($0.matched_url) }
+    draft.previews = draft.previews?.filter {
+      links.contains($0.matched_url) && !TextShare.isMatrixLink($0.matched_url)
+    }
     if let reason = TextShare.validation(draft) { return reason }
     if draft.files.contains(where: { !$0.thumbnail && !ShareStore.validPhotoName(photoName($0.id)) }) {
       return "invalid_filename"
@@ -527,7 +529,9 @@ final class ShareComposer: ObservableObject {
     next.accountId = account.isEmpty ? nil : account
     next.roomId = room.isEmpty ? nil : room
     let links = Set(TextShare.links(text))
-    next.previews = next.previews?.filter { links.contains($0.matched_url) }
+    next.previews = next.previews?.filter {
+      links.contains($0.matched_url) && !TextShare.isMatrixLink($0.matched_url)
+    }
     if next.accountId != current?.accountId {
       next.previews = next.previews?.map { preview in
         var p = preview
@@ -909,7 +913,8 @@ struct ShareComposeView: View {
   @State private var cardDescription = ""
   var body: some View {
     let links = Array(Set(TextShare.links(model.text))).sorted()
-    let matchingLinks = links.filter(TextShare.devicePreviewURL).filter {
+    let previewable = Set(TextShare.senderPreviewLinks(model.text))
+    let matchingLinks = links.filter { previewable.contains($0) }.filter {
       links.count <= 8 || previewSearch.isEmpty
         || $0.localizedCaseInsensitiveContains(previewSearch)
     }
@@ -955,7 +960,9 @@ struct ShareComposeView: View {
         }.disabled(!model.editable)
         if !links.isEmpty {
           Section {
-            let included = model.record?.previews?.filter { links.contains($0.matched_url) } ?? []
+            let included = model.record?.previews?.filter {
+              links.contains($0.matched_url) && !TextShare.isMatrixLink($0.matched_url)
+            } ?? []
             if matchingLinks.isEmpty {
               if included.isEmpty {
                 Label("Link only", systemImage: "link")
@@ -1105,7 +1112,7 @@ struct ShareComposeView: View {
           }
         }
         if let previews = model.record?.previews?.filter({
-          links.contains($0.matched_url)
+          links.contains($0.matched_url) && !TextShare.isMatrixLink($0.matched_url)
         }), !previews.isEmpty {
           Section(header: Text("Included previews")) {
             ForEach(previews, id: \.matched_url) { preview in

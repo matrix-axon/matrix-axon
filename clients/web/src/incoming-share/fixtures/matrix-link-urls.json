@@ -1,0 +1,86 @@
+[
+  {
+    "url": "https://matrix.to/#/!room:example.org/$event",
+    "matrix": true
+  },
+  {
+    "url": "https://matrix.to/#/#alias:example.org",
+    "matrix": true
+  },
+  {
+    "url": "https://matrix.to/#/@alice:example.org",
+    "matrix": true
+  },
+  {
+    "url": "https://MATRIX.to/#/!room:example.org",
+    "matrix": true
+  },
+  {
+    "url": "https://matrix.to:443/#/!room:example.org",
+    "matrix": true
+  },
+  {
+    "url": "https://matrix%2Eto/#/!room:example.org",
+    "matrix": true
+  },
+  {
+    "url": "https://%6d%61%74%72%69%78.to/#/@alice:example.org",
+    "matrix": true
+  },
+  {
+    "url": "https://user@matrix.to/#/@alice:example.org",
+    "matrix": true
+  },
+  {
+    "url": "matrix:roomid/room:example.org/e/event",
+    "matrix": true
+  },
+  {
+    "url": "matrix:u/alice:example.org",
+    "matrix": true
+  },
+  {
+    "url": "MATRIX:u/alice:example.org",
+    "matrix": true
+  },
+  {
+    "url": "http://matrix.to/#/!room:example.org",
+    "matrix": false
+  },
+  {
+    "url": "https://matrix.to:8443/#/!room:example.org",
+    "matrix": false
+  },
+  {
+    "url": "https://matrix.to./#/!room:example.org",
+    "matrix": false
+  },
+  {
+    "url": "https://matrix.to%2e/#/!room:example.org",
+    "matrix": false
+  },
+  {
+    "url": "https://www.matrix.to/#/!room:example.org",
+    "matrix": false
+  },
+  {
+    "url": "https://mаtrix.to/#/!room:example.org",
+    "matrix": false
+  },
+  {
+    "url": "https://xn--mtrix-4ve.to/#/!room:example.org",
+    "matrix": false
+  },
+  {
+    "url": "https://matrix.org/",
+    "matrix": false
+  },
+  {
+    "url": "https://example.org/matrix.to",
+    "matrix": false
+  },
+  {
+    "url": "not a url",
+    "matrix": false
+  }
+]

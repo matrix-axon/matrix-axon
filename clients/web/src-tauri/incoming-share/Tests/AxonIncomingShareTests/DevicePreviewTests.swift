@@ -53,6 +53,24 @@
       return provider
     }
 
+    func testMatrixLinkIsRefusedBeforeLookup() async throws {
+      let url = "https://matrix.to/#/!room:example.org/$event"
+      let input = try store.claim(store.create(text: "See \(url) and https://example.org/a").id)
+      var requests = 0
+      let generator = DevicePreview(store: store) { _, _ in
+        requests += 1
+        throw DevicePreviewFailure.unavailable
+      }
+      do {
+        _ = try await Task.detached { try generator.include(input, url: url) }.value
+        XCTFail("A Matrix link must not be fetched")
+      } catch {
+        XCTAssertEqual(error as? DevicePreviewFailure, .unsupportedURL)
+      }
+      XCTAssertEqual(requests, 0)
+      XCTAssertNil(try store.refreshOwned(input.id, owner: input.owner!).previews)
+    }
+
     func testSuppliedPreviewIsReusedWithoutLookup() async throws {
       var input = try draft()
       input.previews = [SharePreview(matched_url: link, title: "Supplied title")]
