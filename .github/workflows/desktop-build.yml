@@ -87,8 +87,8 @@ env:
 
 jobs:
   # `src-tauri` is excluded from the root workspace. On pull requests, check
-  # the macOS-only code alongside the existing Linux gate. Tags and manual
-  # runs compile that code in the universal bundle job when it is enabled.
+  # the macOS-only code alongside the existing Linux gate. The universal
+  # bundle job compiles it on release tags and on manual runs with macOS enabled.
   checks:
     name: Check the shell crate${{ matrix.runner == 'macos-latest' && ' (macOS)' || '' }}
     strategy:
@@ -164,6 +164,8 @@ jobs:
         if: runner.os == 'Linux'
         run: python3 scripts/ci/run-hook-entry.py shell-fmt
 
+      # The check enforces the committed lockfile. Clippy covers the same
+      # workspace and targets and reuses the checked dependencies.
       - name: Check macOS shell targets
         if: runner.os == 'macOS'
         run: cargo check --locked --manifest-path clients/web/src-tauri/Cargo.toml --workspace --all-targets
