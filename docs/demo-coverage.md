@@ -86,6 +86,7 @@ shows it.
 | Copy message text from action bar                       | **n/a**               | **not covered**                                                                                                               | **not covered** |
 | Room actions: invite, leave, pin (M19)                  | **not covered**       | **not covered**                                                                                                               | **not covered** |
 | Room settings: name, topic, avatar (M19-W6, ADR 0100)   | **n/a**               | **not covered**                                                                                                               | **not covered** |
+| Trust warnings (ADR 0136)                               | **not covered**       | **n/a**                                                                                                                       | **n/a**         |
 | Device verification (SAS)                               | **not covered**       | **not covered** — web UI exists; corpus has no second device                                                                  | **not covered** |
 | Megolm key backup snapshot and enable (ADR 0098)        | **not covered**       | **not covered** — `/accounts` is not a demo scene                                                                             | **not covered** |
 | Matrix OAuth QR account acquisition                     | **n/a**               | **not covered** — demo stack has no MAS or second trusted device                                                              | **not covered** |
@@ -135,6 +136,7 @@ shows it.
 - **TUI recovery results.** There is no recovery/backup scene.
   `/recover` reports 4S import, device verification, the backup snapshot/action, and stored-message re-decryption counts with any timeout.
   Focused HTTP, lifecycle, and terminal rendering tests cover these results, including delayed responses, malformed optional observations, multiple completions behind another popup or prompt, and replay of the latest session result per account through `/status`; the recordings do not.
+- **TUI trust warnings.** The demo data has neither withheld keys nor identity replacements, so it does not show the decryption reasons, room warnings, or own-identity alerts.
 - **Device verification.** Needs a second device to verify against, which the
   corpus does not stand up.
 - **Matrix OAuth QR account acquisition.** Needs MAS and a second trusted

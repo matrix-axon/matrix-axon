@@ -289,6 +289,7 @@ mod tests {
             redacted: false,
             redaction_event_id: None,
             reactions: None,
+            utd_reason: None,
             sender_trust: None,
         }
     }

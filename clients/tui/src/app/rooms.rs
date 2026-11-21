@@ -1619,6 +1619,7 @@ mod tests {
             redacted: false,
             redaction_event_id: None,
             reactions: None,
+            utd_reason: None,
             sender_trust: None,
         }
     }
@@ -1644,6 +1645,7 @@ mod tests {
             redacted: false,
             redaction_event_id: None,
             reactions: None,
+            utd_reason: None,
             sender_trust: None,
         }
     }
@@ -1759,6 +1761,7 @@ mod tests {
             redacted: false,
             redaction_event_id: None,
             reactions: None,
+            utd_reason: None,
             sender_trust: None,
         };
         // relates_to is set but content has no m.new_content → None
