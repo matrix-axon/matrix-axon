@@ -1,3 +1,13 @@
+use crate::api::IdentityChangeKind;
+
+pub(crate) const IDENTITY_ACTIONS: [(&str, IdentityChangeKind); 2] = [
+    ("accept", IdentityChangeKind::PinViolation),
+    (
+        "withdraw-verification",
+        IdentityChangeKind::VerificationViolation,
+    ),
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Login {
@@ -27,7 +37,7 @@ pub enum Command {
     Event(String),
     Whoami,
     Whereami,
-    Identity(Option<(crate::api::IdentityChangeKind, String)>),
+    Identity(Option<(IdentityChangeKind, String)>),
     Search(crate::search::SearchCommandInput),
     React(Option<String>),
     Unreact,
@@ -319,7 +329,7 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     HelpCommand {
         label: "/identity [accept|withdraw-verification @user:server]",
         insert_text: "/identity",
-        description: "review identity changes in this room and acknowledge a reviewed change",
+        description: "open room identity warnings or acknowledge a reviewed change",
     },
     HelpCommand {
         label: "/whereami",
@@ -518,16 +528,15 @@ pub fn parse(input: &str) -> Command {
         "whereami" => Command::Whereami,
         "identity" => {
             let tokens: Vec<_> = arg.split_whitespace().take(3).collect();
-            use crate::api::IdentityChangeKind::{PinViolation, VerificationViolation};
             match tokens.as_slice() {
                 [] => Command::Identity(None),
-                ["accept", user] => Command::Identity(Some((PinViolation, (*user).to_owned()))),
-                ["withdraw-verification", user] => {
-                    Command::Identity(Some((VerificationViolation, (*user).to_owned())))
-                }
-                _ => Command::Invalid(
-                    "usage: /identity [accept|withdraw-verification @user:server]".to_owned(),
-                ),
+                [verb, user] => IDENTITY_ACTIONS
+                    .iter()
+                    .find(|(action, _)| action == verb)
+                    .map_or_else(identity_usage, |&(_, kind)| {
+                        Command::Identity(Some((kind, (*user).to_owned())))
+                    }),
+                _ => identity_usage(),
             }
         }
         "search" => Command::Search(crate::search::parse_search_command_arg(arg)),
@@ -702,6 +711,10 @@ fn join_target_from_id(id: &ruma::RoomOrAliasId, via: &[ruma::OwnedServerName]) 
         server_names,
         source: String::new(),
     }
+}
+
+fn identity_usage() -> Command {
+    Command::Invalid("usage: /identity [accept|withdraw-verification @user:server]".to_owned())
 }
 
 fn parse_backup_command(arg: &str) -> Command {

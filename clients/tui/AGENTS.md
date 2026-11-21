@@ -72,7 +72,10 @@
   Paste is accepted only while that prompt is open inside the room-info popup.
 - The selected room's identity warning shares the `/info` read with `/whereami`.
   Room selection, reconnect, explicit refresh, and `room_details.changed` naming `identity_changes` refresh this projection.
-  `/identity` binds each acknowledgement to the fingerprint from the reviewed warning.
+  The `/identity` popup selects a warning with Up/Down and acknowledges it with the configured submit key.
+  The popup and slash-command forms bind each acknowledgement to the fingerprint from the reviewed warning.
+  A warning whose fingerprint or kind changes loses its popup selection.
+  Tab completes acknowledgement verbs and cycles affected member IDs, matching their Matrix IDs and cached display names.
   An HTTP 409 refreshes the projection and requires a new review before another attempt.
   Keep sending available while warnings are present.
 - Account reads and `account.own_identity_changed` update the own-identity alert.

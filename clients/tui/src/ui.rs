@@ -662,6 +662,22 @@ fn prepare_popup(app: &mut App, screen: Rect) {
                 lines,
             )
         }
+        PopupKind::RoomIdentity => {
+            let width = usize::from(area.width.saturating_sub(2));
+            let controls = format!(
+                "{} ack · {} close",
+                app.shortcuts.submit.label(),
+                app.shortcuts.clear_input.label(),
+            );
+            let lines = app.prepare_room_identity_popup(width, page_size);
+            let full_title = format!("Room identities · {controls}");
+            let title = if display_width(&full_title) <= width {
+                full_title
+            } else {
+                fit_popup_title(&controls, width)
+            };
+            (title, lines)
+        }
         PopupKind::RoomInfo => (
             room_info_popup_title(app, usize::from(area.width.saturating_sub(2))),
             // Wrapped here rather than by the widget: scrolling counts rows,
@@ -1058,19 +1074,16 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     } else {
         title
     };
-    if app
-        .room_identity_changes()
-        .is_some_and(|changes| !changes.is_empty())
-    {
-        messages_title.insert_str(0, "Identity changes /identity · ");
-    }
     if app.accounts.accounts.iter().any(|account| {
         account.own_identity_changed
             && app
                 .active_account_filter()
                 .is_none_or(|id| account.account_id == id)
     }) {
-        messages_title.insert_str(0, "Account identity changed /status · ");
+        messages_title.push_str(" · Own identity changed /status");
+    }
+    if app.has_room_identity_changes() {
+        messages_title.push_str(" · Identity changes /identity");
     }
     let mut messages_block = Block::default()
         .style(
@@ -1472,11 +1485,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     } else {
         Style::default().fg(app.colors.border)
     };
-    let command_title = if app.mode == Mode::Compose
-        && app
-            .room_identity_changes()
-            .is_some_and(|changes| !changes.is_empty())
-    {
+    let command_title = if app.mode == Mode::Compose && app.has_room_identity_changes() {
         "Identity changes /identity".to_owned()
     } else {
         command_title
@@ -3238,6 +3247,11 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<Line<'static>>
     }
 
     let rows: Vec<Row> = vec![
+        Row::Section("Room identities (/identity):"),
+        Row::Kv("Up / Down".to_owned(), "select an identity warning"),
+        Row::Kv(shortcuts.submit.label(), "acknowledge the selected warning"),
+        Row::Kv(shortcuts.clear_input.label(), "close room identities"),
+        Row::Blank,
         Row::Section("Focus:"),
         Row::Kv(
             shortcuts.focus_next.label(),

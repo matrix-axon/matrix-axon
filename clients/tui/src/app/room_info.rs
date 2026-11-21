@@ -17,8 +17,8 @@ use super::{App, Mode, PopupKind, RoomKey};
 use crate::api::{
     ApiError, DetailRefreshDto, DetailRefreshState, DirectoryVisibility, HomeserverDetailDto,
     HomeserverDetailStatus, MemberDto, MetadataSnapshot, RoomCreationContent, RoomDetailSource,
-    RoomDto, RoomHomeserverDetailsDto, RoomInfoDto, RoomJoinRulesContent, RoomMetadataDto,
-    RoomPowerLevelsContent, RoomUpgradeDto, SnapshotStatus,
+    RoomDto, RoomHomeserverDetailsDto, RoomIdentityChange, RoomInfoDto, RoomJoinRulesContent,
+    RoomMetadataDto, RoomPowerLevelsContent, RoomUpgradeDto, SnapshotStatus,
 };
 use crate::config::{ColorScheme, TimeFormat};
 
@@ -144,12 +144,22 @@ pub(crate) struct RoomInfoState {
     pub(crate) member_filter_editing: bool,
 }
 
-/// Room information for the one room `/whereami` last showed. Holding a single
-/// room bounds this cache without an eviction policy; reopening the same room
-/// shows its earlier data while the refresh is in flight.
+#[derive(Debug)]
+struct IdentityPopup {
+    room: RoomKey,
+    rows: Vec<RoomIdentityChange>,
+    selected: Option<usize>,
+    commands_reviewed: bool,
+    result: Option<String>,
+}
+
+/// Room information for the selected room. The `/info` projection stays active
+/// for identity warnings while the popup is closed. Reopening `/whereami` in
+/// the same room shows the cached details while they refresh.
 #[derive(Debug, Default)]
 pub(crate) struct RoomInfoCache {
-    reviewed_identities: Vec<crate::api::RoomIdentityChange>,
+    reviewed_identities: Vec<RoomIdentityChange>,
+    identity_popup: Option<IdentityPopup>,
     identity_action_inflight: bool,
     identity_action_result: Option<(RoomKey, String)>,
     pub(crate) state: Option<RoomInfoState>,
@@ -584,13 +594,29 @@ impl App {
         }
     }
 
-    pub(crate) fn room_identity_changes(&self) -> Option<&[crate::api::RoomIdentityChange]> {
-        self.room_info_for_selected()?
+    pub(super) fn room_identity_changes(
+        &self,
+    ) -> Option<impl Iterator<Item = &RoomIdentityChange>> {
+        let changes = self
+            .room_info_for_selected()?
             .info
             .value
             .as_ref()?
             .identity_changes
-            .as_deref()
+            .as_deref()?;
+        Some(changes.iter().filter(|change| {
+            change.kind != crate::api::IdentityChangeKind::Unrecognized
+                && ruma::UserId::parse(&change.user_id).is_ok()
+                && !change
+                    .user_id
+                    .chars()
+                    .any(|ch| ch.is_control() || ch.is_whitespace() || super::is_bidi_control(ch))
+        }))
+    }
+
+    pub(crate) fn has_room_identity_changes(&self) -> bool {
+        self.room_identity_changes()
+            .is_some_and(|mut changes| changes.next().is_some())
     }
 
     fn room_identity_snapshot_is_current(&self) -> bool {
@@ -605,90 +631,54 @@ impl App {
         &mut self,
         action: Option<(crate::api::IdentityChangeKind, String)>,
     ) {
-        use crate::api::IdentityChangeKind::{PinViolation, VerificationViolation};
-
         let Some(room) = self.selected_room_key() else {
             self.status = "Select a room to review identity changes.".into();
             return;
         };
         self.track_room_info(room.clone());
         let Some((kind, target)) = action else {
-            let changes = self.room_identity_changes().map(|changes| {
-                changes
-                    .iter()
-                    .filter(|change| {
-                        ruma::UserId::parse(&change.user_id).is_ok()
-                            && !change.user_id.chars().any(|ch| {
-                                ch.is_control() || ch.is_whitespace() || super::is_bidi_control(ch)
-                            })
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>()
-            });
-            let mut lines = Vec::new();
-            if let Some((_, result)) = self
+            let result = self
                 .room_info
                 .identity_action_result
-                .as_ref()
+                .take()
                 .filter(|(key, _)| key == &room)
-            {
-                lines.push(result.clone());
-            }
-            match changes.as_deref() {
-                None => {
-                    lines.push("Room identity warnings are unavailable or still loading.".into())
-                }
-                Some([]) => lines.push("No room identity changes need attention.".into()),
-                Some(changes) => {
-                    for change in changes {
-                        let user = &change.user_id;
-                        let (warning, command) = match change.kind {
-                            PinViolation => ("identity changed", "accept"),
-                            VerificationViolation => (
-                                "previously verified identity changed",
-                                "withdraw-verification",
-                            ),
-                        };
-                        lines.push(format!("{user} — {warning}."));
-                        lines.push(format!("  /identity {command} {user}"));
-                        if change.kind == VerificationViolation {
-                            lines.push("  Withdrawing removes the user's verified status.".into());
-                        }
-                    }
-                }
-            }
-            self.room_info.reviewed_identities = if self.room_identity_snapshot_is_current() {
-                changes.unwrap_or_default()
-            } else {
-                lines.push(
-                    "Refresh in progress or unavailable. Run /identity again before acknowledging."
-                        .into(),
-                );
-                Vec::new()
-            };
-            self.status = lines.join("\n").into();
+                .map(|(_, result)| result);
+            self.room_info.reviewed_identities.clear();
+            self.room_info.identity_popup = Some(IdentityPopup {
+                room,
+                rows: Vec::new(),
+                selected: None,
+                commands_reviewed: false,
+                result,
+            });
+            self.open_popup(PopupKind::RoomIdentity);
             return;
         };
-
-        if self.room_info.identity_action_inflight {
-            self.status = "An identity acknowledgement is already in progress.".into();
-            return;
-        }
         let change = self
             .room_info
             .reviewed_identities
             .iter()
-            .find(|change| change.kind == kind && change.user_id == target);
-        let Some(change) = change
-            .filter(|change| {
-                self.room_identity_snapshot_is_current()
-                    && self
-                        .room_identity_changes()
-                        .is_some_and(|current| current.contains(change))
-            })
-            .cloned()
-        else {
-            self.status = "Run /identity to review the current warning and its action.".into();
+            .find(|change| change.kind == kind && change.user_id == target)
+            .cloned();
+        self.start_room_identity_action(room, change);
+    }
+
+    fn start_room_identity_action(&mut self, room: RoomKey, change: Option<RoomIdentityChange>) {
+        if self.room_info.identity_action_inflight {
+            return;
+        }
+        let Some(change) = change.filter(|change| {
+            self.room_identity_snapshot_is_current()
+                && self
+                    .room_identity_changes()
+                    .is_some_and(|mut current| current.any(|entry| entry == change))
+        }) else {
+            let message = if self.mode == Mode::Popup(PopupKind::RoomIdentity) {
+                "Review and select the current warning before acknowledging it."
+            } else {
+                "Run /identity to review the current warning before acknowledging it."
+            };
+            self.report_identity_action(&room, message.to_owned());
             return;
         };
         if self.bootstrap_tx.is_none() {
@@ -696,7 +686,7 @@ impl App {
         }
         self.room_info.identity_action_inflight = true;
         self.room_info.identity_action_result = None;
-        self.status = "Acknowledging identity change…".into();
+        self.report_identity_action(&room, "Acknowledging identity change…".to_owned());
         let client = self.client.clone();
         self.spawn_bootstrap(async move {
             let result = client
@@ -704,6 +694,146 @@ impl App {
                 .await;
             super::bootstrap::BootstrapOutcome::IdentityAcknowledged { room, result }
         });
+    }
+
+    pub(crate) fn discard_room_identity_popup_if_closed(&mut self) {
+        if self.mode != Mode::Popup(PopupKind::RoomIdentity) {
+            self.room_info.identity_popup = None;
+        }
+    }
+
+    pub(crate) fn move_room_identity_selection(&mut self, delta: isize) {
+        let Some(popup) = self.room_info.identity_popup.as_mut() else {
+            return;
+        };
+        if !popup.rows.is_empty() {
+            if !self.room_info.identity_action_inflight {
+                popup.result = None;
+            }
+            popup.selected = Some(popup.selected.map_or_else(
+                || if delta < 0 { popup.rows.len() - 1 } else { 0 },
+                |current| {
+                    current
+                        .saturating_add_signed(delta)
+                        .min(popup.rows.len() - 1)
+                },
+            ));
+        }
+    }
+
+    pub(crate) fn submit_room_identity_selection(&mut self) {
+        let Some(popup) = self
+            .room_info
+            .identity_popup
+            .as_ref()
+            .filter(|popup| self.selected_room_key().as_ref() == Some(&popup.room))
+        else {
+            return;
+        };
+        if let Some(change) = popup.selected.and_then(|index| popup.rows.get(index)) {
+            self.start_room_identity_action(popup.room.clone(), Some(change.clone()));
+        }
+    }
+
+    /// Settle the rows before drawing. Enter uses the exact fingerprint last
+    /// presented for that row. A replacement or removed row loses selection.
+    pub(crate) fn prepare_room_identity_popup(
+        &mut self,
+        width: usize,
+        page: usize,
+    ) -> Vec<Line<'static>> {
+        use crate::api::IdentityChangeKind::{PinViolation, VerificationViolation};
+        use ratatui::style::Modifier;
+
+        let key = self.selected_room_key();
+        let current = self.room_identity_snapshot_is_current();
+        let changes = self
+            .room_identity_changes()
+            .map(|changes| changes.cloned().collect::<Vec<_>>());
+        let Some(popup) = self
+            .room_info
+            .identity_popup
+            .as_mut()
+            .filter(|popup| key.as_ref() == Some(&popup.room))
+        else {
+            return vec![Line::from("Room changed. Reopen /identity.")];
+        };
+        let mut lines = Vec::new();
+        if let Some(result) = &popup.result {
+            lines.extend(wrap_styled_line(Line::from(result.clone()), width));
+        }
+        let status = match changes.as_deref() {
+            None => Some("Room identity warnings are unavailable or still loading."),
+            Some([]) => Some("No room identity changes need attention."),
+            Some(_) if !current => Some("Refreshing warnings. Acknowledgements are paused."),
+            Some(_) => None,
+        };
+        if let Some(status) = status {
+            lines.extend(wrap_styled_line(Line::from(status), width));
+        }
+
+        let changes = changes.unwrap_or_default();
+        // Keep the slash-command review on the first current snapshot for
+        // this popup. A background redraw must not re-arm a typed command.
+        if current && !popup.commands_reviewed {
+            self.room_info.reviewed_identities.clone_from(&changes);
+            popup.commands_reviewed = true;
+        }
+        if popup.rows != changes {
+            let previous = popup.selected.and_then(|index| popup.rows.get(index));
+            popup.selected = previous
+                .and_then(|selected| changes.iter().position(|change| change == selected))
+                .or_else(|| (popup.rows.is_empty() && !changes.is_empty()).then_some(0));
+            popup.rows = changes;
+        }
+
+        for (index, change) in popup.rows.iter().enumerate() {
+            let action = match change.kind {
+                PinViolation => "Accept changed identity",
+                VerificationViolation => "Accept changed identity and withdraw verification",
+                _ => continue,
+            };
+            let selected = popup.selected == Some(index);
+            let marker = if selected { "> " } else { "  " };
+            let style = if selected {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let start = lines.len();
+            lines.extend(wrap_styled_line(
+                Line::styled(format!("{marker}{} — {action}", change.user_id), style),
+                width,
+            ));
+            if selected {
+                let end = lines.len();
+                if start < self.popup_scroll || end > self.popup_scroll.saturating_add(page) {
+                    self.popup_scroll = if start < self.popup_scroll {
+                        start
+                    } else {
+                        end.saturating_sub(page).min(start)
+                    };
+                }
+            }
+        }
+        lines
+    }
+
+    fn report_identity_action(&mut self, room: &RoomKey, message: String) {
+        if let Some(popup) = self.room_info.identity_popup.as_mut().filter(|popup| {
+            self.mode == Mode::Popup(PopupKind::RoomIdentity) && &popup.room == room
+        }) {
+            popup.result = Some(message);
+            if !self.room_info.identity_action_inflight {
+                popup.selected = None;
+                self.popup_scroll = 0;
+            }
+        } else if matches!(self.mode, Mode::Compose) && !self.is_mid_command() {
+            self.status = message.into();
+            self.pending_command_response = None;
+        } else {
+            self.room_info.identity_action_result = Some((room.clone(), message));
+        }
     }
 
     pub(super) fn apply_room_identity_action(
@@ -717,19 +847,29 @@ impl App {
             self.room_info.reviewed_identities.clear();
             let message = match result {
                 Ok(()) => "Identity change acknowledged.".to_owned(),
-                Err(ApiError::Status { status: reqwest::StatusCode::CONFLICT, .. }) => {
-                    "The warning changed. Run /identity to review the latest warning before retrying.".to_owned()
+                Err(ApiError::Status {
+                    status: reqwest::StatusCode::CONFLICT,
+                    message,
+                }) => {
+                    // The server currently uses the same error code for both conflicts.
+                    match message.as_str() {
+                        "conflict: the account is not active or its crypto store is not ready" =>
+                            "The account is inactive or its encryption state is still loading. Review the warning again once the account is ready.",
+                        "conflict: the identity warning changed; refresh room info and review it again" =>
+                            "The warning changed. Review the latest warning before retrying.",
+                        _ => "Axon could not acknowledge this warning. Review the latest warning before retrying.",
+                    }.to_owned()
                 }
                 Err(err) if err.is_service_unavailable() => {
-                    "Identity service unavailable. Run /identity to review the warning and try again later.".to_owned()
+                    "Identity service unavailable. Review the warning and try again later."
+                        .to_owned()
                 }
-                Err(_) => "Could not confirm acknowledgement. Run /identity to review the latest warning.".to_owned(),
+                Err(_) => {
+                    "Could not confirm acknowledgement. Review the latest warning before retrying."
+                        .to_owned()
+                }
             };
-            self.room_info.identity_action_result = Some((room.clone(), message.clone()));
-            if matches!(self.mode, Mode::Compose) && !self.is_mid_command() {
-                self.status = message.into();
-                self.pending_command_response = None;
-            }
+            self.report_identity_action(&room, message);
         }
         // The acknowledgement is account-wide, so a different selected room
         // for the same account can also need its projection refreshed.
@@ -743,7 +883,7 @@ impl App {
         }
     }
 
-    fn selected_room_key(&self) -> Option<RoomKey> {
+    pub(super) fn selected_room_key(&self) -> Option<RoomKey> {
         self.selected_room().map(RoomKey::from)
     }
 
@@ -4668,6 +4808,14 @@ mod tests {
         }
     }
 
+    fn identity_popup_text(app: &mut App) -> String {
+        app.prepare_room_identity_popup(100, 15)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[tokio::test]
     async fn identity_changes_follow_the_selected_room_and_require_review_after_replacement() {
         use crate::api::{IdentityChangeKind, RoomIdentityChange};
@@ -4691,10 +4839,8 @@ mod tests {
         assert_eq!(app.room_info.reads.len(), 1);
         settle(&mut app, info(change.clone()), now);
         app.handle_command(crate::command::parse("/identity")).await;
-        assert!(app
-            .status
-            .text(false)
-            .contains("/identity withdraw-verification @ada:example.com"));
+        assert!(identity_popup_text(&mut app)
+            .contains("@ada:example.com — Accept changed identity and withdraw verification"));
         assert_eq!(app.room_info.reviewed_identities, vec![change.clone()]);
 
         app.handle_live_frame(frame(
@@ -4713,12 +4859,21 @@ mod tests {
         ));
         change.fingerprint = "replacement".to_owned();
         settle(&mut app, info(change.clone()), now);
-        app.room_identity_command(Some((change.kind, user)));
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
+        assert!(!app.room_info.identity_action_inflight);
+        assert!(identity_popup_text(&mut app).contains("select the current warning"));
         assert!(app
-            .status
-            .text(false)
-            .contains("review the current warning"));
-        assert_eq!(app.room_identity_changes().unwrap(), &[change]);
+            .room_info
+            .identity_popup
+            .as_ref()
+            .unwrap()
+            .selected
+            .is_none());
+        assert_eq!(app.room_info.reviewed_identities[0].fingerprint, "first");
+        assert_eq!(
+            app.room_identity_changes().unwrap().collect::<Vec<_>>(),
+            vec![&change]
+        );
 
         app.note_room_info_reconnect(now);
         settle(
@@ -4729,8 +4884,144 @@ mod tests {
             })),
             now,
         );
-        assert_eq!(app.room_identity_changes(), Some([].as_slice()));
+        assert_eq!(app.room_identity_changes().map(Iterator::count), Some(0));
         assert!(app.room_info.reads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unknown_and_invalid_identity_entries_preserve_counts_and_stay_hidden() {
+        let mut app = app();
+        let mut info: RoomInfoDto = serde_json::from_value(json!({
+            "member_counts": {"joined": 3, "invited": 0, "observed_at": 1},
+            "identity_changes": [
+                {"user_id": "@future:example.com", "kind": "future_warning", "fingerprint": "key"},
+                {"user_id": "@invalid\n:example.com", "kind": "pin_violation", "fingerprint": "key"},
+                {"user_id": "@peer:example.com", "kind": "pin_violation", "fingerprint": "key"}
+            ]
+        })).unwrap();
+        assert_eq!(
+            info.member_counts
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .joined,
+            3
+        );
+        app.room_info.state = Some(loaded(None, Some(info.clone()), None));
+        assert!(app.has_room_identity_changes());
+        app.handle_command(crate::command::parse("/identity")).await;
+        assert!(
+            identity_popup_text(&mut app).contains("@peer:example.com — Accept changed identity")
+        );
+        assert_eq!(app.room_info.reviewed_identities.len(), 1);
+
+        info.identity_changes.as_mut().unwrap().pop();
+        app.room_info.state = Some(loaded(None, Some(info), None));
+        assert!(!app.has_room_identity_changes());
+        app.handle_command(crate::command::parse("/identity")).await;
+        assert_eq!(
+            identity_popup_text(&mut app),
+            "No room identity changes need attention."
+        );
+        assert!(app.room_info.reviewed_identities.is_empty());
+    }
+
+    #[tokio::test]
+    async fn identity_tab_completes_verbs_and_cycles_matching_room_users() {
+        let mut app = app();
+        let info = serde_json::from_value(json!({
+            "identity_changes": [
+                {"user_id": "@alice:example.com", "kind": "pin_violation", "fingerprint": "key"},
+                {"user_id": "@albert:example.com", "kind": "pin_violation", "fingerprint": "key"},
+                {"user_id": "@verified:example.com", "kind": "verification_violation", "fingerprint": "key"}
+            ]
+        })).unwrap();
+        app.room_info.state = Some(loaded(None, Some(info), None));
+        app.rooms
+            .display_names
+            .entry(key())
+            .or_default()
+            .insert("@verified:example.com".to_owned(), "Bob".to_owned());
+        app.insert_str("/identity a");
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
+        assert_eq!(app.input.buffer, "/identity accept ");
+        app.insert_str("@al");
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
+        assert_eq!(app.input.buffer, "/identity accept @albert:example.com");
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
+        assert_eq!(app.input.buffer, "/identity accept @alice:example.com");
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
+            .await;
+        assert_eq!(app.input.buffer, "/identity accept @albert:example.com");
+
+        app.clear_input_buffer();
+        app.insert_str("/identity w");
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
+        assert_eq!(app.input.buffer, "/identity withdraw-verification ");
+        app.insert_str("bob");
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
+        assert_eq!(
+            app.input.buffer,
+            "/identity withdraw-verification @verified:example.com"
+        );
+    }
+
+    #[test]
+    fn identity_banners_preserve_the_room_and_thread_title_in_a_narrow_pane() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = app();
+        let account: crate::api::AccountDto = serde_json::from_value(json!({
+            "account_id": key().account_id, "user_id": "@me:example.com", "state": "active",
+            "own_identity_changed": true,
+        }))
+        .unwrap();
+        app.set_accounts(vec![account]);
+        let info = serde_json::from_value(json!({
+            "identity_changes": [
+                {"user_id": "@peer:example.com", "kind": "pin_violation", "fingerprint": "key"}
+            ]
+        }))
+        .unwrap();
+        app.room_info.state = Some(loaded(None, Some(info), None));
+        app.rooms_panel_hidden = true;
+        app.thread_panel = Some("$thread:example.com".to_owned());
+
+        let mut terminal = Terminal::new(TestBackend::new(34, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                crate::ui::prepare(&mut app, frame.area());
+                crate::ui::draw(frame, &mut app);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let messages = app.frame.areas.messages;
+        let top = (messages.x..messages.right())
+            .map(|x| buffer.cell((x, messages.y)).unwrap().symbol())
+            .collect::<String>();
+        assert!(top.contains("Ops  [in thread]"), "{top:?}");
+    }
+
+    #[tokio::test]
+    async fn an_identity_action_result_waiting_behind_a_popup_is_shown_once() {
+        let mut app = app();
+        app.room_info.state = Some(loaded(
+            None,
+            Some(RoomInfoDto {
+                identity_changes: Some(Vec::new()),
+                ..Default::default()
+            }),
+            None,
+        ));
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        app.apply_room_identity_action(key(), Ok(()));
+        app.mode = Mode::Compose;
+        app.handle_command(crate::command::parse("/identity")).await;
+        assert!(identity_popup_text(&mut app).contains("Identity change acknowledged."));
+        app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+        app.handle_command(crate::command::parse("/identity")).await;
+        assert!(!identity_popup_text(&mut app).contains("Identity change acknowledged."));
     }
 
     #[tokio::test]
@@ -4738,18 +5029,30 @@ mod tests {
         use crate::api::{IdentityChangeKind, RoomIdentityChange};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        for (kind, slash_action, endpoint, response) in [
+        for (kind, slash_action, endpoint, response, error_body, expected) in [
             (
                 IdentityChangeKind::PinViolation,
                 "accept",
                 "accept",
                 "204 No Content",
+                "",
+                "acknowledged",
             ),
             (
                 IdentityChangeKind::VerificationViolation,
                 "withdraw-verification",
                 "withdraw_verification",
                 "409 Conflict",
+                r#"{"error":{"code":"conflict","message":"the identity warning changed; refresh room info and review it again"}}"#,
+                "Review the latest warning",
+            ),
+            (
+                IdentityChangeKind::PinViolation,
+                "accept",
+                "accept",
+                "409 Conflict",
+                r#"{"error":{"code":"conflict","message":"the account is not active or its crypto store is not ready"}}"#,
+                "encryption state is still loading",
             ),
         ] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -4771,8 +5074,15 @@ mod tests {
             });
             app.room_info.state = Some(state);
             app.handle_command(crate::command::parse("/identity")).await;
-            let command = format!("/identity {slash_action} @ada:example.com");
-            app.handle_command(crate::command::parse(&command)).await;
+            assert!(identity_popup_text(&mut app).contains("@ada:example.com"));
+            let from_popup = expected != "encryption state is still loading";
+            if from_popup {
+                app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
+            } else {
+                app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+                let command = format!("/identity {slash_action} @ada:example.com");
+                app.handle_command(crate::command::parse(&command)).await;
+            }
             assert!(app.room_info.identity_action_inflight);
 
             let server = async {
@@ -4791,7 +5101,7 @@ mod tests {
                 socket
                     .write_all(
                         format!(
-                            "HTTP/1.1 {response}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                            "HTTP/1.1 {response}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{error_body}", error_body.len()
                         )
                         .as_bytes(),
                     )
@@ -4806,14 +5116,16 @@ mod tests {
             app.handle_bootstrap_outcome(outcome.unwrap()).await;
             assert!(app.room_info.reviewed_identities.is_empty());
             assert!(app.room_info.state.as_ref().unwrap().info.refresh.dirty);
-            assert!(app
-                .status
-                .text(false)
-                .contains(if response.starts_with("409") {
-                    "review the latest warning"
-                } else {
-                    "acknowledged"
-                }));
+            if from_popup {
+                assert_eq!(app.mode, Mode::Popup(PopupKind::RoomIdentity));
+                assert!(identity_popup_text(&mut app).contains(expected));
+            } else {
+                assert!(app.status.text(false).contains(expected));
+            }
+            assert!(
+                app.room_info.identity_action_result.is_none(),
+                "result was already shown in the composer"
+            );
         }
     }
 
