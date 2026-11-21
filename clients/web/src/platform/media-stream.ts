@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
-import { StreamUnavailableError } from '../media/stream-ticket'
+import { StreamUnavailableError } from '../media/stream-unavailable'
 
 /**
  * The page's side of the shell's stream-ticket proxy (ADR 0139 § 7), served

@@ -516,10 +516,10 @@ It then plays the same file as audio, and loads an already-expired ticket.
 | Windows (WebView2), real server                            | not visible in the server log (the window rewrites ranges)                                       |                                |                     | 4 MiB blocks, one at a time, 1.4–2 s apart                          |                                                          | plays, but buffers often on a link that delivered 0.4–0.5 MB/s to every client on it, against the 1.37 MB/s the 557 MB, 408 s test video needs                                                 |
 | Android 15 emulator (WebView 124), harness, wry 0.57.0     | `bytes=0-`                                                                                       | 1.1 s (video), 1.8 s (audio)   | —                   | 1 per block, as on macOS                                            | `206` and `404` readable from byte 0                     | every range after byte 0 fails with `net::ERR_FAILED`, so playback stops at the first 4 MiB and seeking never completes ([issue 1194](https://github.com/matrix-axon/matrix-axon/issues/1194)) |
 | Android 15 emulator (WebView 124), harness, wry 0.57.3     | `bytes=0-`                                                                                       | 1.1 s (video), 1.3 s (audio)   | 2.72 s / 1.69 s     | 13 video, 7 audio (4 MiB, on the grid)                              | `206` and `404` readable                                 | mid-play: plays on from its buffer, then the WebView retries the `404` about twice a second (12 in 14 s) until the source changes; the probe sees `404`                                        |
-| Linux (WebKitGTK 2.52, GStreamer 1.28), harness under Xvfb | none: the player refuses the scheme before it sends a request                                    | —                              | —                   | —                                                                   | `206` and `404` readable                                 | every media element fails with `MEDIA_ERR_SRC_NOT_SUPPORTED` within 150 ms; Linux keeps the blob path ([issue 1192](https://github.com/matrix-axon/matrix-axon/issues/1192))                   |
+| Linux (WebKitGTK 2.52, GStreamer 1.28), harness under Xvfb | none: the player refuses the scheme before it sends a request                                    | —                              | —                   | —                                                                   | `206` and `404` readable                                 | every media element fails with `MEDIA_ERR_SRC_NOT_SUPPORTED` within 150 ms, so Linux uses the loopback server (next row; [issue 1192](https://github.com/matrix-axon/matrix-axon/issues/1192)) |
 | Linux, loopback server (amendment below), same harness     | no `Range`, answered with a streamed `200`; then `bytes=N-` each time the player resumes reading | 0.32 s (video), 0.20 s (audio) | 0.93 s / 1.05 s     | 11 video in 37 s, each ended by the player once its buffer was full | `206` and `404` readable (CORS from the loopback server) | mid-play: `error` (code 2) at the first `404`, at once; at load: `error` (code 4)                                                                                                              |
 
-**Linux cannot play through the scheme, so it keeps the blob path.**
+**Linux cannot play through the scheme, so it streams from a loopback server instead.**
 WebKitGTK's GStreamer player admits only the URL schemes in its allow-list (`isProtocolAllowed` in WebKit's `GStreamerCommon.cpp`: `blob`, `data`, `file`, `http`, `https`, and any named in `WEBKIT_GST_ALLOWED_URI_PROTOCOLS`).
 With the scheme added through that variable, the URL reaches GStreamer's `uridecodebin`, which has no source element for `axon-media`.
 That pipeline runs in WebKit's web process, where the shell cannot register one.
@@ -596,9 +596,10 @@ WebKit does not treat a load from `127.0.0.1` as mixed content, so the `axon://`
 That was checked on WebKitGTK 2.52 before the server was written: the media element played from a plain-HTTP loopback server, and the page's `fetch` reached it and failed only on CORS.
 The section 6 probe is therefore the page's own `fetch` of the same URL, as on the scheme.
 
-The CSP gains `http://127.0.0.1:*` in `media-src` and `connect-src`, on every platform.
-The port changes with each launch, so it cannot be named, and Tauri's per-platform configuration would mean a second copy of the whole CSP string for Linux, to drift from the first.
-On the other platforms nothing listens, and the page can already reach any `http` or `https` URL through the plugin's `send` command (ADR 0127 § 8), so the source gives a compromised page nothing new.
+The Linux shell's CSP gains `http://127.0.0.1:*` in `media-src` and `connect-src`; the port changes with each launch, so it cannot be named.
+The other shells never listen on loopback, so their CSP does not name it, which keeps a compromised page there from reaching other local HTTP services with its own `fetch`.
+Tauri merges `tauri.linux.conf.json` over `tauri.conf.json` for a Linux build, and merges a string whole, so that file holds a second copy of the CSP.
+A test in the shell crate (`the_linux_csp_is_the_base_csp_plus_the_loopback_server`) fails if the two differ by anything but those two sources, so a change to the base CSP cannot leave the Linux shell on the old one.
 
 If the server cannot start, `mediaStreamSrc` rejects with `StreamUnavailableError`, `issue` answers `refused`, and the player falls back to the blob path.
 The listener lives as long as the shell does; the shell has one window, and quits with it.
@@ -639,7 +640,7 @@ This phase begins by checking that support against production Synapse, and gets 
   In the browser, and through the Linux shell's loopback server, which streams unbounded (section 7, loopback amendment), an open-ended or Range-less request can deliver the rest of the object.
   This is accepted: the token's holder was entitled to that object when the response began, and the next request is refused.
 - `axon-media` adds a second custom scheme to the shells and widens their CSP by one source.
-- The Linux shell listens on a loopback port while it runs, guarded by a per-launch token, and the CSP of every shell admits `http://127.0.0.1:*` (section 7, loopback amendment).
+- The Linux shell listens on a loopback port while it runs, guarded by a per-launch token, and the Linux shell's CSP admits `http://127.0.0.1:*` (section 7, loopback amendment).
 - Each `axon-media` scheme response is buffered in the shell process, up to 4 MiB, so a 1 GiB video takes about 256 scheme requests (section 7).
   A scheme request without `Range` for an object larger than that is refused (section 7), so the device check is what confirms that no player on a scheme platform sends one.
   The Linux shell's player does, which is one reason it uses the loopback server, which streams the server's `200` through instead (section 7, loopback amendment).

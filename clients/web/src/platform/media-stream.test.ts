@@ -22,7 +22,7 @@ vi.mock('@tauri-apps/api/core', () => ({
     `${protocol}://localhost/${encodeURIComponent(path)}`,
 }))
 
-import { StreamUnavailableError } from '../media/stream-ticket'
+import { StreamUnavailableError } from '../media/stream-unavailable'
 import {
   loopbackMediaStreamSrc,
   mediaStreamSrcFor,
