@@ -1,6 +1,6 @@
 # ADR 0141 — Prefer the self-hosted CI runners when one is free
 
-**Status:** Proposed.
+**Status:** Accepted.
 Supersedes nothing.
 Changes which machine runs some CI jobs, and no workflow's triggers.
 
@@ -373,7 +373,8 @@ Before a runner takes jobs from this repository:
   The check is a root-owned script that runs before the runner starts.
 - **Root updates the runner.**
   The runner normally updates itself, which needs write access to its install directory.
-  So it is configured with `--disableupdate`, and a root-owned timer installs each runner release: a systemd timer on Linux, a LaunchDaemon on macOS.
+  So it is configured with `--disableupdate`, and a maintainer installs each runner release as root, by hand, when CI shows a runner needs it.
+  A root-owned timer can automate this later (a systemd timer on Linux, a LaunchDaemon on macOS) if manual updates become a chore.
 - **It cannot read other accounts' home directories.**
 - **It runs as a system service**, so the hook and `.env` survive a reboot.
   On Linux that is the root-owned systemd unit.
@@ -399,7 +400,7 @@ A dedicated machine or VM comes first if either of these ever changes:
 ### 8. Rollout
 
 1. **Prepare what the pilot needs:**
-   - the runner-account requirements in decision 7, on both machines, including the root-owned install, its start-time check and its update timer;
+   - the runner-account requirements in decision 7, on both machines, including the root-owned install and its start-time check;
    - the custom labels;
    - allow this public repository in the Default runner group;
    - the job-started hook;
@@ -459,9 +460,10 @@ A dedicated machine or VM comes first if either of these ever changes:
 - **One more secret, one more variable and one org App** to own.
   If any of them is missing or revoked, every job falls back to hosted runners, so nothing breaks, and decision 2's warning shows it.
 - **Runner updates are ours.**
-  With self-update disabled (decision 7), the root-owned timer installs each runner release.
+  With self-update disabled (decision 7), a maintainer installs each runner release by hand, and re-registers a runner whose registration has lapsed.
   GitHub stops sending jobs to a runner that falls 30 days behind a release, and the runners API does not report the runner's version.
-  If the timer lapses, the picker can keep choosing a runner that will never take the job, until the runner is updated or the kill switch is set.
+  If an update is missed, the picker can keep choosing a runner that will never take the job.
+  CI then shows jobs waiting on the self-hosted label, and the remedy is to set the kill switch, then update the runner.
 
 ## Alternatives considered
 
