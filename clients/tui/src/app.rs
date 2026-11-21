@@ -604,6 +604,7 @@ pub(crate) enum PopupKind {
     Shortcuts,
     UnreadThreads,
     RoomInfo,
+    RoomIdentity,
     Status,
     CommandResponse,
     MediaPreview,
@@ -1375,6 +1376,7 @@ pub(crate) struct InputState {
     pub(crate) delete_command_completion: Option<(String, usize)>,
     pub(crate) account_command_completion: Option<(String, usize)>,
     pub(crate) verify_command_completion: Option<(String, usize)>,
+    pub(crate) identity_user_completion: Option<(RoomKey, String, usize)>,
     pub(crate) filter_command_completion: Option<(String, usize)>,
     pub(crate) send_command_completion: Option<(String, usize)>,
 }
@@ -1993,6 +1995,7 @@ impl App {
         self.input.delete_command_completion = None;
         self.input.account_command_completion = None;
         self.input.verify_command_completion = None;
+        self.input.identity_user_completion = None;
         self.input.filter_command_completion = None;
         self.input.send_command_completion = None;
     }

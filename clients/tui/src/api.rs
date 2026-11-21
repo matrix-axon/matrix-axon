@@ -406,25 +406,19 @@ impl AxonClient {
         account_id: Uuid,
         change: &RoomIdentityChange,
     ) -> Result<(), ApiError> {
+        let action = change
+            .kind
+            .action()
+            .ok_or_else(|| ApiError::Request("unsupported identity warning kind".to_owned()))?;
         let request = self
             .http
             .post(format!(
-                "{}/v1/accounts/{account_id}/users/{}/identity/{}",
+                "{}/v1/accounts/{account_id}/users/{}/identity/{action}",
                 self.base_url,
                 path_segment(&change.user_id),
-                change.kind.action(),
             ))
             .json(&serde_json::json!({ "fingerprint": change.fingerprint }));
-        // The operation only needs the status code, including on failure.
-        let status = read_request(request).send().await?.status();
-        if status == StatusCode::NO_CONTENT {
-            Ok(())
-        } else {
-            Err(ApiError::Status {
-                status,
-                message: "identity acknowledgement failed".to_owned(),
-            })
-        }
+        self.send_no_body(message_mutation(request)).await
     }
 
     pub async fn room_upgrade(
@@ -2190,13 +2184,16 @@ pub struct RoomIdentityChange {
 pub enum IdentityChangeKind {
     PinViolation,
     VerificationViolation,
+    #[serde(other)]
+    Unrecognized,
 }
 
 impl IdentityChangeKind {
-    pub(crate) fn action(self) -> &'static str {
+    fn action(self) -> Option<&'static str> {
         match self {
-            Self::PinViolation => "accept",
-            Self::VerificationViolation => "withdraw_verification",
+            Self::PinViolation => Some("accept"),
+            Self::VerificationViolation => Some("withdraw_verification"),
+            Self::Unrecognized => None,
         }
     }
 }

@@ -303,7 +303,7 @@ impl App {
                     self.request_account_refresh();
                 } else {
                     match result {
-                        Ok(accounts) => self.apply_account_refresh(accounts),
+                        Ok(accounts) => self.set_accounts(accounts),
                         Err(err)
                             if !self.is_mid_command()
                                 && matches!(self.status, Status::Debug(_)) =>
@@ -411,6 +411,38 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         app.set_bootstrap_sender(tx);
         (app, rx)
+    }
+
+    #[tokio::test]
+    async fn background_account_refresh_preserves_an_explicit_all_selection() {
+        use crate::app::AccountSelection;
+
+        let (mut app, _rx) = app();
+        let account_id = Uuid::new_v4();
+        app.account_filter = Some(account_id);
+        let account = AccountDto {
+            account_id,
+            user_id: "@alice:example.com".to_owned(),
+            state: crate::api::AccountState::Active,
+            device_id: None,
+            verified: None,
+            own_identity_changed: false,
+            backup: Default::default(),
+        };
+        app.handle_bootstrap_outcome(BootstrapOutcome::Accounts(Ok(vec![account.clone()])))
+            .await;
+        assert_eq!(app.accounts.selected, AccountSelection::Account(0));
+        app.accounts.selected = AccountSelection::All;
+
+        let mut updated = account;
+        updated.own_identity_changed = true;
+        app.handle_bootstrap_outcome(BootstrapOutcome::AccountRefresh {
+            generation: app.account_refresh.generation,
+            result: Ok(vec![updated]),
+        })
+        .await;
+        assert_eq!(app.accounts.selected, AccountSelection::All);
+        assert!(app.accounts.accounts[0].own_identity_changed);
     }
 
     /// The stages advance in order, each one starting the next. The ordering is
