@@ -68,6 +68,7 @@ pub(super) fn event_with_state_key(
         redacted: false,
         redaction_event_id: None,
         reactions: None,
+        utd_reason: None,
         sender_trust: None,
     }
 }
@@ -272,6 +273,7 @@ pub(super) fn account_with_id(account_id: Uuid, user_id: &str, state: AccountSta
         state,
         device_id: None,
         verified: Some(false),
+        own_identity_changed: false,
         backup: BackupSnapshot::default(),
     }
 }

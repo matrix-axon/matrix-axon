@@ -27,6 +27,7 @@ pub enum Command {
     Event(String),
     Whoami,
     Whereami,
+    Identity(Option<(crate::api::IdentityChangeKind, String)>),
     Search(crate::search::SearchCommandInput),
     React(Option<String>),
     Unreact,
@@ -146,6 +147,7 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand::supported("/event", true),
     SlashCommand::supported("/whoami", false),
     SlashCommand::supported("/whereami", false),
+    SlashCommand::supported("/identity", true),
     SlashCommand::supported("/search", true),
     SlashCommand::supported("/react", true),
     SlashCommand::supported("/unreact", false),
@@ -315,6 +317,11 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         description: "show your Matrix ID, profile name, and this session's device",
     },
     HelpCommand {
+        label: "/identity [accept|withdraw-verification @user:server]",
+        insert_text: "/identity",
+        description: "review identity changes in this room and acknowledge a reviewed change",
+    },
+    HelpCommand {
         label: "/whereami",
         insert_text: "/whereami",
         description: "show room information",
@@ -407,7 +414,7 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     HelpCommand {
         label: "/refresh, /rooms",
         insert_text: "/refresh",
-        description: "refresh rooms, pending invites, and redraw the display",
+        description: "refresh accounts, rooms, pending invites, and redraw the display",
     },
     HelpCommand {
         label: "/saveconfig",
@@ -509,6 +516,20 @@ pub fn parse(input: &str) -> Command {
         "event" => Command::Invalid("/event requires an event id".to_owned()),
         "whoami" => Command::Whoami,
         "whereami" => Command::Whereami,
+        "identity" => {
+            let tokens: Vec<_> = arg.split_whitespace().take(3).collect();
+            use crate::api::IdentityChangeKind::{PinViolation, VerificationViolation};
+            match tokens.as_slice() {
+                [] => Command::Identity(None),
+                ["accept", user] => Command::Identity(Some((PinViolation, (*user).to_owned()))),
+                ["withdraw-verification", user] => {
+                    Command::Identity(Some((VerificationViolation, (*user).to_owned())))
+                }
+                _ => Command::Invalid(
+                    "usage: /identity [accept|withdraw-verification @user:server]".to_owned(),
+                ),
+            }
+        }
         "search" => Command::Search(crate::search::parse_search_command_arg(arg)),
         "react" => Command::React((!arg.is_empty()).then(|| arg.to_owned())),
         "unreact" => Command::Unreact,

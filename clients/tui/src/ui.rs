@@ -1051,13 +1051,27 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     } else {
         Style::default().fg(app.colors.border)
     };
-    let messages_title = if let Mode::Search(SearchKind::Messages, q) = &app.mode {
+    let mut messages_title = if let Mode::Search(SearchKind::Messages, q) = &app.mode {
         format!("{title}  Search: {q}")
     } else if app.thread_panel.is_some() {
         format!("{title}  [in thread]")
     } else {
         title
     };
+    if app
+        .room_identity_changes()
+        .is_some_and(|changes| !changes.is_empty())
+    {
+        messages_title.insert_str(0, "Identity changes /identity · ");
+    }
+    if app.accounts.accounts.iter().any(|account| {
+        account.own_identity_changed
+            && app
+                .active_account_filter()
+                .is_none_or(|id| account.account_id == id)
+    }) {
+        messages_title.insert_str(0, "Account identity changed /status · ");
+    }
     let mut messages_block = Block::default()
         .style(
             Style::default()
@@ -1457,6 +1471,15 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(app.colors.border)
+    };
+    let command_title = if app.mode == Mode::Compose
+        && app
+            .room_identity_changes()
+            .is_some_and(|changes| !changes.is_empty())
+    {
+        "Identity changes /identity".to_owned()
+    } else {
+        command_title
     };
     let input = Paragraph::new(command_line)
         .block(
@@ -3107,6 +3130,9 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
                 "  {marker} {identity}  ({state_label}, {rooms_for_account} rooms)",
             ));
             lines.push(format!("      device: {device_str}  [{verified_str}]",));
+            if account.own_identity_changed {
+                lines.push("      Your Matrix identity changed. Select this account and use /verify, or use /recover with its recovery key.".to_owned());
+            }
             lines.extend(
                 account
                     .backup
@@ -3659,6 +3685,7 @@ mod tests {
                 state: crate::api::AccountState::Active,
                 device_id: None,
                 verified: Some(true),
+                own_identity_changed: false,
                 backup: Default::default(),
             });
         }
@@ -4088,6 +4115,7 @@ mod tests {
                 redacted: false,
                 redaction_event_id: None,
                 reactions: None,
+                utd_reason: None,
                 sender_trust: None,
             }],
         );
@@ -4255,6 +4283,7 @@ mod tests {
                     redacted: false,
                     redaction_event_id: None,
                     reactions: None,
+                    utd_reason: None,
                     sender_trust: None,
                 },
                 score: 1.0,
@@ -4323,6 +4352,7 @@ mod tests {
                     redacted: false,
                     redaction_event_id: None,
                     reactions: None,
+                    utd_reason: None,
                     sender_trust: None,
                 },
                 score: 1.0,
@@ -4783,6 +4813,7 @@ mod tests {
                 redacted: false,
                 redaction_event_id: None,
                 reactions: None,
+                utd_reason: None,
                 sender_trust: None,
             }],
         );

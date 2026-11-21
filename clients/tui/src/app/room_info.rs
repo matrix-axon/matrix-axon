@@ -149,6 +149,9 @@ pub(crate) struct RoomInfoState {
 /// shows its earlier data while the refresh is in flight.
 #[derive(Debug, Default)]
 pub(crate) struct RoomInfoCache {
+    reviewed_identities: Vec<crate::api::RoomIdentityChange>,
+    identity_action_inflight: bool,
+    identity_action_result: Option<(RoomKey, String)>,
     pub(crate) state: Option<RoomInfoState>,
     generation: u64,
     /// One abort handle per source; a key change or close drains them all.
@@ -176,14 +179,22 @@ impl RoomInfoState {
 }
 
 impl RoomInfoCache {
-    fn abort_reads(&mut self) {
-        for (_, read) in self.reads.drain() {
-            read.abort();
-        }
+    fn abort_reads(&mut self, keep_info: bool) {
+        self.reads.retain(|source, read| {
+            if keep_info && *source == Source::Info {
+                true
+            } else {
+                read.abort();
+                false
+            }
+        });
         if let Some(state) = self.state.as_mut() {
             let members_loading =
                 state.members.value.is_none() && state.members.refresh.request.is_some();
             for source in Source::ALL {
+                if keep_info && source == Source::Info {
+                    continue;
+                }
                 let read = state.refresh(source);
                 read.request = None;
                 read.dirty = false;
@@ -239,14 +250,29 @@ impl App {
     /// Fetch each idle source for one room. Changing the key cancels all old
     /// requests before allocating the next room's state.
     pub(crate) fn request_room_info(&mut self, key: RoomKey) {
+        self.track_room_info(key);
+        if let Some(state) = self.room_info.state.as_mut() {
+            for source in Source::ALL {
+                let read = state.refresh(source);
+                if read.request.is_none() {
+                    read.invalidate();
+                }
+            }
+        }
+        self.start_room_info_reads(Instant::now());
+    }
+
+    fn track_room_info(&mut self, key: RoomKey) {
         if self
             .room_info
             .state
             .as_ref()
             .is_none_or(|state| state.key != key)
         {
-            self.room_info.abort_reads();
+            self.room_info.abort_reads(false);
             self.clear_member_refresh();
+            self.room_info.reviewed_identities.clear();
+            self.room_info.identity_action_result = None;
             self.room_info.state = Some(RoomInfoState {
                 key,
                 metadata: Part::default(),
@@ -258,16 +284,10 @@ impl App {
                 member_filter: String::new(),
                 member_filter_editing: false,
             });
-        }
-        if let Some(state) = self.room_info.state.as_mut() {
-            for source in Source::ALL {
-                let read = state.refresh(source);
-                if read.request.is_none() {
-                    read.invalidate();
-                }
+            if let Some(state) = self.room_info.state.as_mut() {
+                state.info.refresh.invalidate();
             }
         }
-        self.start_room_info_reads(Instant::now());
     }
 
     fn start_room_info_reads(&mut self, now: Instant) {
@@ -346,7 +366,8 @@ impl App {
     /// Opening explicitly permits a retry of every source, including those
     /// whose previous HTTP request failed. Values and errors stay until settled.
     pub(crate) fn open_room_info(&mut self, key: RoomKey) {
-        self.room_info.abort_reads();
+        self.room_info
+            .abort_reads(self.room_info_for_selected().is_some());
         if let Some(state) = self
             .room_info
             .state
@@ -362,23 +383,24 @@ impl App {
         self.request_room_info(key);
     }
 
-    /// The tick handles delayed membership reads and failed-read retries only.
-    /// There is no periodic read after a source succeeds.
-    pub(crate) fn poll_open_room_info(&mut self, now: Instant) {
-        if !self.room_info_popup_is_open() {
-            self.cancel_room_info_refresh();
-            return;
-        }
+    /// Track the selected room's /info projection for identity warnings.
+    /// Other sources run only while /whereami is open.
+    /// After a successful read, wait for a trigger instead of polling.
+    pub(crate) fn poll_room_info(&mut self, now: Instant) {
         let Some(key) = self.selected_room_key() else {
             self.cancel_room_info_refresh();
+            self.room_info.state = None;
+            self.room_info.reviewed_identities.clear();
+            self.room_info.identity_action_result = None;
             return;
         };
-        if self
-            .room_info
-            .state
-            .as_ref()
-            .is_none_or(|state| state.key != key)
-        {
+        if !self.room_info_popup_is_open() {
+            self.cancel_room_info_refresh();
+            self.track_room_info(key);
+            self.start_room_info_reads(now);
+            return;
+        }
+        if self.room_info_for_selected().is_none() {
             self.popup_scroll = 0;
             self.reveal_room_info_members = false;
             self.request_room_info(key);
@@ -393,14 +415,18 @@ impl App {
         self.start_room_info_reads(now);
     }
 
-    /// Reconnect repairs missed frames for the sources the popup currently holds.
+    /// Reconnect repairs missed /info frames and refreshes any open room popup.
     /// Each failing source permits one early reconnect retry per backoff window.
     pub(crate) fn note_room_info_reconnect(&mut self, now: Instant) {
-        if !self.room_info_popup_is_open() {
-            return;
+        let popup_open = self.room_info_popup_is_open();
+        if let Some(key) = self.selected_room_key() {
+            self.track_room_info(key);
         }
         if let Some(state) = self.room_info.state.as_mut() {
             for source in Source::ALL {
+                if !popup_open && source != Source::Info {
+                    continue;
+                }
                 let read = state.refresh(source);
                 if read.retry_at.is_some() && !read.reconnect_bypassed {
                     read.retry_at = None;
@@ -409,24 +435,28 @@ impl App {
                 read.invalidate();
             }
         }
-        self.poll_open_room_info(now);
+        self.poll_room_info(now);
     }
 
     /// The explicit refresh shortcut bypasses failure backoff while retaining
     /// the visible values, filter, and scroll position.
-    pub(crate) fn refresh_open_room_info(&mut self, now: Instant) {
-        if !self.room_info_popup_is_open() {
-            return;
+    pub(crate) fn refresh_room_info(&mut self, now: Instant) {
+        let popup_open = self.room_info_popup_is_open();
+        if let Some(key) = self.selected_room_key() {
+            self.track_room_info(key);
         }
         if let Some(state) = self.room_info.state.as_mut() {
             for source in Source::ALL {
+                if !popup_open && source != Source::Info {
+                    continue;
+                }
                 let read = state.refresh(source);
                 read.retry_at = None;
                 read.reconnect_bypassed = false;
                 read.invalidate();
             }
         }
-        self.poll_open_room_info(now);
+        self.poll_room_info(now);
     }
 
     pub(crate) fn note_room_details_changed(
@@ -435,9 +465,11 @@ impl App {
         sources: &[RoomDetailSource],
         now: Instant,
     ) {
-        if !self.room_info_popup_is_open() || self.selected_room_key().as_ref() != Some(key) {
+        if self.selected_room_key().as_ref() != Some(key) {
             return;
         }
+        let popup_open = self.room_info_popup_is_open();
+        self.track_room_info(key.clone());
         if let Some(state) = self
             .room_info
             .state
@@ -446,15 +478,16 @@ impl App {
         {
             for source in sources {
                 let source = match source {
-                    RoomDetailSource::Metadata => Source::Metadata,
-                    RoomDetailSource::MemberCounts => Source::Info,
-                    RoomDetailSource::HomeserverDetails => Source::Homeserver,
-                    RoomDetailSource::Unrecognized => continue,
+                    RoomDetailSource::Metadata if popup_open => Source::Metadata,
+                    RoomDetailSource::MemberCounts if popup_open => Source::Info,
+                    RoomDetailSource::HomeserverDetails if popup_open => Source::Homeserver,
+                    RoomDetailSource::IdentityChanges => Source::Info,
+                    _ => continue,
                 };
                 state.refresh(source).invalidate();
             }
         }
-        self.poll_open_room_info(now);
+        self.poll_room_info(now);
     }
 
     /// Metadata and counts use their persisted-state notifications. The two
@@ -480,13 +513,14 @@ impl App {
                 state.upgrade.refresh.invalidate();
             }
         }
-        self.poll_open_room_info(now);
+        self.poll_room_info(now);
     }
 
-    /// Cancel HTTP reads and retry intents; late outcomes no longer match an
-    /// active request. Keep last values, errors, retry history, and the local member filter.
+    /// Cancel popup-only reads and retries. Keep /info active for the selected
+    /// room, and preserve last values, errors, retry history, and the filter.
     pub(crate) fn cancel_room_info_refresh(&mut self) {
-        self.room_info.abort_reads();
+        self.room_info
+            .abort_reads(self.room_info_for_selected().is_some());
         self.clear_member_refresh();
     }
 
@@ -545,8 +579,167 @@ impl App {
         }
         // Follow up after all hints received during this source's request. A
         // different source need not settle first. Failed reads wait for retry_at.
-        if self.room_info_popup_is_open() && self.room_info_for_selected().is_some() {
+        if self.room_info_for_selected().is_some() {
             self.start_room_info_reads(now);
+        }
+    }
+
+    pub(crate) fn room_identity_changes(&self) -> Option<&[crate::api::RoomIdentityChange]> {
+        self.room_info_for_selected()?
+            .info
+            .value
+            .as_ref()?
+            .identity_changes
+            .as_deref()
+    }
+
+    fn room_identity_snapshot_is_current(&self) -> bool {
+        self.room_info_for_selected().is_some_and(|state| {
+            !state.info.refresh.dirty
+                && state.info.refresh.request.is_none()
+                && state.info.failure.is_none()
+        })
+    }
+
+    pub(super) fn room_identity_command(
+        &mut self,
+        action: Option<(crate::api::IdentityChangeKind, String)>,
+    ) {
+        use crate::api::IdentityChangeKind::{PinViolation, VerificationViolation};
+
+        let Some(room) = self.selected_room_key() else {
+            self.status = "Select a room to review identity changes.".into();
+            return;
+        };
+        self.track_room_info(room.clone());
+        let Some((kind, target)) = action else {
+            let changes = self.room_identity_changes().map(|changes| {
+                changes
+                    .iter()
+                    .filter(|change| {
+                        ruma::UserId::parse(&change.user_id).is_ok()
+                            && !change.user_id.chars().any(|ch| {
+                                ch.is_control() || ch.is_whitespace() || super::is_bidi_control(ch)
+                            })
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            });
+            let mut lines = Vec::new();
+            if let Some((_, result)) = self
+                .room_info
+                .identity_action_result
+                .as_ref()
+                .filter(|(key, _)| key == &room)
+            {
+                lines.push(result.clone());
+            }
+            match changes.as_deref() {
+                None => {
+                    lines.push("Room identity warnings are unavailable or still loading.".into())
+                }
+                Some([]) => lines.push("No room identity changes need attention.".into()),
+                Some(changes) => {
+                    for change in changes {
+                        let user = &change.user_id;
+                        let (warning, command) = match change.kind {
+                            PinViolation => ("identity changed", "accept"),
+                            VerificationViolation => (
+                                "previously verified identity changed",
+                                "withdraw-verification",
+                            ),
+                        };
+                        lines.push(format!("{user} — {warning}."));
+                        lines.push(format!("  /identity {command} {user}"));
+                        if change.kind == VerificationViolation {
+                            lines.push("  Withdrawing removes the user's verified status.".into());
+                        }
+                    }
+                }
+            }
+            self.room_info.reviewed_identities = if self.room_identity_snapshot_is_current() {
+                changes.unwrap_or_default()
+            } else {
+                lines.push(
+                    "Refresh in progress or unavailable. Run /identity again before acknowledging."
+                        .into(),
+                );
+                Vec::new()
+            };
+            self.status = lines.join("\n").into();
+            return;
+        };
+
+        if self.room_info.identity_action_inflight {
+            self.status = "An identity acknowledgement is already in progress.".into();
+            return;
+        }
+        let change = self
+            .room_info
+            .reviewed_identities
+            .iter()
+            .find(|change| change.kind == kind && change.user_id == target);
+        let Some(change) = change
+            .filter(|change| {
+                self.room_identity_snapshot_is_current()
+                    && self
+                        .room_identity_changes()
+                        .is_some_and(|current| current.contains(change))
+            })
+            .cloned()
+        else {
+            self.status = "Run /identity to review the current warning and its action.".into();
+            return;
+        };
+        if self.bootstrap_tx.is_none() {
+            return;
+        }
+        self.room_info.identity_action_inflight = true;
+        self.room_info.identity_action_result = None;
+        self.status = "Acknowledging identity change…".into();
+        let client = self.client.clone();
+        self.spawn_bootstrap(async move {
+            let result = client
+                .acknowledge_identity_change(room.account_id, &change)
+                .await;
+            super::bootstrap::BootstrapOutcome::IdentityAcknowledged { room, result }
+        });
+    }
+
+    pub(super) fn apply_room_identity_action(
+        &mut self,
+        room: RoomKey,
+        result: Result<(), ApiError>,
+    ) {
+        self.room_info.identity_action_inflight = false;
+        let selected = self.selected_room_key();
+        if selected.as_ref() == Some(&room) {
+            self.room_info.reviewed_identities.clear();
+            let message = match result {
+                Ok(()) => "Identity change acknowledged.".to_owned(),
+                Err(ApiError::Status { status: reqwest::StatusCode::CONFLICT, .. }) => {
+                    "The warning changed. Run /identity to review the latest warning before retrying.".to_owned()
+                }
+                Err(err) if err.is_service_unavailable() => {
+                    "Identity service unavailable. Run /identity to review the warning and try again later.".to_owned()
+                }
+                Err(_) => "Could not confirm acknowledgement. Run /identity to review the latest warning.".to_owned(),
+            };
+            self.room_info.identity_action_result = Some((room.clone(), message.clone()));
+            if matches!(self.mode, Mode::Compose) && !self.is_mid_command() {
+                self.status = message.into();
+                self.pending_command_response = None;
+            }
+        }
+        // The acknowledgement is account-wide, so a different selected room
+        // for the same account can also need its projection refreshed.
+        if let Some(key) = selected.filter(|key| key.account_id == room.account_id) {
+            self.track_room_info(key);
+            if let Some(state) = self.room_info.state.as_mut() {
+                state.info.refresh.retry_at = None;
+                state.info.refresh.invalidate();
+            }
+            self.start_room_info_reads(Instant::now());
         }
     }
 
@@ -726,7 +919,7 @@ impl App {
             .as_ref()
             .is_some_and(|state| &state.key == key)
         {
-            self.room_info.abort_reads();
+            self.room_info.abort_reads(false);
             self.room_info.state = None;
         }
     }
@@ -2156,6 +2349,7 @@ mod tests {
         let state = loaded(
             Some(full_metadata()),
             Some(RoomInfoDto {
+                identity_changes: None,
                 member_counts: Some(Some(RoomMemberCountsDto {
                     joined: 412,
                     invited: 3,
@@ -2227,6 +2421,7 @@ mod tests {
         let state = loaded(
             Some(all_unknown()),
             Some(RoomInfoDto {
+                identity_changes: None,
                 member_counts: Some(None),
             }),
             Some(RoomUpgradeDto::default()),
@@ -2595,7 +2790,10 @@ mod tests {
     #[tokio::test]
     async fn oversized_room_reads_are_refused() {
         let (client, _server) = stub_axon(1, |_| {
-            format!(r#"{{"data":{{"padding":"{}"}}}}"#, "x".repeat(128 * 1024))
+            format!(
+                r#"{{"data":{{"padding":"{}"}}}}"#,
+                "x".repeat(3 * 1024 * 1024)
+            )
         })
         .await;
 
@@ -3099,6 +3297,7 @@ mod tests {
 
     fn counts(joined: i64) -> RoomInfoDto {
         RoomInfoDto {
+            identity_changes: None,
             member_counts: Some(Some(RoomMemberCountsDto {
                 joined,
                 invited: 0,
@@ -3132,9 +3331,11 @@ mod tests {
     fn member_list_does_not_invent_a_joined_count() {
         let members = vec![listed_member("join", "@ada:example.com", Some("Ada"))];
         let absent = RoomInfoDto {
+            identity_changes: None,
             member_counts: None,
         };
         let unknown = RoomInfoDto {
+            identity_changes: None,
             member_counts: Some(None),
         };
         for info in [Some(absent), Some(unknown), None] {
@@ -3308,6 +3509,7 @@ mod tests {
                 redacted: false,
                 redaction_event_id: None,
                 reactions: None,
+                utd_reason: None,
                 sender_trust: None,
             }],
         );
@@ -3343,6 +3545,7 @@ mod tests {
                 redacted: false,
                 redaction_event_id: None,
                 reactions: None,
+                utd_reason: None,
                 sender_trust: None,
             }],
         );
@@ -4372,7 +4575,7 @@ mod tests {
         let text = crate::ui::popup_room_info_lines(&app).join("\n");
         assert!(text.contains("#secret:example.com"));
         assert!(text.contains("Latest refresh failed"));
-        app.refresh_open_room_info(now);
+        app.refresh_room_info(now);
         let denied: RoomHomeserverDetailsDto = serde_json::from_value(json!({
             "local_aliases": {"status": "forbidden", "aliases": null},
             "directory_visibility": {"status": "not_found", "visibility": null}
@@ -4466,6 +4669,155 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn identity_changes_follow_the_selected_room_and_require_review_after_replacement() {
+        use crate::api::{IdentityChangeKind, RoomIdentityChange};
+
+        let mut app = app();
+        wire_room_info(&mut app);
+        let now = Instant::now();
+        let user = "@ada:example.com".to_owned();
+        let mut change = RoomIdentityChange {
+            user_id: user.clone(),
+            kind: IdentityChangeKind::VerificationViolation,
+            fingerprint: "first".to_owned(),
+        };
+        let info = |change| {
+            RoomInfoPart::Info(Ok(RoomInfoDto {
+                identity_changes: Some(vec![change]),
+                ..Default::default()
+            }))
+        };
+        app.poll_room_info(now);
+        assert_eq!(app.room_info.reads.len(), 1);
+        settle(&mut app, info(change.clone()), now);
+        app.handle_command(crate::command::parse("/identity")).await;
+        assert!(app
+            .status
+            .text(false)
+            .contains("/identity withdraw-verification @ada:example.com"));
+        assert_eq!(app.room_info.reviewed_identities, vec![change.clone()]);
+
+        app.handle_live_frame(frame(
+            Uuid::new_v4(),
+            &key().room_id,
+            vec![RoomDetailSource::IdentityChanges],
+        ));
+        assert!(
+            app.room_info.reads.is_empty(),
+            "another account shares the same room ID"
+        );
+        app.handle_live_frame(frame(
+            key().account_id,
+            &key().room_id,
+            vec![RoomDetailSource::IdentityChanges],
+        ));
+        change.fingerprint = "replacement".to_owned();
+        settle(&mut app, info(change.clone()), now);
+        app.room_identity_command(Some((change.kind, user)));
+        assert!(app
+            .status
+            .text(false)
+            .contains("review the current warning"));
+        assert_eq!(app.room_identity_changes().unwrap(), &[change]);
+
+        app.note_room_info_reconnect(now);
+        settle(
+            &mut app,
+            RoomInfoPart::Info(Ok(RoomInfoDto {
+                identity_changes: Some(Vec::new()),
+                ..Default::default()
+            })),
+            now,
+        );
+        assert_eq!(app.room_identity_changes(), Some([].as_slice()));
+        assert!(app.room_info.reads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reviewed_identity_actions_send_account_user_kind_and_fingerprint() {
+        use crate::api::{IdentityChangeKind, RoomIdentityChange};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for (kind, slash_action, endpoint, response) in [
+            (
+                IdentityChangeKind::PinViolation,
+                "accept",
+                "accept",
+                "204 No Content",
+            ),
+            (
+                IdentityChangeKind::VerificationViolation,
+                "withdraw-verification",
+                "withdraw_verification",
+                "409 Conflict",
+            ),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut app = app();
+            app.client =
+                AxonClient::new(format!("http://{}", listener.local_addr().unwrap()), None);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            app.set_bootstrap_sender(tx);
+
+            let mut state = loaded(None, None, None);
+            let change = RoomIdentityChange {
+                user_id: "@ada:example.com".to_owned(),
+                kind,
+                fingerprint: "reviewed-key".to_owned(),
+            };
+            state.info.value = Some(RoomInfoDto {
+                identity_changes: Some(vec![change]),
+                ..Default::default()
+            });
+            app.room_info.state = Some(state);
+            app.handle_command(crate::command::parse("/identity")).await;
+            let command = format!("/identity {slash_action} @ada:example.com");
+            app.handle_command(crate::command::parse(&command)).await;
+            assert!(app.room_info.identity_action_inflight);
+
+            let server = async {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let body = br#"{"fingerprint":"reviewed-key"}"#;
+                while !request.ends_with(body) {
+                    let mut data = [0; 1024];
+                    let n = socket.read(&mut data).await.unwrap();
+                    assert!(n > 0 && request.len() < 4096);
+                    request.extend_from_slice(&data[..n]);
+                }
+                assert!(request.starts_with(
+                    format!("POST /v1/accounts/{}/users/%40ada%3Aexample.com/identity/{endpoint} HTTP/1.1", key().account_id).as_bytes()
+                ));
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {response}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            };
+            let (_, outcome) = tokio::time::timeout(Duration::from_secs(3), async {
+                tokio::join!(server, rx.recv())
+            })
+            .await
+            .unwrap();
+            app.handle_bootstrap_outcome(outcome.unwrap()).await;
+            assert!(app.room_info.reviewed_identities.is_empty());
+            assert!(app.room_info.state.as_ref().unwrap().info.refresh.dirty);
+            assert!(app
+                .status
+                .text(false)
+                .contains(if response.starts_with("409") {
+                    "review the latest warning"
+                } else {
+                    "acknowledged"
+                }));
+        }
+    }
+
+    #[tokio::test]
     async fn a_result_settles_while_selection_temporarily_moves_away() {
         let mut app = opened();
         let now = Instant::now();
@@ -4488,7 +4840,7 @@ mod tests {
         assert_eq!(app.room_info.generation, generation);
 
         app.rooms.selected = Some(0);
-        app.poll_open_room_info(now);
+        app.poll_room_info(now);
         assert_eq!(app.room_info.generation, generation + 1);
         settle(&mut app, success(Source::Metadata), now);
         assert!(app
@@ -4514,7 +4866,7 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
         let generation = app.room_info.generation;
         for seconds in [1, 60, 10000] {
-            app.poll_open_room_info(now + Duration::from_secs(seconds));
+            app.poll_room_info(now + Duration::from_secs(seconds));
         }
         let read = &app.room_info.state.as_ref().unwrap().metadata.refresh;
         assert_eq!(read.failures, 1);
@@ -4564,7 +4916,7 @@ mod tests {
         let now = Instant::now();
         settle_all(&mut app, now);
         let generation = app.room_info.generation;
-        app.poll_open_room_info(now + Duration::from_secs(10000));
+        app.poll_room_info(now + Duration::from_secs(10000));
         assert_eq!(app.room_info.generation, generation);
         assert!(app.room_info.reads.is_empty());
     }
@@ -4669,9 +5021,9 @@ mod tests {
                     .retry_at,
                 Some(due)
             );
-            app.poll_open_room_info(due - Duration::from_millis(1));
+            app.poll_room_info(due - Duration::from_millis(1));
             assert!(!app.room_info.reads.contains_key(&Source::Members));
-            app.poll_open_room_info(due);
+            app.poll_room_info(due);
             assert!(app.room_info.reads.contains_key(&Source::Members));
             now = due;
             settle(
@@ -4697,7 +5049,7 @@ mod tests {
             app.note_room_details_changed(&key(), &[RoomDetailSource::Metadata], now);
         }
         assert!(app.room_info.reads.is_empty());
-        app.poll_open_room_info(now + Duration::from_secs(30));
+        app.poll_room_info(now + Duration::from_secs(30));
         assert!(app.room_info.reads.contains_key(&Source::Metadata));
         settle(
             &mut app,
@@ -4705,7 +5057,7 @@ mod tests {
             now + Duration::from_secs(30),
         );
         let generation = app.room_info.generation;
-        app.poll_open_room_info(now + Duration::from_secs(10000));
+        app.poll_room_info(now + Duration::from_secs(10000));
         assert_eq!(app.room_info.generation, generation);
         assert!(app
             .room_info
@@ -4727,7 +5079,7 @@ mod tests {
             now,
         );
         let generation = app.room_info.generation;
-        app.poll_open_room_info(now + Duration::from_secs(10000));
+        app.poll_room_info(now + Duration::from_secs(10000));
         assert_eq!(app.room_info.generation, generation);
         assert_eq!(
             app.room_info.state.as_ref().unwrap().homeserver.failure,
@@ -4736,7 +5088,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closing_cancels_all_sources_and_rejects_late_outcomes() {
+    async fn closing_cancels_popup_only_sources_and_rejects_late_outcomes() {
         let mut app = opened();
         let generation = app
             .room_info
@@ -4748,7 +5100,8 @@ mod tests {
             .request
             .unwrap();
         app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
-        assert!(app.room_info.reads.is_empty());
+        assert_eq!(app.room_info.reads.len(), 1);
+        assert!(app.room_info.reads.contains_key(&Source::Info));
         app.apply_room_info_outcome(RoomInfoOutcome {
             key: key(),
             generation,
@@ -4763,7 +5116,7 @@ mod tests {
             .value
             .is_none());
         let previous = app.room_info.generation;
-        app.poll_open_room_info(Instant::now() + Duration::from_secs(10000));
+        app.poll_room_info(Instant::now() + Duration::from_secs(10000));
         assert_eq!(app.room_info.generation, previous);
     }
 
@@ -4785,7 +5138,7 @@ mod tests {
         other.account_id = Uuid::new_v4();
         app.rooms.rooms.push(other.clone());
         app.rooms.selected = Some(1);
-        app.poll_open_room_info(Instant::now());
+        app.poll_room_info(Instant::now());
         app.apply_room_info_outcome(RoomInfoOutcome {
             key: key(),
             generation,
@@ -4800,11 +5153,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn leaving_the_popup_without_esc_cancels_on_tick() {
+    async fn leaving_the_popup_without_esc_cancels_popup_only_reads_on_tick() {
         let mut app = opened();
         app.mode = Mode::MessageList;
-        app.poll_open_room_info(Instant::now());
-        assert!(app.room_info.reads.is_empty());
+        app.poll_room_info(Instant::now());
+        assert_eq!(app.room_info.reads.len(), 1);
+        assert!(app.room_info.reads.contains_key(&Source::Info));
         assert!(app
             .room_info
             .state
@@ -4868,9 +5222,9 @@ mod tests {
         settle_all(&mut app, now);
         app.note_room_info_timeline_event(&key(), "m.room.member", now);
         app.note_room_info_timeline_event(&key(), "m.room.member", now + Duration::from_secs(1));
-        app.poll_open_room_info(now + Duration::from_secs(2));
+        app.poll_room_info(now + Duration::from_secs(2));
         assert!(app.room_info.reads.is_empty());
-        app.poll_open_room_info(now + Duration::from_secs(3));
+        app.poll_room_info(now + Duration::from_secs(3));
         assert_eq!(app.room_info.reads.len(), 1);
         assert!(app.room_info.reads.contains_key(&Source::Members));
     }
@@ -4887,7 +5241,7 @@ mod tests {
                 now + Duration::from_secs(second),
             );
         }
-        app.poll_open_room_info(now + Duration::from_secs(10));
+        app.poll_room_info(now + Duration::from_secs(10));
         assert!(app.room_info.reads.contains_key(&Source::Members));
     }
 
@@ -4909,7 +5263,7 @@ mod tests {
         assert_eq!(app.room_info.reads.len(), 1);
         assert!(app.room_info.reads.contains_key(&Source::Upgrade));
         app.note_room_info_timeline_event(&key(), "m.room.redaction", now);
-        app.poll_open_room_info(now + Duration::from_secs(2));
+        app.poll_room_info(now + Duration::from_secs(2));
         assert!(app.room_info.reads.contains_key(&Source::Members));
         assert!(!app.room_info.reads.contains_key(&Source::Metadata));
     }
