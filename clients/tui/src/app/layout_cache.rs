@@ -160,6 +160,7 @@ fn layout_digest(inputs: &LayoutInputs<'_>) -> u64 {
     hash_sorted_map(&relations.thread_badges, &mut hasher);
     hash_sorted_map(&relations.thread_contexts, &mut hasher);
     relations.thread_root.hash(&mut hasher);
+    relations.unverified_accounts.hash(&mut hasher);
 
     config_generation.hash(&mut hasher);
     hasher.finish()
@@ -180,7 +181,16 @@ impl App {
             let sender_labels = self.sender_labels(events.as_slice());
             let reactions = self.selected_reactions();
             let image_thumb_rows = self.image_thumb_rows(events.as_slice());
-            let relations = self.relation_context(events.as_slice());
+            let mut relations = self.relation_context(events.as_slice());
+            relations.unverified_accounts.extend(
+                self.accounts
+                    .client_visible
+                    .iter()
+                    .filter(|account| {
+                        account.verified == Some(false) || account.own_identity_changed
+                    })
+                    .map(|account| account.account_id),
+            );
             let inputs = LayoutInputs {
                 events: events.as_slice(),
                 sender_labels: sender_labels.as_slice(),

@@ -535,8 +535,8 @@ async fn run_app(
                 app.flush_due_typing(now);
                 // Expire stale inbound typing overlays (M18, ADR 0056).
                 app.prune_typing(now);
-                // `/whereami` polls while it is open and cancels once it closes.
-                app.poll_open_room_info(now);
+                // Room info follows the selected room and the open /whereami popup.
+                app.poll_room_info(now);
                 // Re-read the room list for a leave axon timed out on, until
                 // the room drops off it (ADR 0121 decision 5, #743).
                 app.poll_pending_memberships(now);
@@ -653,6 +653,7 @@ async fn run_app(
                 // re-read exactly as much as later ones do (#210).
                 if reconnected && app.note_connected_frame() {
                     app.request_device_state();
+                    app.request_account_refresh();
                     app.request_space_reconnect_refresh(std::time::Instant::now());
                     app.request_invites_refresh();
                 }

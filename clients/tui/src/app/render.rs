@@ -60,6 +60,7 @@ pub(crate) struct RelationContext {
     /// main timeline. Keyed by the thread member event id. `Some(preview)` when
     /// the root was resolved; `None` when the root is not yet loaded.
     pub(crate) thread_contexts: HashMap<String, Option<ReplyPreview>>,
+    pub(crate) unverified_accounts: std::collections::BTreeSet<Uuid>,
 }
 
 /// Maximum characters of a replied-to body shown in a reply context line.
@@ -312,7 +313,18 @@ pub(crate) fn message_layout(
         let mut body_lines = if thumbnail.is_some() {
             Vec::new()
         } else {
-            message_body_lines(event, sender_label, first_body_w, cont_body_w, colors)
+            let mut lines =
+                message_body_lines(event, sender_label, first_body_w, cont_body_w, colors);
+            if event.key_withheld_for_unverified_device()
+                && relations.unverified_accounts.contains(&event.account_id)
+            {
+                lines.extend(plain_lines(
+                    "The sender's app withheld the key from unverified devices. Select this account and use /verify or /recover to read new messages.",
+                    cont_body_w,
+                    cont_body_w,
+                ));
+            }
+            lines
         };
         if let Some((account_id, mxc_url)) = thumbnail.clone() {
             let key = (account_id, mxc_url);

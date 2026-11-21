@@ -2269,6 +2269,7 @@ mod tests {
             state,
             device_id: None,
             verified: Some(false),
+            own_identity_changed: false,
             backup: Default::default(),
         };
         // Two active and one deactivated account come back from list_accounts.
@@ -2481,6 +2482,7 @@ mod tests {
             state: AccountState::Active,
             device_id: None,
             verified: Some(false),
+            own_identity_changed: false,
             backup: Default::default(),
         };
 

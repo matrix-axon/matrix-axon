@@ -604,6 +604,7 @@ pub(crate) enum PopupKind {
     Shortcuts,
     UnreadThreads,
     RoomInfo,
+    RoomIdentity,
     Status,
     CommandResponse,
     MediaPreview,
@@ -1191,6 +1192,7 @@ pub(crate) struct App {
     redaction_epochs: HashMap<RoomKey, u64>,
     /// Cached-state reads behind the `/whereami` popup (ADR 0114).
     pub(crate) room_info: room_info::RoomInfoCache,
+    account_refresh: bootstrap::AccountRefresh,
     /// Earliest instant a room may trigger another background `/members` refresh,
     /// rate-limiting the live unknown-sender path (see `spawn_members_refresh`).
     members_refresh_after: HashMap<RoomKey, std::time::Instant>,
@@ -1374,6 +1376,7 @@ pub(crate) struct InputState {
     pub(crate) delete_command_completion: Option<(String, usize)>,
     pub(crate) account_command_completion: Option<(String, usize)>,
     pub(crate) verify_command_completion: Option<(String, usize)>,
+    pub(crate) identity_user_completion: Option<(RoomKey, String, usize)>,
     pub(crate) filter_command_completion: Option<(String, usize)>,
     pub(crate) send_command_completion: Option<(String, usize)>,
 }
@@ -1488,6 +1491,7 @@ impl App {
             stale_redactions: HashMap::new(),
             redaction_epochs: HashMap::new(),
             room_info: room_info::RoomInfoCache::default(),
+            account_refresh: bootstrap::AccountRefresh::default(),
             members_refresh_after: HashMap::new(),
             members_workers: Arc::new(Semaphore::new(MEMBERS_WORKERS)),
             pending_reply: None,
@@ -1793,6 +1797,7 @@ impl App {
     /// (for display and navigation); inactive IDs are recorded separately so
     /// `is_known_inactive_account` can still filter their rooms off the room list.
     pub(crate) fn set_accounts(&mut self, accounts: Vec<AccountDto>) {
+        self.account_refresh.generation += 1;
         let selected_account_id = self.active_account_filter();
         self.last_recovery_results
             .retain(|id, _| accounts.iter().any(|account| account.account_id == *id));
@@ -1990,6 +1995,7 @@ impl App {
         self.input.delete_command_completion = None;
         self.input.account_command_completion = None;
         self.input.verify_command_completion = None;
+        self.input.identity_user_completion = None;
         self.input.filter_command_completion = None;
         self.input.send_command_completion = None;
     }
@@ -2198,6 +2204,7 @@ impl App {
             Command::Event(event_id) => self.show_event(&event_id).await,
             Command::Whoami => self.show_whoami(),
             Command::Whereami => self.show_whereami(),
+            Command::Identity(action) => self.room_identity_command(action),
             Command::Search(input) => self.open_or_run_search(input).await,
             Command::React(None) => {
                 self.select_most_recent_message_if_needed();
@@ -2646,6 +2653,7 @@ impl App {
             redacted: false,
             redaction_event_id: None,
             reactions: None,
+            utd_reason: None,
             sender_trust: None,
         };
         self.messages.scroll = usize::MAX;

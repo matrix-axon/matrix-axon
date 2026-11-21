@@ -662,6 +662,22 @@ fn prepare_popup(app: &mut App, screen: Rect) {
                 lines,
             )
         }
+        PopupKind::RoomIdentity => {
+            let width = usize::from(area.width.saturating_sub(2));
+            let controls = format!(
+                "{} ack · {} close",
+                app.shortcuts.submit.label(),
+                app.shortcuts.clear_input.label(),
+            );
+            let lines = app.prepare_room_identity_popup(width, page_size);
+            let full_title = format!("Room identities · {controls}");
+            let title = if display_width(&full_title) <= width {
+                full_title
+            } else {
+                fit_popup_title(&controls, width)
+            };
+            (title, lines)
+        }
         PopupKind::RoomInfo => (
             room_info_popup_title(app, usize::from(area.width.saturating_sub(2))),
             // Wrapped here rather than by the widget: scrolling counts rows,
@@ -1051,13 +1067,24 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     } else {
         Style::default().fg(app.colors.border)
     };
-    let messages_title = if let Mode::Search(SearchKind::Messages, q) = &app.mode {
+    let mut messages_title = if let Mode::Search(SearchKind::Messages, q) = &app.mode {
         format!("{title}  Search: {q}")
     } else if app.thread_panel.is_some() {
         format!("{title}  [in thread]")
     } else {
         title
     };
+    if app.accounts.accounts.iter().any(|account| {
+        account.own_identity_changed
+            && app
+                .active_account_filter()
+                .is_none_or(|id| account.account_id == id)
+    }) {
+        messages_title.push_str(" · Own identity changed /status");
+    }
+    if app.has_room_identity_changes() {
+        messages_title.push_str(" · Identity changes /identity");
+    }
     let mut messages_block = Block::default()
         .style(
             Style::default()
@@ -1457,6 +1484,11 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(app.colors.border)
+    };
+    let command_title = if app.mode == Mode::Compose && app.has_room_identity_changes() {
+        "Identity changes /identity".to_owned()
+    } else {
+        command_title
     };
     let input = Paragraph::new(command_line)
         .block(
@@ -3107,6 +3139,9 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
                 "  {marker} {identity}  ({state_label}, {rooms_for_account} rooms)",
             ));
             lines.push(format!("      device: {device_str}  [{verified_str}]",));
+            if account.own_identity_changed {
+                lines.push("      Your Matrix identity changed. Select this account and use /verify, or use /recover with its recovery key.".to_owned());
+            }
             lines.extend(
                 account
                     .backup
@@ -3212,6 +3247,11 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<Line<'static>>
     }
 
     let rows: Vec<Row> = vec![
+        Row::Section("Room identities (/identity):"),
+        Row::Kv("Up / Down".to_owned(), "select an identity warning"),
+        Row::Kv(shortcuts.submit.label(), "acknowledge the selected warning"),
+        Row::Kv(shortcuts.clear_input.label(), "close room identities"),
+        Row::Blank,
         Row::Section("Focus:"),
         Row::Kv(
             shortcuts.focus_next.label(),
@@ -3659,6 +3699,7 @@ mod tests {
                 state: crate::api::AccountState::Active,
                 device_id: None,
                 verified: Some(true),
+                own_identity_changed: false,
                 backup: Default::default(),
             });
         }
@@ -4088,6 +4129,7 @@ mod tests {
                 redacted: false,
                 redaction_event_id: None,
                 reactions: None,
+                utd_reason: None,
                 sender_trust: None,
             }],
         );
@@ -4255,6 +4297,7 @@ mod tests {
                     redacted: false,
                     redaction_event_id: None,
                     reactions: None,
+                    utd_reason: None,
                     sender_trust: None,
                 },
                 score: 1.0,
@@ -4323,6 +4366,7 @@ mod tests {
                     redacted: false,
                     redaction_event_id: None,
                     reactions: None,
+                    utd_reason: None,
                     sender_trust: None,
                 },
                 score: 1.0,
@@ -4783,6 +4827,7 @@ mod tests {
                 redacted: false,
                 redaction_event_id: None,
                 reactions: None,
+                utd_reason: None,
                 sender_trust: None,
             }],
         );

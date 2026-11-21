@@ -45,7 +45,7 @@ use crate::api::{
 
 use super::drafts::DRAFTS_NAMESPACE;
 use super::read_markers::READ_MARKERS_NAMESPACE;
-use super::{App, Status};
+use super::{App, RoomKey, Status};
 
 /// One merged device-state read per account, for a single namespace.
 pub(crate) type DeviceStateReads = Vec<(Uuid, Result<DeviceStateDto, ApiError>)>;
@@ -53,6 +53,14 @@ pub(crate) type DeviceStateReads = Vec<(Uuid, Result<DeviceStateDto, ApiError>)>
 /// A completed startup stage, applied by the main loop.
 pub(crate) enum BootstrapOutcome {
     Accounts(Result<Vec<AccountDto>, ApiError>),
+    AccountRefresh {
+        generation: u64,
+        result: Result<Vec<AccountDto>, ApiError>,
+    },
+    IdentityAcknowledged {
+        room: RoomKey,
+        result: Result<(), ApiError>,
+    },
     /// Also delivers post-startup refreshes; see the module docs.
     Rooms(Result<RoomListSnapshot, ApiError>),
     DeviceState {
@@ -117,7 +125,34 @@ async fn read_namespace(
     futures_util::future::join_all(reads).await
 }
 
+#[derive(Default)]
+pub(super) struct AccountRefresh {
+    pub(super) generation: u64,
+    inflight: bool,
+    dirty: bool,
+}
+
 impl App {
+    pub(crate) fn request_account_refresh(&mut self) {
+        if self.bootstrap_tx.is_none() {
+            return;
+        }
+        if self.bootstrap == BootstrapStage::Accounts || self.account_refresh.inflight {
+            self.account_refresh.dirty = true;
+            return;
+        }
+        self.account_refresh.inflight = true;
+        self.account_refresh.dirty = false;
+        let generation = self.account_refresh.generation;
+        let client = self.client.clone();
+        self.spawn_bootstrap(async move {
+            BootstrapOutcome::AccountRefresh {
+                generation,
+                result: client.list_accounts().await,
+            }
+        });
+    }
+
     /// Spawn `work` and deliver its outcome to the main loop.
     pub(super) fn spawn_bootstrap<F>(&self, work: F)
     where
@@ -175,7 +210,8 @@ impl App {
     /// `/refresh` and the refresh shortcut both call this, so one of them
     /// cannot grow a list the other forgets.
     pub(crate) fn refresh_lists(&mut self) {
-        self.refresh_open_room_info(std::time::Instant::now());
+        self.refresh_room_info(std::time::Instant::now());
+        self.request_account_refresh();
         self.refresh_spaces();
         self.request_rooms_refresh();
         self.request_invites_refresh();
@@ -254,8 +290,32 @@ impl App {
                 // still has rooms worth trying, and a stuck stage would leave
                 // the panel saying "connecting" forever.
                 self.bootstrap = BootstrapStage::Rooms;
+                if self.account_refresh.dirty {
+                    self.request_account_refresh();
+                }
                 self.request_rooms_refresh();
                 self.request_invites_refresh();
+            }
+            BootstrapOutcome::AccountRefresh { generation, result } => {
+                self.account_refresh.inflight = false;
+                // An invalidation or lifecycle snapshot during the read wins.
+                if self.account_refresh.dirty || generation != self.account_refresh.generation {
+                    self.request_account_refresh();
+                } else {
+                    match result {
+                        Ok(accounts) => self.set_accounts(accounts),
+                        Err(err)
+                            if !self.is_mid_command()
+                                && matches!(self.status, Status::Debug(_)) =>
+                        {
+                            self.status = Status::Debug(format!("account refresh failed: {err}"));
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+            BootstrapOutcome::IdentityAcknowledged { room, result } => {
+                self.apply_room_identity_action(room, result);
             }
             BootstrapOutcome::Rooms(result) => {
                 // Keep this read marked in flight while applying it so overflow
@@ -351,6 +411,38 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         app.set_bootstrap_sender(tx);
         (app, rx)
+    }
+
+    #[tokio::test]
+    async fn background_account_refresh_preserves_an_explicit_all_selection() {
+        use crate::app::AccountSelection;
+
+        let (mut app, _rx) = app();
+        let account_id = Uuid::new_v4();
+        app.account_filter = Some(account_id);
+        let account = AccountDto {
+            account_id,
+            user_id: "@alice:example.com".to_owned(),
+            state: crate::api::AccountState::Active,
+            device_id: None,
+            verified: None,
+            own_identity_changed: false,
+            backup: Default::default(),
+        };
+        app.handle_bootstrap_outcome(BootstrapOutcome::Accounts(Ok(vec![account.clone()])))
+            .await;
+        assert_eq!(app.accounts.selected, AccountSelection::Account(0));
+        app.accounts.selected = AccountSelection::All;
+
+        let mut updated = account;
+        updated.own_identity_changed = true;
+        app.handle_bootstrap_outcome(BootstrapOutcome::AccountRefresh {
+            generation: app.account_refresh.generation,
+            result: Ok(vec![updated]),
+        })
+        .await;
+        assert_eq!(app.accounts.selected, AccountSelection::All);
+        assert!(app.accounts.accounts[0].own_identity_changed);
     }
 
     /// The stages advance in order, each one starting the next. The ordering is

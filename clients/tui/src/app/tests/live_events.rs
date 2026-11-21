@@ -712,6 +712,77 @@ fn text_message(event_id: &str, body: &str) -> EventDto {
 }
 
 #[test]
+fn withheld_message_guidance_uses_the_event_accounts_current_verification() {
+    let (mut app, key) = selected_room_app();
+    app.messages.width = 90;
+    let withheld: EventDto = serde_json::from_value(serde_json::json!({
+        "account_id": key.account_id,
+        "room_id": key.room_id,
+        "event_id": "$withheld:example.com",
+        "sender": "@bob:example.com",
+        "arrival_order": 1,
+        "origin_ts": 1,
+        "type": "m.room.encrypted",
+        "content": null,
+        "redacted": false,
+        "utd_reason": {"kind": "withheld", "withheld_code": "m.unverified"}
+    }))
+    .unwrap();
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(withheld)));
+
+    fn rendered(app: &mut App) -> String {
+        app.ensure_message_layout();
+        app.messages
+            .layout
+            .as_ref()
+            .unwrap()
+            .lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    let owner = account_with_id(key.account_id, "@alice:example.com", AccountState::Active);
+    let other = account_with_id(Uuid::new_v4(), "@eve:example.com", AccountState::Active);
+    app.set_accounts(vec![other.clone()]);
+    let text = rendered(&mut app);
+    assert!(text.contains("key withheld (m.unverified)"));
+    assert!(!text.contains("/verify"));
+
+    app.set_accounts(vec![owner.clone(), other.clone()]);
+    let text = rendered(&mut app);
+    assert!(text.contains("/verify") && text.contains("/recover"));
+
+    let mut verified = owner;
+    verified.verified = Some(true);
+    app.set_accounts(vec![verified, other]);
+    let text = rendered(&mut app);
+    assert!(text.contains("key withheld (m.unverified)"));
+    assert!(!text.contains("/verify"));
+}
+
+#[test]
+fn own_identity_live_alert_and_clearance_only_update_the_affected_account() {
+    let (mut app, key) = selected_room_app();
+    let owner = account_with_id(key.account_id, "@alice:example.com", AccountState::Active);
+    let other = account_with_id(Uuid::new_v4(), "@eve:example.com", AccountState::Active);
+    app.set_accounts(vec![owner, other]);
+    app.status = "Keep typing".into();
+    for changed in [true, false] {
+        app.handle_live_frame(LiveFrame::OwnIdentityChanged {
+            account_id: key.account_id,
+            changed,
+        });
+        assert_eq!(app.accounts.accounts[0].own_identity_changed, changed);
+        assert!(!app.accounts.accounts[1].own_identity_changed);
+        let status = popup_status_lines(&app).join("\n");
+        assert_eq!(status.contains("Your Matrix identity changed"), changed);
+        assert_eq!(app.status.text(false), "Keep typing");
+    }
+}
+
+#[test]
 fn live_redaction_of_a_loaded_message_is_a_tombstone_and_moves_nothing() {
     let (mut app, key) = selected_room_app();
     app.messages

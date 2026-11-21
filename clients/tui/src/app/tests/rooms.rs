@@ -213,6 +213,7 @@ fn room_refresh_drops_rooms_for_logged_out_accounts() {
             state: AccountState::Active,
             device_id: None,
             verified: Some(false),
+            own_identity_changed: false,
             backup: Default::default(),
         },
         AccountDto {
@@ -221,6 +222,7 @@ fn room_refresh_drops_rooms_for_logged_out_accounts() {
             state: AccountState::Deactivated,
             device_id: None,
             verified: Some(false),
+            own_identity_changed: false,
             backup: Default::default(),
         },
     ]);

@@ -258,6 +258,25 @@ impl App {
                 super::rooms::TitleField::DisplayName,
                 Some(payload.display_name),
             ),
+            LiveFrame::OwnIdentityChanged {
+                account_id,
+                changed,
+            } => {
+                for account in self
+                    .accounts
+                    .client_visible
+                    .iter_mut()
+                    .chain(&mut self.accounts.accounts)
+                {
+                    if account.account_id == account_id {
+                        account.own_identity_changed = changed;
+                    }
+                }
+                // The frame carries the alert, while the account read also
+                // refreshes device verification and recovers unknown accounts.
+                self.request_account_refresh();
+                LiveFrameAction::None
+            }
             LiveFrame::RoomDetails {
                 account_id,
                 payload,
@@ -346,6 +365,7 @@ impl App {
                         flow.apply_frame(kind, &payload);
                     }
                     if kind == VerificationFrameKind::Done {
+                        self.request_account_refresh();
                         self.status = Status::from("verification complete".to_owned());
                         // The at-decrypt trust snapshots don't change live, but a
                         // refresh re-reads any rows re-decrypted post-verification.
