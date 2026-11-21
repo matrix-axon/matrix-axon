@@ -150,9 +150,11 @@ The caller passes the picker exactly one secret, by name, rather than `secrets: 
 The App's ID is not a secret.
 It lives in the repository variable `RUNNER_PICKER_APP_ID`, which the called workflow reads directly.
 
-`outputs.linux` is either `["self-hosted","axon-linux"]` or `"ubuntu-latest"`.
-`outputs.macos` is either `["self-hosted","axon-macos"]` or the job's hosted image.
-Callers pass their hosted fallback as an input, so a job pinned to `macos-26` falls back to `macos-26`.
+`outputs.linux` is either `["self-hosted","axon-linux"]` or the job's hosted Linux image.
+`outputs.macos` is either `["self-hosted","axon-macos"]` or the job's hosted macOS image.
+Callers pass both hosted fallbacks as inputs, so a job pinned to `macos-26` falls back to `macos-26`.
+The Linux input defaults to `ubuntu-latest`, which every Linux job in decision 5 uses today.
+The PR that moves a job sets the input to whatever the job's `runs-on` was, so moving a job never changes its hosted image.
 
 The picker returns the self-hosted value only when all of these hold, checked in this order:
 
@@ -172,7 +174,8 @@ The picker returns the self-hosted value only when all of these hold, checked in
    - The pool is free only when the first count is larger than the second.
 
    With one runner instance, that means the runner is idle and nothing is waiting for it.
-   With several, the rule holds without change, so a second instance (Open questions) needs no new logic.
+   With several, the same rule applies, so a second instance (Open questions) needs no new picker logic.
+   With one runner or several, it holds only as far as the waiting count is complete: that count covers this repository only, and Consequences accepts the gap that leaves.
 
 Any API error, timeout or unexpected response falls back.
 The step that makes the decision cannot fail the job: it writes the fallback output first and overwrites it only on a positive answer.
@@ -244,8 +247,25 @@ Where the longest job depends on the event, the holder does too:
 | `integration.yml` | the one suite the dispatch selects; with `all`, `matrix-oauth`    | One dispatch normally runs one suite. With `all`, `matrix-oauth` (10.6 min) is longer than `integration` (6.1 min).         |
 | all others        | their one moving job                                              | —                                                                                                                          |
 
-For `web-e2e.yml`, the lanes' `runs-on` is the expression `matrix.project == (github.event_name == 'push' && 'webkit-desktop' || 'firefox') && fromJSON(needs.pick.outputs.linux) || 'ubuntu-latest'`.
-A single-project dispatch adds one more branch to the inner expression, so the matrix's only lane gets the slot.
+For `web-e2e.yml`, the slot holder's name is this expression:
+
+```text
+github.event_name == 'push' && 'webkit-desktop'
+  || github.event_name == 'workflow_dispatch' && github.event.inputs.projects != 'all' && github.event.inputs.projects
+  || 'firefox'
+```
+
+Each lane's `runs-on` is then `matrix.project == <holder> && fromJSON(needs.pick.outputs.linux) || 'ubuntu-latest'`.
+That gives:
+
+- `pull_request`: `firefox`.
+- `push`: `webkit-desktop`.
+- A dispatch of `chromium`, `firefox` or `webkit-desktop`: that project's lane, which is the matrix's only lane.
+- A dispatch of `all`: `firefox`.
+- A dispatch of `webkit-iphone`: no matrix lane runs, and the `web-e2e-iphone` job stays hosted.
+
+The `web-e2e` PR tests the expression for each of these events.
+A dispatch project that matches no lane gets no slot and runs on hosted runners, so each lane writes the holder's name and its own runner to the run summary, which makes that case visible.
 Before each workflow moves (decision 8), its holder is checked against current job timings, in case they have shifted.
 
 ### 5. Which jobs move
@@ -417,7 +437,9 @@ A dedicated machine or VM comes first if either of these ever changes:
   The runner is busy only for those seconds, but a picker can still choose it just as one of those jobs takes it.
   We accept this rather than restricting the group, which the Free plan does not offer.
   Running two or three runner instances on the Linux machine makes this rare.
-  Decision 6's port and compose changes are what make several instances on one machine safe.
+  Several instances on one machine are safe only when each also has its own account, or at least its own rootless Docker socket (Open question 1).
+  Decision 6's port and compose changes are needed too, but they do not stop two instances' jobs from seeing each other's containers.
+  Until open question 1 is settled, the Linux machine runs one instance.
   The sweeper bounds the wait if it is still common.
 - **A runner that goes offline after the picker chose it** leaves the job queued until the runner returns.
   The job's `timeout-minutes` does not count queue time.
