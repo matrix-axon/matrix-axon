@@ -86,13 +86,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # `src-tauri` is excluded from the root workspace, so the repo-wide clippy and
-  # test lanes never see it. Until this job existed, its only gate was the
-  # pre-push hook on a developer's machine — nothing checked it on a pull
-  # request at all.
+  # `src-tauri` is excluded from the root workspace. On pull requests, check
+  # the macOS-only code alongside the existing Linux gate. The universal
+  # bundle job compiles it on release tags and on manual runs with macOS enabled.
   checks:
-    name: Check the shell crate
-    runs-on: ubuntu-latest
+    name: Check the shell crate${{ matrix.runner == 'macos-latest' && ' (macOS)' || '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: >-
+          ${{ github.event_name == 'pull_request'
+          && fromJson('["ubuntu-latest","macos-latest"]')
+          || fromJson('["ubuntu-latest"]') }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
       - name: Checkout repository
@@ -102,6 +108,7 @@ jobs:
         uses: ./.github/actions/check-environment
 
       - name: Install Linux webview dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
@@ -136,8 +143,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             clients/web/src-tauri/target
-          key: desktop-checks-cargo-${{ hashFiles('clients/web/src-tauri/Cargo.lock') }}
-          restore-keys: desktop-checks-cargo-
+          key: desktop-checks-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('clients/web/src-tauri/Cargo.lock') }}
+          restore-keys: desktop-checks-cargo-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install web dependencies
         run: pnpm install --frozen-lockfile
@@ -154,12 +161,20 @@ jobs:
       # reads them from .pre-commit-config.yaml and execs them at the repo root,
       # where --manifest-path points at the shell crate.
       - name: rustfmt
+        if: runner.os == 'Linux'
         run: python3 scripts/ci/run-hook-entry.py shell-fmt
+
+      # The check enforces the committed lockfile. Clippy covers the same
+      # workspace and targets and reuses the checked dependencies.
+      - name: Check macOS shell targets
+        if: runner.os == 'macOS'
+        run: cargo check --locked --manifest-path clients/web/src-tauri/Cargo.toml --workspace --all-targets
 
       - name: clippy
         run: python3 scripts/ci/run-hook-entry.py shell-clippy
 
       - name: test
+        if: runner.os == 'Linux'
         run: python3 scripts/ci/run-hook-entry.py shell-test
 
   # The shell's 486 crates are in neither the root workspace's disclosure nor

@@ -23,8 +23,8 @@ For every gate step (pre-commit, the runner, and the pinned format check):
   are set.
 - `env` is absent, unless the hook takes `--pull-request-base`, in which case
   the step has exactly `BASE_REF` and `BASE_SHA` from the pull_request event.
-- `if` is absent, except the three rust steps in `lint-and-clippy.yml`, which
-  may skip when `rust-changed` says the PR did not touch Rust.
+- `if` is absent, except for the Rust change filter in `lint-and-clippy.yml`
+  and the platform-specific shell steps in `desktop-build.yml`.
 - The job's own `if` is absent, except `cross-build.yml`'s `lint-fmt-test`,
   which honors the workflow's `checks` input.
 
@@ -239,6 +239,10 @@ FIXED: dict[Step, Pinned] = {
         "the web package's prettier, not the repo prettier hook",
         directory="clients/web",
     ),
+    Step(DESKTOP, DESKTOP_JOB, "Check macOS shell targets"): Pinned(
+        "cargo check --locked --manifest-path clients/web/src-tauri/Cargo.toml --workspace --all-targets",
+        "compile macOS-only shell code on pull requests",
+    ),
 }
 
 EXEMPT: dict[Step, str] = {
@@ -256,13 +260,15 @@ EXEMPT: dict[Step, str] = {
     ),
 }
 
-# Only these rust steps may carry an `if`. The same hooks run unconditionally
-# in the dispatch and cross-build copies; copying this condition there would
-# skip them, because those jobs have no `rust-changed` step.
 STEP_IF = {
+    # The dispatch and cross-build copies have no `rust-changed` step.
     Step(LINT, LINT_JOB, "Check formatting"): RUST_STEP_IF,
     Step(LINT, LINT_JOB, "Clippy"): RUST_STEP_IF,
     Step(LINT, LINT_JOB, "Test"): RUST_STEP_IF,
+    # Shell Clippy runs on both legs. Formatting and tests stay on Linux.
+    Step(DESKTOP, DESKTOP_JOB, "rustfmt"): "runner.os == 'Linux'",
+    Step(DESKTOP, DESKTOP_JOB, "test"): "runner.os == 'Linux'",
+    Step(DESKTOP, DESKTOP_JOB, "Check macOS shell targets"): "runner.os == 'macOS'",
 }
 
 JOB_IF = {
