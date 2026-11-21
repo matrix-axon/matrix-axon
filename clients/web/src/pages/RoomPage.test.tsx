@@ -5151,6 +5151,89 @@ describe('RoomPage', () => {
       expect(queryByText('@alice:hs')).toBeNull()
     })
 
+    it('does not re-fetch a resolved thread root on the way back into a room', async () => {
+      // Each return visit used to re-request every thread root by id: the
+      // repeated `events/{id}` lines in the 2026-11-21 airplane capture.
+      const rootReads: string[] = []
+      const threadReads: string[] = []
+      server.use(
+        http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+          HttpResponse.json({ data: [] }),
+        ),
+        http.get(
+          `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/timeline`,
+          ({ params }) =>
+            HttpResponse.json({
+              data: {
+                events:
+                  decodeURIComponent(String(params.roomId)) === OTHER_ROOM
+                    ? [event('$b', T0, { room_id: OTHER_ROOM })]
+                    : [event('$1', T0)],
+                next_cursor: null,
+              },
+            }),
+        ),
+        http.get(
+          `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads`,
+          ({ params }) => {
+            const roomId = decodeURIComponent(String(params.roomId))
+            threadReads.push(roomId)
+            return HttpResponse.json({
+              data:
+                roomId === ROOM
+                  ? [{ root_event_id: '$root', reply_count: 1 }]
+                  : [],
+            })
+          },
+        ),
+        http.get(
+          `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+          ({ params }) => {
+            rootReads.push(String(params.eventId))
+            return HttpResponse.json({ data: event('$root', T0 - 1000) })
+          },
+        ),
+      )
+      const go = (roomId: string) => {
+        window.history.pushState(
+          null,
+          '',
+          `/${ACCOUNT}/rooms/${encodeURIComponent(roomId)}`,
+        )
+        window.dispatchEvent(new PopStateEvent('popstate'))
+      }
+      window.history.replaceState(
+        null,
+        '',
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      )
+      const services = testServices()
+      const { findByText } = render(routedRoomPage(services))
+      await findByText('body of $1')
+      // Resolved, not merely asked for: an in-flight root is aborted on leaving
+      // and rightly asked for again.
+      await waitFor(() =>
+        expect(
+          services.threadStores
+            .acquire(ACCOUNT, ROOM)
+            .roots.peek()
+            .has('$root'),
+        ).toBe(true),
+      )
+
+      go(OTHER_ROOM)
+      await findByText('body of $b')
+      go(ROOM)
+      await findByText('body of $1')
+
+      // The return visit refreshed the summaries, and did not re-read the root.
+      await waitFor(() =>
+        expect(threadReads.filter((id) => id === ROOM)).toHaveLength(2),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(rootReads).toEqual(['$root'])
+    })
+
     it('gap-fills on re-entry through a ?event= link the slice already holds', async () => {
       // The jump effect fetches nothing when its target is already loaded, so
       // on this path the warm slice has no other route back to the present.

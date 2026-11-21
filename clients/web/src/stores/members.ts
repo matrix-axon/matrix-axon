@@ -7,6 +7,7 @@ import {
 import { apiErrorCode, apiErrorMessage, type ApiClient } from '../api/client'
 import { perfMark } from '../perf'
 import type { MemberDirectory } from './member-directory'
+import { createRoomStoreCache, type RoomStoreCache } from './room-store-cache'
 import { memberDisplay, type MemberDto } from './room-list'
 
 export type MemberMutationResult =
@@ -165,62 +166,22 @@ export function createMembersStore(
   }
 }
 
-/** Rooms whose member list stays warm across switches; the timeline cache's cap. */
-export const MEMBERS_STORE_LIMIT = 30
-
 /**
- * Warm per-room member stores, keyed by account and room — the members half
- * of ADR 0085 phase 1. `RoomPage` used to build one per mount, so returning
- * to a room showed raw ids until its `/members` answered again. A warm store
- * paints the names it had and refreshes behind them (the page still calls
- * `refresh()` on entry).
- *
- * Bounded like the timeline cache. A member list is unpaginated, so one huge
- * room is the worst case (a few thousand entries, well under a megabyte); the
- * median room holds a handful.
+ * Warm per-room member stores (`RoomStoreCache`): a return visit paints the
+ * names it had rather than raw ids until `/members` answers again. A member
+ * list is unpaginated, so one huge room is the worst case (a few thousand
+ * entries, well under a megabyte); the median room holds a handful.
  */
-export interface MembersStoreCache {
-  /** The warm store for a room, or a fresh one. Marks it most recently used. */
-  acquire(accountId: string, roomId: string): MembersStore
-  /** Drop every store. Sign-out only. */
-  clear(): void
-  /** Warm room count, for tests and diagnostics. */
-  readonly size: number
-}
+export type MembersStoreCache = RoomStoreCache<MembersStore>
 
 export function createMembersStoreCache(
   api: ApiClient,
   directory: MemberDirectory | null = null,
-  limit: number = MEMBERS_STORE_LIMIT,
+  limit?: number,
 ): MembersStoreCache {
-  // Insertion order is LRU order, as in `createTimelineStoreCache`.
-  const stores = new Map<string, MembersStore>()
-  return {
-    acquire(accountId, roomId) {
-      const key = `${accountId}\0${roomId}`
-      const warm = stores.get(key)
-      if (warm !== undefined) {
-        stores.delete(key)
-        stores.set(key, warm)
-        return warm
-      }
-      const store = createMembersStore(api, accountId, roomId, directory)
-      stores.set(key, store)
-      for (const oldest of stores.keys()) {
-        if (stores.size <= limit) {
-          break
-        }
-        stores.delete(oldest)
-      }
-      return store
-    },
-
-    clear() {
-      stores.clear()
-    },
-
-    get size() {
-      return stores.size
-    },
-  }
+  return createRoomStoreCache(
+    (accountId, roomId) =>
+      createMembersStore(api, accountId, roomId, directory),
+    { limit },
+  )
 }

@@ -7,6 +7,7 @@ import {
 import { apiErrorMessage, inBackground, type ApiClient } from '../api/client'
 import { perfMark } from '../perf'
 import type { components } from '../api/schema'
+import { createRoomStoreCache, type RoomStoreCache } from './room-store-cache'
 import type { EventDto } from './timeline'
 
 export type ThreadSummaryDto = components['schemas']['ThreadSummaryDto']
@@ -215,4 +216,29 @@ export function createThreadsStore(
       leaving = new AbortController()
     },
   }
+}
+
+/**
+ * Warm per-room thread stores (`RoomStoreCache`). A fresh store per mount
+ * re-fetched every root event, one `GET …/events/{id}` per thread, on each
+ * return to a room: the same few ids, again and again, on the link the
+ * timeline page needed. A warm store keeps the roots it resolved;
+ * `stop()` on leaving drops only the queued and in-flight ones, which the
+ * next `refresh()` asks for again.
+ *
+ * Kept roots are as fresh as within one visit: a root edited while the room
+ * was closed shows its old text in the thread list until the root itself
+ * reloads. Evicted and cleared stores are stopped, so nothing they queued
+ * goes out afterwards.
+ */
+export type ThreadsStoreCache = RoomStoreCache<ThreadsStore>
+
+export function createThreadsStoreCache(
+  api: ApiClient,
+  limit?: number,
+): ThreadsStoreCache {
+  return createRoomStoreCache(
+    (accountId, roomId) => createThreadsStore(api, accountId, roomId),
+    { limit, release: (store) => store.stop() },
+  )
 }

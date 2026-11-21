@@ -101,11 +101,7 @@ import {
 } from '../stores/settings'
 import type { MessageGesturePreferences } from '../stores/message-gestures'
 import type { EphemeralStore } from '../stores/ephemeral'
-import {
-  createThreadsStore,
-  threadRootId,
-  type ThreadsStore,
-} from '../stores/threads'
+import { threadRootId, type ThreadsStore } from '../stores/threads'
 import type { ThreadUnreadStore } from '../stores/thread-unread'
 import {
   READ_MARKERS_NAMESPACE,
@@ -244,6 +240,7 @@ export function RoomPage() {
     search,
     timelines,
     memberStores,
+    threadStores,
     attachments: staging,
     linkPreviews: linkPreviewCache,
     capabilities,
@@ -275,12 +272,16 @@ export function RoomPage() {
   useEffect(() => {
     redecryptAttempted.current = false
   }, [accountId, roomId])
+  // Warm across room switches, so a return visit keeps the thread roots it
+  // resolved instead of re-fetching each one; the mount effect refreshes the
+  // summaries in place.
   const threads = useMemo(
-    () => createThreadsStore(api, accountId, roomId),
-    [api, accountId, roomId],
+    () => threadStores.acquire(accountId, roomId),
+    [threadStores, accountId, roomId],
   )
   // A long thread list is still fetching its roots when the reader moves on;
-  // the next room's requests should not queue behind this one's (#662).
+  // the next room's requests should not queue behind this one's (#662). The
+  // store stays warm: only the queued and in-flight roots are dropped.
   useEffect(() => () => threads.stop(), [threads])
   // Warm across room switches, like the timeline: a return visit paints the
   // names it had, and the mount effect's `refresh()` updates them in place.

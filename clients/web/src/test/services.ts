@@ -1,5 +1,6 @@
 import { createMemberDirectory } from '../stores/member-directory'
 import { createMembersStoreCache } from '../stores/members'
+import { createThreadsStoreCache } from '../stores/threads'
 import { signal } from '@preact/signals'
 import { createServerCapabilities } from '../stores/capabilities'
 import { createApiClient } from '../api/client'
@@ -25,7 +26,7 @@ import {
   connectLinkPreviewCacheReset,
   connectLinkedEventCacheReset,
   connectThreadReadMarkers,
-  connectMembersCacheReset,
+  connectRoomCachesReset,
   connectTimelineCacheLive,
   connectTimelineCacheReset,
   connectUnreadCounts,
@@ -150,6 +151,7 @@ export function testServices(
   const timelines = createTimelineStoreCache(api, media)
   const memberDirectory = createMemberDirectory()
   const memberStores = createMembersStoreCache(api, memberDirectory)
+  const threadStores = createThreadsStoreCache(api)
   const attachments = createAttachmentStaging()
   const settings = createSettingsStore(storage)
   // Mirrors `createServices`: instrumentation on before the stores that mark.
@@ -280,7 +282,7 @@ export function testServices(
   connectThreadReadMarkers(live, threadUnread, deviceState)
   connectTimelineCacheLive(live, timelines)
   connectTimelineCacheReset(auth, timelines)
-  connectMembersCacheReset(auth, memberStores, memberDirectory)
+  connectRoomCachesReset(auth, { memberStores, memberDirectory, threadStores })
   connectCacheReset(auth, cache)
   connectRoomsSessionReset(auth, rooms)
   connectMatrixOAuthQrSessionReset(
@@ -312,6 +314,7 @@ export function testServices(
     timelines,
     memberStores,
     memberDirectory,
+    threadStores,
     cache,
     telemetry,
     attachments,

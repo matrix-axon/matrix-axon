@@ -136,6 +136,10 @@ import {
   type MembersStoreCache,
 } from './stores/members'
 import {
+  createThreadsStoreCache,
+  type ThreadsStoreCache,
+} from './stores/threads'
+import {
   createUpdateChecker,
   fetchVersionManifest,
   VERSION_MANIFEST_PATH,
@@ -212,6 +216,11 @@ export interface AppServices {
    * list has not landed yet.
    */
   memberDirectory: MemberDirectory
+  /**
+   * Warm per-room thread stores, so a return visit does not re-fetch every
+   * thread root. `RoomPage` acquires from here.
+   */
+  threadStores: ThreadsStoreCache
   /**
    * The durable on-device content cache (ADR 0085 phase 2). Stores reach it
    * through narrow ports (`RoomListCache`); it is exposed here for the
@@ -1378,25 +1387,29 @@ export function connectTimelineCacheReset(
 }
 
 /**
- * Drop the warm member stores and the name directory when the session ends,
- * for the reason `connectTimelineCacheReset` gives: the service graph outlives
- * a sign-out, so without this a signed-out tab keeps every warm room's roster
- * in memory. Both clears are idempotent, so the effect settles inside the
- * reactive flush.
+ * Drop the warm member and thread stores and the name directory when the
+ * session ends, for the reason `connectTimelineCacheReset` gives: the service
+ * graph outlives a sign-out, so without this a signed-out tab keeps every warm
+ * room's roster and thread roots in memory. Every clear here is idempotent,
+ * so the effect settles inside the reactive flush.
  *
  * Returns the disposer; the app graph keeps the subscription for its life.
  */
-export function connectMembersCacheReset(
+export function connectRoomCachesReset(
   auth: CompositeAuthProvider,
-  memberStores: MembersStoreCache,
-  memberDirectory: MemberDirectory,
+  caches: {
+    memberStores: MembersStoreCache
+    memberDirectory: MemberDirectory
+    threadStores: ThreadsStoreCache
+  },
 ): () => void {
   return effect(() => {
     if (auth.signedIn.value) {
       return
     }
-    memberStores.clear()
-    memberDirectory.clear()
+    caches.memberStores.clear()
+    caches.memberDirectory.clear()
+    caches.threadStores.clear()
   })
 }
 
@@ -1823,6 +1836,7 @@ export function createServices(
   const timelines = createTimelineStoreCache(api, media)
   const memberDirectory = createMemberDirectory()
   const memberStores = createMembersStoreCache(api, memberDirectory)
+  const threadStores = createThreadsStoreCache(api)
   const incomingShares =
     platform.incomingShare == null
       ? null
@@ -2080,7 +2094,7 @@ export function createServices(
   connectRoomListCacheFlush(rooms)
   connectTimelineCacheLive(live, timelines)
   connectTimelineCacheReset(auth, timelines)
-  connectMembersCacheReset(auth, memberStores, memberDirectory)
+  connectRoomCachesReset(auth, { memberStores, memberDirectory, threadStores })
   connectCacheReset(auth, cache)
   connectRoomsSessionReset(auth, rooms)
   connectMatrixOAuthQrSessionReset(
@@ -2107,6 +2121,7 @@ export function createServices(
     timelines,
     memberStores,
     memberDirectory,
+    threadStores,
     cache,
     telemetry,
     attachments,
