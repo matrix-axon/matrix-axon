@@ -249,9 +249,10 @@ export function RoomPage() {
     platform,
   } = useServices()
   // Warm across room switches rather than rebuilt per mount (ADR 0085 phase
-  // 1). The store may therefore arrive already populated — and stale, since
-  // live frames only reach the mounted room — so the load effect below
-  // gap-fills it instead of assuming a cold start.
+  // 1). The store may therefore arrive already populated. The cache kept
+  // feeding it live frames while the room was closed, but the socket is
+  // lossy, so the load effect below still gap-fills it instead of assuming a
+  // cold start.
   const timeline = useMemo(
     () => timelines.acquire(accountId, roomId),
     [timelines, accountId, roomId],
@@ -697,8 +698,9 @@ export function RoomPage() {
     // with two exceptions. A thread jump is resolved by ThreadPanel and must
     // not leave the desktop room stream empty. And a warm store (ADR 0085
     // phase 1) has nobody else to refresh it: the jump effect fetches nothing
-    // when its target is already in the loaded slice, and a warm slice stopped
-    // receiving live frames when the user left the room. `loadLatest` over a
+    // when its target is already in the loaded slice, and a warm slice can
+    // have missed frames while the user was away (the socket is lossy, and a
+    // slice parked in history takes only in-place updates). `loadLatest` over a
     // populated slice *is* `refreshHead`'s gap-fill merge, and a jump racing
     // it wins by slice generation.
     if (
@@ -1390,7 +1392,9 @@ export function RoomPage() {
     }
   }, [activeThread, accountId, roomId, openThread])
 
-  // Live: fold incoming events for this room into the timeline as they arrive.
+  // Live: the timeline itself is fed by the warm-store cache
+  // (`connectTimelineCacheLive`), which reaches this room's store whether or
+  // not it is mounted. This page reacts only to what its own views need.
   // Membership state changes can update display names and avatar URLs; re-read
   // the roster so sender labels and avatar images stay current without a room
   // reload.
@@ -1404,7 +1408,6 @@ export function RoomPage() {
       ) {
         return
       }
-      timeline.ingestLive(event)
       if (event.type === 'm.room.member') {
         inBackground(members.refresh())
       }
@@ -1415,7 +1418,7 @@ export function RoomPage() {
         inBackground(threads.refresh())
       }
     })
-  }, [live, timeline, threads, members, accountId, roomId])
+  }, [live, threads, members, accountId, roomId])
 
   // Gap-fill: the bus is lossy and cursor-less, so on reconnect refetch the
   // room's head and reconcile by event id (ADR 0061). Compared against the

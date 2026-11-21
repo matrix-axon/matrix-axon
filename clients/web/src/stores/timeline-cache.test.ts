@@ -346,6 +346,84 @@ describe('createTimelineStoreCache', () => {
     expect(sameStore(cache.acquire(ACCOUNT, ROOM), store)).toBe(false)
   })
 
+  // A store the user has left keeps taking frames, so re-entry paints what
+  // the room-list preview already showed without waiting on the head fetch.
+  describe('ingestLive', () => {
+    it('appends a frame to a warm store the user has left', async () => {
+      server.use(
+        http.get(timelinePath(ROOM), () =>
+          HttpResponse.json({
+            data: { events: [event('$1', 100)], next_cursor: 'c1' },
+          }),
+        ),
+      )
+      const cache = makeCache()
+      const left = cache.acquire(ACCOUNT, ROOM)
+      await left.loadLatest()
+      // Opening another room is what "left" means to the cache.
+      cache.acquire(ACCOUNT, '!other:hs')
+
+      cache.ingestLive(event('$2', 200))
+
+      expect(left.events.value.map((e) => e.event_id)).toEqual(['$1', '$2'])
+      expect(
+        cache.acquire(ACCOUNT, ROOM).events.value.map((e) => e.event_id),
+      ).toEqual(['$1', '$2'])
+    })
+
+    it('builds no store for a room that has none, nor for another account', async () => {
+      server.use(
+        http.get(timelinePath(ROOM), () =>
+          HttpResponse.json({
+            data: { events: [event('$1', 100)], next_cursor: 'c1' },
+          }),
+        ),
+      )
+      const cache = makeCache()
+      const store = cache.acquire(ACCOUNT, ROOM)
+      await store.loadLatest()
+
+      cache.ingestLive(event('$x', 200, '!cold:hs'))
+      cache.ingestLive({ ...event('$y', 300), account_id: OTHER_ACCOUNT })
+
+      expect(cache.size).toBe(1)
+      expect(store.events.value.map((e) => e.event_id)).toEqual(['$1'])
+    })
+
+    it('leaves LRU order alone: a frame is not a visit', () => {
+      const cache = makeCache(2)
+      const a = cache.acquire(ACCOUNT, '!a:hs')
+      cache.acquire(ACCOUNT, '!b:hs')
+
+      cache.ingestLive(event('$1', 100, '!a:hs'))
+      cache.acquire(ACCOUNT, '!c:hs')
+
+      // Had the frame counted as a use, `b` would have been evicted instead.
+      expect(sameStore(cache.acquire(ACCOUNT, '!a:hs'), a)).toBe(false)
+    })
+
+    it('updates a parked slice in place but never appends to it', async () => {
+      server.use(
+        http.get(timelinePath(ROOM), () =>
+          HttpResponse.json({
+            data: { events: [event('$1', 100)], next_cursor: 'c1' },
+          }),
+        ),
+      )
+      const cache = makeCache()
+      const store = cache.acquire(ACCOUNT, ROOM)
+      await store.jumpTo(100)
+      expect(store.atEnd.value).toBe(false)
+
+      cache.ingestLive({ ...event('$1', 100), body: 'edited', edited: true })
+      cache.ingestLive(event('$2', 200))
+
+      // Appending "now" after a jump would fake contiguity; the parked slice
+      // is rebuilt on re-entry anyway.
+      expect(store.events.value.map((e) => e.body)).toEqual(['edited'])
+    })
+  })
+
   // Read by the auto-refresh policy (ADR 0087): an unsent echo lives only in
   // memory, so reloading to pick up a new build would destroy it.
   describe('hasUnsentWork', () => {

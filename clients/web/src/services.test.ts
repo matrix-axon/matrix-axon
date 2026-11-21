@@ -22,6 +22,7 @@ import {
   NOTIFICATION_HANDLED_KEY,
   type NotificationResume,
   connectReadMarkers,
+  connectTimelineCacheLive,
   connectTimelineCacheReset,
   connectUnreadCounts,
   connectUpdateChecks,
@@ -31,6 +32,7 @@ import {
   createThreadUnreadStore,
   type ActiveThread,
 } from './stores/thread-unread'
+import type { LiveFrame } from './api/frames'
 import type { AccountsStore } from './stores/accounts'
 import { roomKey, userIdDisplay } from './stores/room-list'
 import type { RoomsStore } from './stores/rooms'
@@ -954,6 +956,9 @@ describe('connectTimelineCacheReset', () => {
         acquire: () => {
           throw new Error('unused')
         },
+        ingestLive: () => {
+          throw new Error('unused')
+        },
         clear: () => {
           clears += 1
         },
@@ -1021,6 +1026,42 @@ describe('connectTimelineCacheReset', () => {
       flag.value = false
     }).not.toThrow()
     expect(timelines.size).toBe(0)
+    dispose()
+  })
+})
+
+describe('connectTimelineCacheLive', () => {
+  it('routes timeline frames to the warm-store cache, and nothing else', () => {
+    let listener: (frame: LiveFrame) => void = () => {}
+    const ingested: string[] = []
+    const dispose = connectTimelineCacheLive(
+      {
+        subscribe: (l: (frame: LiveFrame) => void) => {
+          listener = l
+          return () => {}
+        },
+      } as unknown as Parameters<typeof connectTimelineCacheLive>[0],
+      {
+        acquire: () => {
+          throw new Error('unused')
+        },
+        ingestLive: (event) => {
+          ingested.push(event.event_id)
+        },
+        clear: () => {},
+        hasUnsentWork: false,
+        size: 0,
+      },
+    )
+
+    listener({
+      type: 'timeline.event',
+      accountId: ACCT,
+      payload: { event_id: '$1', account_id: ACCT, room_id: ROOM },
+    })
+    listener({ type: 'device_state.changed', accountId: ACCT, payload: {} })
+
+    expect(ingested).toEqual(['$1'])
     dispose()
   })
 })

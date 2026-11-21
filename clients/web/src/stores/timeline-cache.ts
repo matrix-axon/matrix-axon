@@ -1,6 +1,10 @@
 import type { ApiClient } from '../api/client'
 import type { MediaService } from '../media/media-service'
-import { createTimelineStore, type TimelineStore } from './timeline'
+import {
+  createTimelineStore,
+  type EventDto,
+  type TimelineStore,
+} from './timeline'
 
 /**
  * How many rooms keep a warm timeline store. The same cap ADR 0085 sets for
@@ -25,11 +29,17 @@ export const TIMELINE_STORE_LIMIT = 30
  * That is the room switch a desktop tab pays over and over. Holding the store
  * instead makes re-entry paint immediately and reconcile in place.
  *
- * A cached store is *stale by construction*: live frames only reach the
- * mounted room (`RoomPage`'s subscription), so anything cached here stopped
- * receiving them the moment the user left. Re-entry must therefore gap-fill —
- * `loadLatest()` over a populated slice is `refreshHead`'s merge (ADR 0061),
- * which is exactly the reconciliation a slice that sat idle needs.
+ * Every warm store, mounted or not, keeps taking live frames (`ingestLive`,
+ * fed by `connectTimelineCacheLive`). This matters on a slow link: the room
+ * list's preview already shows a new message, so a room that opens without it
+ * looks broken while the re-entry head fetch is still in flight.
+ *
+ * A cached store is still *possibly stale*, though. The socket is lossy and
+ * has no cursor, and a frame can arrive while the socket is down or while the
+ * slice is parked in history. Re-entry must therefore still gap-fill —
+ * `loadLatest()` over a populated slice is `refreshHead`'s merge (ADR 0061).
+ * Live ingest only means the newest messages are usually painted before that
+ * merge lands, not that the merge can be skipped.
  */
 export interface TimelineStoreCache {
   /**
@@ -37,6 +47,13 @@ export interface TimelineStoreCache {
    * the caller still owns the gap-fill (see the note above).
    */
   acquire(accountId: string, roomId: string): TimelineStore
+  /**
+   * Route a live timeline frame to its room's warm store, if one is cached.
+   * Builds no store for a room that has none, and leaves LRU order alone: a
+   * frame is not a visit. This is the *only* live path into a cached store,
+   * mounted room included, so no frame is ingested twice.
+   */
+  ingestLive(event: EventDto): void
   /** Drop every store, unsent echoes included. Sign-out only. */
   clear(): void
   /**
@@ -148,6 +165,10 @@ export function createTimelineStoreCache(
       stores.set(key, store)
       evict(key)
       return store
+    },
+
+    ingestLive(event) {
+      stores.get(`${event.account_id}\0${event.room_id}`)?.ingestLive(event)
     },
 
     clear() {

@@ -1300,6 +1300,34 @@ export function connectUpdateChecks(
 }
 
 /**
+ * Keep every warm timeline store live, not only the mounted room's.
+ *
+ * Before this, only `RoomPage`'s subscription ingested frames, so a room the
+ * user had left stopped at the moment they left. The room list kept updating
+ * its preview from the same frames, and on a slow link the room then opened
+ * without the message its row had just shown, until the re-entry head fetch
+ * came back. The frame has the whole event, so the store can take it the
+ * moment it arrives.
+ *
+ * Rooms with no warm store are skipped (`TimelineStoreCache.ingestLive`
+ * builds none): a slice of a few live frames with no page under it is not a
+ * timeline, and its first open still needs the head fetch.
+ *
+ * Returns the unsubscribe; the app graph keeps the subscription for its life.
+ */
+export function connectTimelineCacheLive(
+  live: LiveConnection,
+  timelines: TimelineStoreCache,
+): () => void {
+  return live.subscribe((frame) => {
+    const event = timelineEvent(frame)
+    if (event !== null) {
+      timelines.ingestLive(event)
+    }
+  })
+}
+
+/**
  * Drop every warm timeline store when the session ends (ADR 0085 phase 1).
  *
  * The service graph outlives a sign-out — nothing reloads the document, the
@@ -2004,6 +2032,7 @@ export function createServices(
   connectThreadReceipts(api, live, rooms, accounts, deviceState, threadUnread)
   connectDeviceStateFlush(deviceState)
   connectRoomListCacheFlush(rooms)
+  connectTimelineCacheLive(live, timelines)
   connectTimelineCacheReset(auth, timelines)
   connectCacheReset(auth, cache)
   connectRoomsSessionReset(auth, rooms)

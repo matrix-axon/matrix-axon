@@ -23,6 +23,7 @@ import {
   connectLinkPreviewCacheReset,
   connectLinkedEventCacheReset,
   connectThreadReadMarkers,
+  connectTimelineCacheLive,
   connectTimelineCacheReset,
   connectUnreadCounts,
   connectUpdateChecks,
@@ -269,6 +270,7 @@ export function testServices(
   connectEphemeralPassthrough(live, ephemeral)
   connectReadMarkers(live, deviceState, rooms)
   connectThreadReadMarkers(live, threadUnread, deviceState)
+  connectTimelineCacheLive(live, timelines)
   connectTimelineCacheReset(auth, timelines)
   connectCacheReset(auth, cache)
   connectRoomsSessionReset(auth, rooms)

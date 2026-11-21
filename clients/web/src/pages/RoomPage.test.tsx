@@ -4922,6 +4922,8 @@ describe('RoomPage', () => {
        * otherwise consume entries and make this depend on test order.
        */
       jump?: () => Response,
+      /** Runs while room B is showing, before the return to A. */
+      whileAway?: (services: ReturnType<typeof testServices>) => void,
     ) {
       let head = 0
       server.use(
@@ -4968,10 +4970,12 @@ describe('RoomPage', () => {
         '',
         `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
       )
-      const utils = render(routedRoomPage(testServices()))
+      const services = testServices()
+      const utils = render(routedRoomPage(services))
       await utils.findByText('body of $1')
       go(OTHER_ROOM)
       await utils.findByText('body of $b')
+      whileAway?.(services)
       go(ROOM, backQuery)
       return { ...utils, heads: () => head }
     }
@@ -4998,8 +5002,8 @@ describe('RoomPage', () => {
       // The held request is in flight by now, so releasing it is not a race.
       await waitFor(() => expect(heads()).toBe(2))
 
-      // Live frames only reach the mounted room (ADR 0061), so the warm slice
-      // missed `$2`; the head fetch overlaps it and `refreshHead` merges.
+      // No frame carried `$2` (the socket is lossy, ADR 0061), so the warm
+      // slice missed it; the head fetch overlaps it and `refreshHead` merges.
       settle(
         HttpResponse.json({
           data: {
@@ -5012,6 +5016,59 @@ describe('RoomPage', () => {
       expect(await findByText('body of $2')).toBeTruthy()
       // Merged, not replaced: the row already loaded survives the reconcile.
       expect(await findByText('body of $1')).toBeTruthy()
+    })
+
+    it('shows a message that arrived while away before the head fetch answers', async () => {
+      // The slow-link complaint: the room-list preview showed `$2`, then the
+      // room opened without it until the re-entry head fetch came back. The
+      // frame reached the client either way; the warm store now takes it.
+      let settle: (response: Response) => void = () => {}
+      const { findByText, heads } = await roundTrip(
+        [
+          () =>
+            HttpResponse.json({
+              data: { events: [event('$1', T0)], next_cursor: 'c1' },
+            }),
+          () =>
+            new Promise<Response>((resolve) => {
+              settle = resolve
+            }),
+        ],
+        '',
+        undefined,
+        (services) => {
+          services.live.start()
+          services.sockets[0].emitOpen()
+          services.sockets[0].emitMessage(
+            JSON.stringify({
+              type: 'timeline.event',
+              account_id: ACCOUNT,
+              payload: event('$2', T0 + 1000),
+            }),
+          )
+        },
+      )
+
+      // Painted while the head fetch is still held open.
+      expect(await findByText('body of $2')).toBeTruthy()
+      expect(await findByText('body of $1')).toBeTruthy()
+      await waitFor(() => expect(heads()).toBe(2))
+
+      // The gap-fill still runs, and merging a head that already holds `$2`
+      // must not show it twice.
+      settle(
+        HttpResponse.json({
+          data: {
+            events: [event('$2', T0 + 1000), event('$1', T0)],
+            next_cursor: 'c1',
+          },
+        }) as Response,
+      )
+      await waitFor(() =>
+        expect(document.querySelectorAll('[data-event-id="$2"]')).toHaveLength(
+          1,
+        ),
+      )
     })
 
     it('gap-fills on re-entry through a ?event= link the slice already holds', async () => {
