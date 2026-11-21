@@ -1350,3 +1350,66 @@ async fn a_block_that_stops_sending_fails_after_the_stall() {
     .expect("a stalled block held its request");
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
 }
+
+// ===== review round 4 =====
+
+#[tokio::test]
+async fn an_if_range_the_block_matches_is_answered_from_it() {
+    let server = server().await;
+    let player = Player::new(&server);
+    assert_partial(&player.range(TICKET, "bytes=0-99").await, 0, 100, LARGE);
+    let before = server.seen().len();
+    let response = player
+        .get(
+            TICKET,
+            &[("range", "bytes=100-199"), ("if-range", "\"e1\"")],
+        )
+        .await;
+    assert_partial(&response, 100, 100, LARGE);
+    assert_eq!(server.seen().len(), before);
+}
+
+#[tokio::test]
+async fn an_if_range_the_block_does_not_match_goes_upstream_as_sent() {
+    let server = server().await;
+    let player = Player::new(&server);
+    assert_partial(&player.range(TICKET, "bytes=0-99").await, 0, 100, LARGE);
+    // A stale tag, the block's own tag made weak, and a date: none is a
+    // strong match, so the server is the one to choose `206` or `200`.
+    for validator in ["\"stale\"", "W/\"e1\"", "Sat, 21 Nov 2026 12:00:00 GMT"] {
+        let before = server.seen().len();
+        let response = player
+            .get(
+                TICKET,
+                &[("range", "bytes=100-199"), ("if-range", validator)],
+            )
+            .await;
+        // The test server ignores `If-Range`, so it answers the range.
+        assert_partial(&response, 100, 100, LARGE);
+        let seen = server.seen();
+        assert_eq!(seen.len(), before + 1, "{validator}");
+        let (_, headers) = seen.last().unwrap();
+        assert_eq!(headers.get(header::RANGE).unwrap(), "bytes=100-199");
+        assert_eq!(headers.get(header::IF_RANGE).unwrap(), validator);
+    }
+}
+
+#[tokio::test]
+async fn a_block_unused_for_the_idle_time_is_not_read_again() {
+    let server = server().await;
+    let player = Player::with_windows(&server, MediaWindows::with_idle(Duration::from_millis(200)));
+    // The block's last byte, so it is complete.
+    let last = BLOCK - 1;
+    assert_partial(
+        &player.range(TICKET, &format!("bytes={last}-{last}")).await,
+        last,
+        1,
+        LARGE,
+    );
+    assert_partial(&player.range(TICKET, "bytes=0-99").await, 0, 100, LARGE);
+    assert_eq!(server.seen().len(), 1);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    // The same block, not a new one: it is fetched anew all the same.
+    assert_partial(&player.range(TICKET, "bytes=0-99").await, 0, 100, LARGE);
+    assert_eq!(server.seen().len(), 2);
+}

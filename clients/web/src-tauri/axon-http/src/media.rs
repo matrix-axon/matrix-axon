@@ -288,8 +288,9 @@ pub(crate) fn forwarded_response_headers(upstream: &HeaderMap) -> HeaderMap {
 }
 
 /// The range of a request the read-ahead window answers: a plain `GET` of
-/// one range. The probe, a conditional request and anything else go upstream
-/// as sent.
+/// one range, or one whose `If-Range` the block's `ETag` matches
+/// ([`MediaWindows::serve`]). The probe, an `If-None-Match` request and
+/// anything else go upstream as sent.
 fn window_spec(request: &Request<Vec<u8>>) -> Option<Spec> {
     let headers = request.headers();
     if request.method() != Method::GET
@@ -348,7 +349,10 @@ async fn proxy(
     };
 
     if let Some(spec) = window_spec(request) {
-        if let Outcome::Served(response) = windows.serve(transport, url.clone(), ticket, spec).await
+        let if_range = request.headers().get(header::IF_RANGE);
+        if let Outcome::Served(response) = windows
+            .serve(transport, url.clone(), ticket, spec, if_range)
+            .await
         {
             return response;
         }

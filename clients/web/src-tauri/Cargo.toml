@@ -118,6 +118,14 @@ windows = { version = "0.62", features = [
   "Win32_UI_WindowsAndMessaging",
 ] }
 
+# Not used directly. Android streaming (ADR 0139 § 7) needs wry 0.57.1 or
+# later, whose `SkippedPrefixInputStream` offsets the WebView's own `Range`
+# skip of an intercepted response (#1194); under 0.57.0 every range after
+# byte 0 fails. This holds that floor against a lockfile resolved anew.
+# No default features, so it adds none to what tauri-runtime-wry enables.
+[target.'cfg(target_os = "android")'.dependencies]
+wry = { version = "0.57.1", default-features = false }
+
 [target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 

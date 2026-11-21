@@ -480,7 +480,7 @@ The handler therefore no longer forwards a single-range `GET` unchanged:
   A range that takes the rest of the block, open or closed at or past the block's end (as the plain-HTTP `bytes=0-<len-1>` is), returns early on a slow link as a direct response does: with what has arrived, once that is 256 KiB and 1 s has passed.
 - Once a read is served from a complete block, the next block is fetched, unless it is held or past the end.
   That keeps one block ahead of what the player has read, and fetches nothing while the player reads nothing.
-- The window holds at most 8 blocks (32 MiB) across all tickets, drops a complete block unused for 60 s, and drops everything when the page reloads.
+- The window holds at most 8 blocks (32 MiB) across all tickets, drops a complete block unused for 60 s (before any request can read it again), and drops everything when the page reloads.
   To make room it drops the least recently used complete block, or else the least recently used block still arriving that no request is waiting on, such as one a seek moved away from.
   It never drops a block a request is waiting on; when all 8 have one, a request for another block goes upstream as sent.
   It is memory only, so `no-store` (section 5) still means nothing reaches disk.
@@ -498,7 +498,7 @@ On a slow link those fetches split the connection between them, and the extra bl
 Blocks on the grid cannot overlap.
 The same version fetched the next block only when the player asked for it, which left the 1.4–2 s gaps seen on Windows; hence the read-ahead.
 
-A suffix range whose object length no block has learned yet, a multi-range request, a conditional request and a `HEAD` still go upstream as sent.
+A suffix range whose object length no block has learned yet, a multi-range request, an `If-None-Match` request and a `HEAD` still go upstream as sent, as does an `If-Range` request unless its validator is the block's strong `ETag`.
 Rewriting the outgoing `Range` also settles the connection-reuse question above: each block request is bounded, so the server's response ends where the handler stops reading.
 
 #### Phase 4 check results

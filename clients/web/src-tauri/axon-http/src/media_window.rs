@@ -187,6 +187,8 @@ pub struct MediaWindows {
     blocks: Mutex<Vec<Arc<Block>>>,
     /// [`STALL`], but shorter in tests.
     stall: Duration,
+    /// [`IDLE`], but shorter in tests.
+    idle: Duration,
 }
 
 impl Default for MediaWindows {
@@ -194,6 +196,7 @@ impl Default for MediaWindows {
         Self {
             blocks: Mutex::default(),
             stall: STALL,
+            idle: IDLE,
         }
     }
 }
@@ -204,6 +207,15 @@ impl MediaWindows {
     pub(crate) fn with_stall(stall: Duration) -> Self {
         Self {
             stall,
+            ..Self::default()
+        }
+    }
+
+    /// A window that drops a complete block unused for `idle`.
+    #[cfg(test)]
+    pub(crate) fn with_idle(idle: Duration) -> Self {
+        Self {
+            idle,
             ..Self::default()
         }
     }
@@ -233,8 +245,13 @@ impl MediaWindows {
     /// its place, with whether it is new and so the caller's to fetch. One
     /// lock covers both, so requests that arrive together share one block.
     /// `None` when there is no room for a new one.
+    ///
+    /// Idle and failed blocks are dropped before the lookup, so a complete
+    /// block unused for [`IDLE`] is never read again, even by a player that
+    /// claims nothing new.
     fn claim(&self, ticket: &str, start: u64) -> Option<(Arc<Block>, bool)> {
         let mut blocks = lock(&self.blocks);
+        prune(&mut blocks, self.idle);
         if let Some(block) = blocks
             .iter()
             .find(|block| block.ticket == ticket && block.first == start && block.live())
@@ -274,12 +291,15 @@ impl MediaWindows {
 
     /// Answer a `GET` for `spec` of `ticket` (at `url`) from the block that
     /// holds its first byte, fetching that block first if it is not held.
+    /// With `if_range`, only while it is the block's strong `ETag`: otherwise
+    /// the server decides between a `206` and the whole object.
     pub(crate) async fn serve(
         &self,
         transport: &Transport,
         url: Url,
         ticket: &str,
         spec: Spec,
+        if_range: Option<&HeaderValue>,
     ) -> Outcome {
         let Some(first) = self.first_of(ticket, spec) else {
             return Outcome::Bypass;
@@ -296,7 +316,7 @@ impl MediaWindows {
                 Err(None) => return Outcome::Bypass,
             }
         }
-        self.read(&block, spec, first).await
+        self.read(&block, spec, first, if_range).await
     }
 
     /// After `serve` has answered `spec` of `ticket`, fetch the next block if
@@ -407,11 +427,17 @@ impl MediaWindows {
     }
 
     /// Wait for the bytes `spec` needs from `block`, then answer with them.
-    async fn read(&self, block: &Arc<Block>, spec: Spec, first: u64) -> Outcome {
+    async fn read(
+        &self,
+        block: &Arc<Block>,
+        spec: Spec,
+        first: u64,
+        if_range: Option<&HeaderValue>,
+    ) -> Outcome {
         let early_at = Instant::now() + EARLY_AFTER;
         loop {
             let changed = block.changed.notified();
-            match self.decide(block, spec, first, early_at) {
+            match self.decide(block, spec, first, if_range, early_at) {
                 Some(outcome) => return outcome,
                 // Wake at the early deadline too, in case nothing more comes.
                 // Past it, the next chunk is what can change the answer.
@@ -425,7 +451,14 @@ impl MediaWindows {
 
     /// What `read` does with the block as it stands: answer, or (`None`)
     /// wait for it to change.
-    fn decide(&self, block: &Block, spec: Spec, first: u64, early_at: Instant) -> Option<Outcome> {
+    fn decide(
+        &self,
+        block: &Block,
+        spec: Spec,
+        first: u64,
+        if_range: Option<&HeaderValue>,
+        early_at: Instant,
+    ) -> Option<Outcome> {
         let mut state = lock(&block.state);
         state.used = Instant::now();
         if state.phase == Phase::Head {
@@ -434,6 +467,9 @@ impl MediaWindows {
         if state.phase == Phase::Refused || first > state.last {
             // No block after all; or joined before the end was known, and
             // past it.
+            return Some(Outcome::Bypass);
+        }
+        if if_range.is_some_and(|validator| !strong_match(validator, &state.headers)) {
             return Some(Outcome::Bypass);
         }
         let wanted = match spec {
@@ -465,10 +501,36 @@ impl MediaWindows {
     }
 }
 
-/// Before a new block joins `blocks`, drop the failed ones and complete ones
-/// unused for [`IDLE`], and then, while at the limit, the least recently used
-/// complete one, or else the least recently used arriving one that no request
-/// waits on. Whether that left room for it.
+/// Whether `validator`, an `If-Range`, is the block's `ETag` and both are
+/// strong (RFC 9110 § 13.1.5). A date, a weak tag or a block without one
+/// never matches.
+fn strong_match(validator: &HeaderValue, headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ETAG)
+        .is_some_and(|etag| etag == validator && !etag.as_bytes().starts_with(b"W/"))
+}
+
+/// Drop the failed blocks and the complete ones unused for `idle`.
+fn prune(blocks: &mut Vec<Arc<Block>>, idle: Duration) {
+    let now = Instant::now();
+    blocks.retain(|held| {
+        let state = lock(&held.state);
+        // `used` can be stamped after `now` was read, hence saturating.
+        let keep = match state.phase {
+            Phase::Head | Phase::Body => true,
+            Phase::Done => now.saturating_duration_since(state.used) < idle,
+            Phase::Failed | Phase::Refused => false,
+        };
+        if !keep {
+            held.cancel.cancel();
+        }
+        keep
+    });
+}
+
+/// Before a new block joins `blocks`, already [`prune`]d, drop while at the
+/// limit the least recently used complete block, or else the least recently
+/// used arriving one that no request waits on. Whether that left room for it.
 ///
 /// A block a request waits on is never dropped here: the request does not
 /// touch `used` until bytes arrive, and would be failed for nothing. `fill`
@@ -480,20 +542,6 @@ impl MediaWindows {
 /// and none can start to wait until the lock is released. A block in `Head`
 /// always has its fetcher waiting on it.
 fn make_room(blocks: &mut Vec<Arc<Block>>) -> bool {
-    let now = Instant::now();
-    blocks.retain(|held| {
-        let state = lock(&held.state);
-        // `used` can be stamped after `now` was read, hence saturating.
-        let keep = match state.phase {
-            Phase::Head | Phase::Body => true,
-            Phase::Done => now.saturating_duration_since(state.used) < IDLE,
-            Phase::Failed | Phase::Refused => false,
-        };
-        if !keep {
-            held.cancel.cancel();
-        }
-        keep
-    });
     while blocks.len() >= MAX_BLOCKS {
         let Some(oldest) = blocks
             .iter()
