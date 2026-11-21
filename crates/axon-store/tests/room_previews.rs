@@ -307,6 +307,71 @@ async fn shows_the_latest_edit() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn hides_spoilers_in_original_and_edited_previews() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = common::test_account(&store, "preview-spoiler").await;
+    let room_id = new_room();
+    let spoiler = json!({
+        "msgtype": "m.text",
+        "body": "The ending: secret",
+        "format": "org.matrix.custom.html",
+        "formatted_body": "The ending: <span DATA-MX-SPOILER=\"Plot\">secret</span>",
+    });
+    let original = insert_event(
+        &store,
+        account_id,
+        &room_id,
+        BASE,
+        TestEvent {
+            event_type: "m.room.message",
+            content: spoiler.clone(),
+            ..TestEvent::default()
+        },
+    )
+    .await;
+    let initial = preview_of(&store, account_id, &room_id).await.unwrap();
+    assert_eq!(initial.event_id, original);
+    assert_eq!(initial.body, "(spoiler)");
+    assert!(!initial.truncated);
+
+    let relation = json!({ "rel_type": "m.replace", "event_id": original });
+    for (offset, content, expected) in [
+        (
+            1,
+            json!({ "msgtype": "m.text", "body": "ordinary edit" }),
+            "ordinary edit",
+        ),
+        (2, spoiler, "(spoiler)"),
+    ] {
+        insert_event(
+            &store,
+            account_id,
+            &room_id,
+            BASE + offset,
+            TestEvent {
+                event_type: "m.room.message",
+                content: json!({
+                    "msgtype": "m.text",
+                    "body": "* edit fallback",
+                    "m.new_content": content,
+                    "m.relates_to": relation,
+                }),
+                relates_to: Some(relation.clone()),
+                ..TestEvent::default()
+            },
+        )
+        .await;
+        let edited = preview_of(&store, account_id, &room_id).await.unwrap();
+        assert_eq!(edited.event_id, original);
+        assert_eq!(edited.body, expected);
+        assert!(!edited.truncated);
+    }
+    common::cleanup_account(&pool, account_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn a_redacted_message_falls_back_to_the_one_before() {
     let store = common::migrated_store().await;
     let pool = common::raw_pool().await;
