@@ -64,9 +64,10 @@ jobs:
   ios:
     name: Build for iOS (App Store)
     if: ${{ inputs.platform == 'ios' || inputs.platform == 'both' }}
-    # macOS 26 for its Xcode 26 and iOS 26 SDK: App Store Connect rejects uploads
+    # Xcode 26 or 27, so the iOS 26 SDK or newer: App Store Connect rejects uploads
     # made with an older one, after the build and the upload have succeeded. The
-    # Xcode step below checks it rather than trusting the image.
+    # Xcode step below checks it rather than trusting the image. Xcode 27 needs the
+    # llvm-tools step below; Xcode 26 builds with or without it.
     runs-on: xcode-27
     timeout-minutes: 60
     env:
@@ -124,6 +125,23 @@ jobs:
         run: |
           rustup target add aarch64-apple-ios
           rustup target list --installed
+
+      # Xcode 27's SwiftPM internalizes the `@_cdecl` exports of a static Swift
+      # library, so the Rust link fails with `_init_plugin_*`, `_register_plugin` and
+      # the like undefined. swift-rs puts them back with rustup's llvm-objcopy, and
+      # only warns ("llvm-objcopy not found") when it is missing, which is how the
+      # first Xcode 27 run got as far as the linker. Xcode 26 keeps the symbols global
+      # and never reaches for it, so this is harmless there.
+      #
+      # Added from the repository root, not through the toolchain action's
+      # `components:`: rust-toolchain.toml overrides the action's `stable` with the
+      # pinned toolchain, and the component has to be on the one that compiles.
+      - name: Add llvm-tools, which swift-rs needs on Xcode 27
+        run: |
+          rustup component add llvm-tools
+          objcopy="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-objcopy"
+          test -x "$objcopy" || { echo "::error::$objcopy is missing after adding llvm-tools"; exit 1; }
+          echo "using $objcopy for $(rustc --version)"
 
       - uses: pnpm/action-setup@v6
         with:
