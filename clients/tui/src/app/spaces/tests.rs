@@ -197,6 +197,7 @@ fn pinning_a_space_moves_it_to_the_shared_front_without_room_tag_writes() {
         state: crate::api::AccountState::Active,
         device_id: None,
         verified: None,
+        own_identity_changed: false,
         backup: Default::default(),
     }];
     app.accounts.selected = crate::app::AccountSelection::Account(0);
@@ -1350,6 +1351,7 @@ fn select_other_account(app: &mut App) {
             state: crate::api::AccountState::Active,
             device_id: None,
             verified: None,
+            own_identity_changed: false,
             backup: Default::default(),
         })
         .collect();

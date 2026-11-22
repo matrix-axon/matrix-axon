@@ -39,8 +39,10 @@ const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 /// `/metadata` carries eight snapshots the server caps at 128 KiB each
 /// (docs/room-metadata.md), so the whole response gets headroom above that.
 const ROOM_METADATA_LIMIT: usize = 2 * 1024 * 1024;
-/// `/info` and `/upgrade` are a handful of short strings and numbers.
-const ROOM_SUMMARY_READ_LIMIT: usize = 64 * 1024;
+/// `/info` can carry one identity warning per room member.
+const ROOM_INFO_LIMIT: usize = 2 * 1024 * 1024;
+/// `/upgrade` carries only a pair of optional room IDs.
+const ROOM_UPGRADE_LIMIT: usize = 64 * 1024;
 /// `/members` is uncapped on the server. This is the allocation ceiling for
 /// the lazily loaded projection, the same size as `/metadata`. A larger body
 /// fails the read instead of being decoded.
@@ -377,14 +379,14 @@ impl AxonClient {
             .await
     }
 
-    /// `GET …/info`, read only for its `member_counts`; `/metadata` is the
+    /// `GET …/info` provides member counts and identity changes. `/metadata` is the
     /// source for the state fields because it tells unknown from unset.
     pub async fn room_info(
         &self,
         account_id: Uuid,
         room_id: &str,
     ) -> Result<RoomInfoDto, ApiError> {
-        self.room_read(account_id, room_id, "info", ROOM_SUMMARY_READ_LIMIT)
+        self.room_read(account_id, room_id, "info", ROOM_INFO_LIMIT)
             .await
     }
 
@@ -399,12 +401,32 @@ impl AxonClient {
             .await
     }
 
+    pub async fn acknowledge_identity_change(
+        &self,
+        account_id: Uuid,
+        change: &RoomIdentityChange,
+    ) -> Result<(), ApiError> {
+        let action = change
+            .kind
+            .action()
+            .ok_or_else(|| ApiError::Request("unsupported identity warning kind".to_owned()))?;
+        let request = self
+            .http
+            .post(format!(
+                "{}/v1/accounts/{account_id}/users/{}/identity/{action}",
+                self.base_url,
+                path_segment(&change.user_id),
+            ))
+            .json(&serde_json::json!({ "fingerprint": change.fingerprint }));
+        self.send_no_body(message_mutation(request)).await
+    }
+
     pub async fn room_upgrade(
         &self,
         account_id: Uuid,
         room_id: &str,
     ) -> Result<RoomUpgradeDto, ApiError> {
-        self.room_read(account_id, room_id, "upgrade", ROOM_SUMMARY_READ_LIMIT)
+        self.room_read(account_id, room_id, "upgrade", ROOM_UPGRADE_LIMIT)
             .await
     }
 
@@ -1290,6 +1312,16 @@ fn decode_ws_frame(text: &str) -> Option<LiveFrame> {
                 payload,
             })
         }
+        "account.own_identity_changed" => {
+            let payload: OwnIdentityChangedDto = match serde_json::from_value(envelope.payload) {
+                Ok(payload) => payload,
+                Err(err) => return Some(LiveFrame::ProtocolError(err.to_string())),
+            };
+            Some(LiveFrame::OwnIdentityChanged {
+                account_id: envelope.account_id,
+                changed: payload.own_identity_changed,
+            })
+        }
         "room_details.changed" => {
             let payload = match serde_json::from_value(envelope.payload) {
                 Ok(payload) => payload,
@@ -1348,6 +1380,10 @@ fn next_live_reconnect_backoff(current: Duration) -> Duration {
 
 #[derive(Debug)]
 pub enum LiveFrame {
+    OwnIdentityChanged {
+        account_id: Uuid,
+        changed: bool,
+    },
     RoomDetails {
         account_id: Uuid,
         payload: RoomDetailsChangedDto,
@@ -1432,6 +1468,11 @@ pub(crate) struct SpaceHierarchyChild {
 }
 
 #[derive(Debug, Deserialize)]
+struct OwnIdentityChangedDto {
+    own_identity_changed: bool,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct RoomDetailsChangedDto {
     pub room_id: String,
     pub sources: Vec<RoomDetailSource>,
@@ -1442,6 +1483,7 @@ pub struct RoomDetailsChangedDto {
 pub enum RoomDetailSource {
     Metadata,
     MemberCounts,
+    IdentityChanges,
     HomeserverDetails,
     #[serde(other)]
     Unrecognized,
@@ -1757,6 +1799,8 @@ pub struct AccountDto {
     pub device_id: Option<String>,
     #[serde(default)]
     pub verified: Option<bool>,
+    #[serde(default)]
+    pub own_identity_changed: bool,
     /// Live megolm-backup snapshot (ADR 0098). Orthogonal to `verified`.
     /// Absent on older Axon servers; defaults to the unknown snapshot.
     #[serde(default)]
@@ -2124,6 +2168,34 @@ pub struct RoomInfoDto {
     /// and never will observe one); `Some(None)` for `null`, not observed yet.
     #[serde(default, deserialize_with = "present")]
     pub member_counts: Option<Option<RoomMemberCountsDto>>,
+    #[serde(default)]
+    pub identity_changes: Option<Vec<RoomIdentityChange>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RoomIdentityChange {
+    pub user_id: String,
+    pub kind: IdentityChangeKind,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityChangeKind {
+    PinViolation,
+    VerificationViolation,
+    #[serde(other)]
+    Unrecognized,
+}
+
+impl IdentityChangeKind {
+    fn action(self) -> Option<&'static str> {
+        match self {
+            Self::PinViolation => Some("accept"),
+            Self::VerificationViolation => Some("withdraw_verification"),
+            Self::Unrecognized => None,
+        }
+    }
 }
 
 /// Keeps a present-but-null field apart from an absent one.
@@ -2437,6 +2509,50 @@ pub struct EventDto {
     /// unencrypted events or rows with no recorded verdict.
     #[serde(default)]
     pub sender_trust: Option<String>,
+    #[serde(default)]
+    pub utd_reason: Option<UtdReason>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UtdReason {
+    kind: UtdReasonKind,
+    withheld_code: Option<String>,
+    verification_level: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum UtdReasonKind {
+    MissingKey,
+    Withheld,
+    SenderNotTrusted,
+    #[serde(other)]
+    Other,
+}
+
+impl UtdReason {
+    fn description(&self) -> String {
+        match self.kind {
+            UtdReasonKind::MissingKey => "missing key".to_owned(),
+            UtdReasonKind::Withheld => self.withheld_code.as_deref().map_or_else(
+                || "key withheld".to_owned(),
+                |code| format!("key withheld ({})", clean_reason_detail(code)),
+            ),
+            UtdReasonKind::SenderNotTrusted => self.verification_level.as_deref().map_or_else(
+                || "sender not trusted".to_owned(),
+                |level| format!("sender not trusted ({})", clean_reason_detail(level)),
+            ),
+            UtdReasonKind::Other => "other decryption failure".to_owned(),
+        }
+    }
+}
+
+fn clean_reason_detail(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_graphic())
+        .take(64)
+        .collect()
 }
 
 /// One emoji's aggregated tally on an [`EventDto`], mirroring the API's
@@ -2488,6 +2604,15 @@ struct ParsedMedia<'a> {
 }
 
 impl EventDto {
+    pub(crate) fn key_withheld_for_unverified_device(&self) -> bool {
+        !self.redacted
+            && self.content.is_none()
+            && self.utd_reason.as_ref().is_some_and(|reason| {
+                reason.kind == UtdReasonKind::Withheld
+                    && reason.withheld_code.as_deref() == Some("m.unverified")
+            })
+    }
+
     pub fn display_body(&self) -> String {
         if self.redacted {
             return "[redacted]".to_owned();
@@ -2510,7 +2635,10 @@ impl EventDto {
             return body.clone();
         }
         if self.content.is_none() {
-            return "[unable to decrypt]".to_owned();
+            return self.utd_reason.as_ref().map_or_else(
+                || "[unable to decrypt]".to_owned(),
+                |reason| format!("[unable to decrypt: {}]", reason.description()),
+            );
         }
         format!("[{}]", self.event_type)
     }
@@ -2885,13 +3013,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn own_identity_alert_decodes_replacement_and_clearance_by_account() {
+        let account = Uuid::new_v4();
+        for changed in [true, false] {
+            let frame = serde_json::json!({
+                "type": "account.own_identity_changed",
+                "account_id": account,
+                "payload": {"own_identity_changed": changed, "identity_replaced": changed}
+            });
+            assert!(matches!(
+                decode_ws_frame(&frame.to_string()),
+                Some(LiveFrame::OwnIdentityChanged { account_id, changed: alert })
+                    if account_id == account && alert == changed
+            ));
+        }
+    }
+
+    #[test]
     fn room_detail_frames_use_the_envelope_account_and_accept_future_sources() {
         let account_id = Uuid::new_v4();
         let frame = serde_json::json!({
             "type": "room_details.changed", "account_id": account_id,
             "payload": {
                 "room_id": "!room:example.com", "account_id": Uuid::new_v4(),
-                "sources": ["metadata", "member_counts", "homeserver_details", "future_source"]
+                "sources": ["metadata", "member_counts", "homeserver_details", "identity_changes", "future_source"]
             }
         });
         let Some(LiveFrame::RoomDetails {
@@ -2909,6 +3054,7 @@ mod tests {
                 RoomDetailSource::Metadata,
                 RoomDetailSource::MemberCounts,
                 RoomDetailSource::HomeserverDetails,
+                RoomDetailSource::IdentityChanges,
                 RoomDetailSource::Unrecognized
             ]
         );

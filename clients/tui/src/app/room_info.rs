@@ -17,8 +17,8 @@ use super::{App, Mode, PopupKind, RoomKey};
 use crate::api::{
     ApiError, DetailRefreshDto, DetailRefreshState, DirectoryVisibility, HomeserverDetailDto,
     HomeserverDetailStatus, MemberDto, MetadataSnapshot, RoomCreationContent, RoomDetailSource,
-    RoomDto, RoomHomeserverDetailsDto, RoomInfoDto, RoomJoinRulesContent, RoomMetadataDto,
-    RoomPowerLevelsContent, RoomUpgradeDto, SnapshotStatus,
+    RoomDto, RoomHomeserverDetailsDto, RoomIdentityChange, RoomInfoDto, RoomJoinRulesContent,
+    RoomMetadataDto, RoomPowerLevelsContent, RoomUpgradeDto, SnapshotStatus,
 };
 use crate::config::{ColorScheme, TimeFormat};
 
@@ -144,11 +144,24 @@ pub(crate) struct RoomInfoState {
     pub(crate) member_filter_editing: bool,
 }
 
-/// Room information for the one room `/whereami` last showed. Holding a single
-/// room bounds this cache without an eviction policy; reopening the same room
-/// shows its earlier data while the refresh is in flight.
+#[derive(Debug)]
+struct IdentityPopup {
+    room: RoomKey,
+    rows: Vec<RoomIdentityChange>,
+    selected: Option<usize>,
+    commands_reviewed: bool,
+    result: Option<String>,
+}
+
+/// Room information for the selected room. The `/info` projection stays active
+/// for identity warnings while the popup is closed. Reopening `/whereami` in
+/// the same room shows the cached details while they refresh.
 #[derive(Debug, Default)]
 pub(crate) struct RoomInfoCache {
+    reviewed_identities: Vec<RoomIdentityChange>,
+    identity_popup: Option<IdentityPopup>,
+    identity_action_inflight: bool,
+    identity_action_result: Option<(RoomKey, String)>,
     pub(crate) state: Option<RoomInfoState>,
     generation: u64,
     /// One abort handle per source; a key change or close drains them all.
@@ -176,14 +189,22 @@ impl RoomInfoState {
 }
 
 impl RoomInfoCache {
-    fn abort_reads(&mut self) {
-        for (_, read) in self.reads.drain() {
-            read.abort();
-        }
+    fn abort_reads(&mut self, keep_info: bool) {
+        self.reads.retain(|source, read| {
+            if keep_info && *source == Source::Info {
+                true
+            } else {
+                read.abort();
+                false
+            }
+        });
         if let Some(state) = self.state.as_mut() {
             let members_loading =
                 state.members.value.is_none() && state.members.refresh.request.is_some();
             for source in Source::ALL {
+                if keep_info && source == Source::Info {
+                    continue;
+                }
                 let read = state.refresh(source);
                 read.request = None;
                 read.dirty = false;
@@ -239,14 +260,28 @@ impl App {
     /// Fetch each idle source for one room. Changing the key cancels all old
     /// requests before allocating the next room's state.
     pub(crate) fn request_room_info(&mut self, key: RoomKey) {
+        self.track_room_info(key);
+        if let Some(state) = self.room_info.state.as_mut() {
+            for source in Source::ALL {
+                let read = state.refresh(source);
+                if read.request.is_none() {
+                    read.invalidate();
+                }
+            }
+        }
+        self.start_room_info_reads(Instant::now());
+    }
+
+    fn track_room_info(&mut self, key: RoomKey) {
         if self
             .room_info
             .state
             .as_ref()
             .is_none_or(|state| state.key != key)
         {
-            self.room_info.abort_reads();
+            self.room_info.abort_reads(false);
             self.clear_member_refresh();
+            self.room_info.reviewed_identities.clear();
             self.room_info.state = Some(RoomInfoState {
                 key,
                 metadata: Part::default(),
@@ -258,16 +293,10 @@ impl App {
                 member_filter: String::new(),
                 member_filter_editing: false,
             });
-        }
-        if let Some(state) = self.room_info.state.as_mut() {
-            for source in Source::ALL {
-                let read = state.refresh(source);
-                if read.request.is_none() {
-                    read.invalidate();
-                }
+            if let Some(state) = self.room_info.state.as_mut() {
+                state.info.refresh.invalidate();
             }
         }
-        self.start_room_info_reads(Instant::now());
     }
 
     fn start_room_info_reads(&mut self, now: Instant) {
@@ -346,7 +375,8 @@ impl App {
     /// Opening explicitly permits a retry of every source, including those
     /// whose previous HTTP request failed. Values and errors stay until settled.
     pub(crate) fn open_room_info(&mut self, key: RoomKey) {
-        self.room_info.abort_reads();
+        self.room_info
+            .abort_reads(self.room_info_for_selected().is_some());
         if let Some(state) = self
             .room_info
             .state
@@ -362,23 +392,23 @@ impl App {
         self.request_room_info(key);
     }
 
-    /// The tick handles delayed membership reads and failed-read retries only.
-    /// There is no periodic read after a source succeeds.
-    pub(crate) fn poll_open_room_info(&mut self, now: Instant) {
-        if !self.room_info_popup_is_open() {
-            self.cancel_room_info_refresh();
-            return;
-        }
+    /// Track the selected room's /info projection for identity warnings.
+    /// Other sources run only while /whereami is open.
+    /// After a successful read, wait for a trigger instead of polling.
+    pub(crate) fn poll_room_info(&mut self, now: Instant) {
         let Some(key) = self.selected_room_key() else {
             self.cancel_room_info_refresh();
+            self.room_info.state = None;
+            self.room_info.reviewed_identities.clear();
             return;
         };
-        if self
-            .room_info
-            .state
-            .as_ref()
-            .is_none_or(|state| state.key != key)
-        {
+        if !self.room_info_popup_is_open() {
+            self.cancel_room_info_refresh();
+            self.track_room_info(key);
+            self.start_room_info_reads(now);
+            return;
+        }
+        if self.room_info_for_selected().is_none() {
             self.popup_scroll = 0;
             self.reveal_room_info_members = false;
             self.request_room_info(key);
@@ -393,14 +423,18 @@ impl App {
         self.start_room_info_reads(now);
     }
 
-    /// Reconnect repairs missed frames for the sources the popup currently holds.
+    /// Reconnect repairs missed /info frames and refreshes any open room popup.
     /// Each failing source permits one early reconnect retry per backoff window.
     pub(crate) fn note_room_info_reconnect(&mut self, now: Instant) {
-        if !self.room_info_popup_is_open() {
-            return;
+        let popup_open = self.room_info_popup_is_open();
+        if let Some(key) = self.selected_room_key() {
+            self.track_room_info(key);
         }
         if let Some(state) = self.room_info.state.as_mut() {
             for source in Source::ALL {
+                if !popup_open && source != Source::Info {
+                    continue;
+                }
                 let read = state.refresh(source);
                 if read.retry_at.is_some() && !read.reconnect_bypassed {
                     read.retry_at = None;
@@ -409,24 +443,28 @@ impl App {
                 read.invalidate();
             }
         }
-        self.poll_open_room_info(now);
+        self.poll_room_info(now);
     }
 
     /// The explicit refresh shortcut bypasses failure backoff while retaining
     /// the visible values, filter, and scroll position.
-    pub(crate) fn refresh_open_room_info(&mut self, now: Instant) {
-        if !self.room_info_popup_is_open() {
-            return;
+    pub(crate) fn refresh_room_info(&mut self, now: Instant) {
+        let popup_open = self.room_info_popup_is_open();
+        if let Some(key) = self.selected_room_key() {
+            self.track_room_info(key);
         }
         if let Some(state) = self.room_info.state.as_mut() {
             for source in Source::ALL {
+                if !popup_open && source != Source::Info {
+                    continue;
+                }
                 let read = state.refresh(source);
                 read.retry_at = None;
                 read.reconnect_bypassed = false;
                 read.invalidate();
             }
         }
-        self.poll_open_room_info(now);
+        self.poll_room_info(now);
     }
 
     pub(crate) fn note_room_details_changed(
@@ -435,9 +473,11 @@ impl App {
         sources: &[RoomDetailSource],
         now: Instant,
     ) {
-        if !self.room_info_popup_is_open() || self.selected_room_key().as_ref() != Some(key) {
+        if self.selected_room_key().as_ref() != Some(key) {
             return;
         }
+        let popup_open = self.room_info_popup_is_open();
+        self.track_room_info(key.clone());
         if let Some(state) = self
             .room_info
             .state
@@ -446,15 +486,16 @@ impl App {
         {
             for source in sources {
                 let source = match source {
-                    RoomDetailSource::Metadata => Source::Metadata,
-                    RoomDetailSource::MemberCounts => Source::Info,
-                    RoomDetailSource::HomeserverDetails => Source::Homeserver,
-                    RoomDetailSource::Unrecognized => continue,
+                    RoomDetailSource::Metadata if popup_open => Source::Metadata,
+                    RoomDetailSource::MemberCounts if popup_open => Source::Info,
+                    RoomDetailSource::HomeserverDetails if popup_open => Source::Homeserver,
+                    RoomDetailSource::IdentityChanges => Source::Info,
+                    _ => continue,
                 };
                 state.refresh(source).invalidate();
             }
         }
-        self.poll_open_room_info(now);
+        self.poll_room_info(now);
     }
 
     /// Metadata and counts use their persisted-state notifications. The two
@@ -480,13 +521,14 @@ impl App {
                 state.upgrade.refresh.invalidate();
             }
         }
-        self.poll_open_room_info(now);
+        self.poll_room_info(now);
     }
 
-    /// Cancel HTTP reads and retry intents; late outcomes no longer match an
-    /// active request. Keep last values, errors, retry history, and the local member filter.
+    /// Cancel popup-only reads and retries. Keep /info active for the selected
+    /// room, and preserve last values, errors, retry history, and the filter.
     pub(crate) fn cancel_room_info_refresh(&mut self) {
-        self.room_info.abort_reads();
+        self.room_info
+            .abort_reads(self.room_info_for_selected().is_some());
         self.clear_member_refresh();
     }
 
@@ -545,12 +587,323 @@ impl App {
         }
         // Follow up after all hints received during this source's request. A
         // different source need not settle first. Failed reads wait for retry_at.
-        if self.room_info_popup_is_open() && self.room_info_for_selected().is_some() {
+        if self.room_info_for_selected().is_some() {
             self.start_room_info_reads(now);
         }
     }
 
-    fn selected_room_key(&self) -> Option<RoomKey> {
+    pub(super) fn room_identity_changes(
+        &self,
+    ) -> Option<impl Iterator<Item = &RoomIdentityChange>> {
+        let changes = self
+            .room_info_for_selected()?
+            .info
+            .value
+            .as_ref()?
+            .identity_changes
+            .as_deref()?;
+        Some(changes.iter().filter(|change| {
+            change.kind != crate::api::IdentityChangeKind::Unrecognized
+                && ruma::UserId::parse(&change.user_id).is_ok()
+                && !change
+                    .user_id
+                    .chars()
+                    .any(|ch| ch.is_control() || ch.is_whitespace() || super::is_bidi_control(ch))
+        }))
+    }
+
+    pub(crate) fn has_room_identity_changes(&self) -> bool {
+        self.room_identity_changes()
+            .is_some_and(|mut changes| changes.next().is_some())
+    }
+
+    fn room_identity_snapshot_is_current(&self) -> bool {
+        self.room_info_for_selected().is_some_and(|state| {
+            !state.info.refresh.dirty
+                && state.info.refresh.request.is_none()
+                && state.info.failure.is_none()
+        })
+    }
+
+    pub(super) fn room_identity_change_is_reviewed(&self, change: &RoomIdentityChange) -> bool {
+        self.room_identity_snapshot_is_current()
+            && self.room_info.reviewed_identities.contains(change)
+    }
+
+    pub(super) fn room_identity_command(
+        &mut self,
+        action: Option<(crate::api::IdentityChangeKind, String)>,
+    ) {
+        let Some(room) = self.selected_room_key() else {
+            self.status = "Select a room to review identity changes.".into();
+            return;
+        };
+        self.track_room_info(room.clone());
+        let Some((kind, target)) = action else {
+            let result = self
+                .room_info
+                .identity_action_result
+                .as_ref()
+                .is_some_and(|(key, _)| key == &room)
+                .then(|| self.room_info.identity_action_result.take())
+                .flatten()
+                .map(|(_, result)| result);
+            self.room_info.reviewed_identities.clear();
+            self.room_info.identity_popup = Some(IdentityPopup {
+                room,
+                rows: Vec::new(),
+                selected: None,
+                commands_reviewed: false,
+                result,
+            });
+            self.open_popup(PopupKind::RoomIdentity);
+            return;
+        };
+        let change = self
+            .room_info
+            .reviewed_identities
+            .iter()
+            .find(|change| change.kind == kind && change.user_id == target)
+            .cloned();
+        self.start_room_identity_action(room, change);
+    }
+
+    fn start_room_identity_action(&mut self, room: RoomKey, change: Option<RoomIdentityChange>) {
+        if self.room_info.identity_action_inflight {
+            self.report_identity_action(
+                &room,
+                "An identity acknowledgement is already in progress.".to_owned(),
+            );
+            return;
+        }
+        let Some(change) = change.filter(|change| {
+            self.room_identity_snapshot_is_current()
+                && self
+                    .room_identity_changes()
+                    .is_some_and(|mut current| current.any(|entry| entry == change))
+        }) else {
+            let message = if self.mode == Mode::Popup(PopupKind::RoomIdentity) {
+                "Review and select the current warning before acknowledging it."
+            } else {
+                "Run /identity to review the current warning before acknowledging it."
+            };
+            self.report_identity_action(&room, message.to_owned());
+            return;
+        };
+        if self.bootstrap_tx.is_none() {
+            return;
+        }
+        self.room_info.identity_action_inflight = true;
+        self.report_identity_action(&room, "Acknowledging identity change…".to_owned());
+        let client = self.client.clone();
+        let account_id = room.account_id;
+        self.spawn_bootstrap(async move {
+            // Deliver an outcome even if the request task exits unexpectedly.
+            let result = tokio::spawn(async move {
+                client
+                    .acknowledge_identity_change(account_id, &change)
+                    .await
+            })
+            .await
+            .unwrap_or_else(|_| {
+                Err(ApiError::Request(
+                    "identity request task stopped".to_owned(),
+                ))
+            });
+            super::bootstrap::BootstrapOutcome::IdentityAcknowledged { room, result }
+        });
+    }
+
+    pub(crate) fn discard_room_identity_popup_if_closed(&mut self) {
+        if self.mode != Mode::Popup(PopupKind::RoomIdentity) {
+            self.room_info.identity_popup = None;
+        }
+    }
+
+    pub(crate) fn move_room_identity_selection(&mut self, delta: isize) {
+        let Some(popup) = self.room_info.identity_popup.as_mut() else {
+            return;
+        };
+        if !popup.rows.is_empty() {
+            if !self.room_info.identity_action_inflight {
+                popup.result = None;
+            }
+            popup.selected = Some(popup.selected.map_or_else(
+                || if delta < 0 { popup.rows.len() - 1 } else { 0 },
+                |current| {
+                    current
+                        .saturating_add_signed(delta)
+                        .min(popup.rows.len() - 1)
+                },
+            ));
+        }
+    }
+
+    pub(crate) fn submit_room_identity_selection(&mut self) {
+        let Some(popup) = self
+            .room_info
+            .identity_popup
+            .as_ref()
+            .filter(|popup| self.selected_room_key().as_ref() == Some(&popup.room))
+        else {
+            return;
+        };
+        if let Some(change) = popup.selected.and_then(|index| popup.rows.get(index)) {
+            self.start_room_identity_action(popup.room.clone(), Some(change.clone()));
+        }
+    }
+
+    /// Settle the rows before drawing. Enter uses the exact fingerprint last
+    /// presented for that row. A replacement or removed row loses selection.
+    pub(crate) fn prepare_room_identity_popup(
+        &mut self,
+        width: usize,
+        page: usize,
+    ) -> Vec<Line<'static>> {
+        use crate::api::IdentityChangeKind::{PinViolation, VerificationViolation};
+        use ratatui::style::Modifier;
+
+        let key = self.selected_room_key();
+        let current = self.room_identity_snapshot_is_current();
+        let changes = self
+            .room_identity_changes()
+            .map(|changes| changes.cloned().collect::<Vec<_>>());
+        let Some(popup) = self
+            .room_info
+            .identity_popup
+            .as_mut()
+            .filter(|popup| key.as_ref() == Some(&popup.room))
+        else {
+            return vec![Line::from("Room changed. Reopen /identity.")];
+        };
+        let mut lines = Vec::new();
+        if let Some(result) = &popup.result {
+            lines.extend(wrap_styled_line(Line::from(result.clone()), width));
+        }
+        let status = match changes.as_deref() {
+            None => Some("Room identity warnings are unavailable or still loading."),
+            Some([]) => Some("No room identity changes need attention."),
+            Some(_) if !current => Some("Refreshing warnings. Acknowledgements are paused."),
+            Some(_) => None,
+        };
+        if let Some(status) = status {
+            lines.extend(wrap_styled_line(Line::from(status), width));
+        }
+
+        let changes = changes.unwrap_or_default();
+        // Keep the slash-command review on the first current snapshot for
+        // this popup. A background redraw must not re-arm a typed command.
+        if current && !popup.commands_reviewed {
+            self.room_info.reviewed_identities.clone_from(&changes);
+            popup.commands_reviewed = true;
+        }
+        if popup.rows != changes {
+            let previous = popup.selected.and_then(|index| popup.rows.get(index));
+            popup.selected = previous
+                .and_then(|selected| changes.iter().position(|change| change == selected))
+                .or_else(|| (popup.rows.is_empty() && !changes.is_empty()).then_some(0));
+            popup.rows = changes;
+        }
+
+        for (index, change) in popup.rows.iter().enumerate() {
+            let action = match change.kind {
+                PinViolation => "Accept changed identity",
+                VerificationViolation => "Accept changed identity and withdraw verification",
+                _ => continue,
+            };
+            let selected = popup.selected == Some(index);
+            let marker = if selected { "> " } else { "  " };
+            let style = if selected {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let start = lines.len();
+            lines.extend(wrap_styled_line(
+                Line::styled(format!("{marker}{} — {action}", change.user_id), style),
+                width,
+            ));
+            if selected {
+                let end = lines.len();
+                if start < self.popup_scroll || end > self.popup_scroll.saturating_add(page) {
+                    self.popup_scroll = if start < self.popup_scroll {
+                        start
+                    } else {
+                        end.saturating_sub(page).min(start)
+                    };
+                }
+            }
+        }
+        lines
+    }
+
+    fn report_identity_action(&mut self, room: &RoomKey, message: String) {
+        if let Some(popup) = self.room_info.identity_popup.as_mut().filter(|popup| {
+            self.mode == Mode::Popup(PopupKind::RoomIdentity) && &popup.room == room
+        }) {
+            popup.result = Some(message);
+            if !self.room_info.identity_action_inflight {
+                popup.selected = None;
+                self.popup_scroll = 0;
+            }
+        } else if self.selected_room_key().as_ref() == Some(room)
+            && matches!(self.mode, Mode::Compose)
+            && !self.is_mid_command()
+        {
+            self.status = message.into();
+            self.pending_command_response = None;
+        } else {
+            self.room_info.identity_action_result = Some((room.clone(), message));
+        }
+    }
+
+    pub(super) fn apply_room_identity_action(
+        &mut self,
+        room: RoomKey,
+        result: Result<(), ApiError>,
+    ) {
+        self.room_info.identity_action_inflight = false;
+        let selected = self.selected_room_key();
+        if selected.as_ref() == Some(&room) {
+            self.room_info.reviewed_identities.clear();
+        }
+        let message = match result {
+            Ok(()) => "Identity change acknowledged.".to_owned(),
+            Err(ApiError::Status {
+                status: reqwest::StatusCode::CONFLICT,
+                message,
+            }) => {
+                // The server currently uses the same error code for both conflicts.
+                match message.as_str() {
+                        "conflict: the account is not active or its crypto store is not ready" =>
+                            "The account is inactive or its encryption state is still loading. Review the warning again once the account is ready.",
+                        "conflict: the identity warning changed; refresh room info and review it again" =>
+                            "The warning changed. Review the latest warning before retrying.",
+                        _ => "Axon could not acknowledge this warning. Review the latest warning before retrying.",
+                    }.to_owned()
+            }
+            Err(err) if err.is_service_unavailable() => {
+                "Identity service unavailable. Review the warning and try again later.".to_owned()
+            }
+            Err(_) => {
+                "Could not confirm acknowledgement. Review the latest warning before retrying."
+                    .to_owned()
+            }
+        };
+        self.report_identity_action(&room, message);
+        // The acknowledgement is account-wide, so a different selected room
+        // for the same account can also need its projection refreshed.
+        if let Some(key) = selected.filter(|key| key.account_id == room.account_id) {
+            self.track_room_info(key);
+            if let Some(state) = self.room_info.state.as_mut() {
+                state.info.refresh.retry_at = None;
+                state.info.refresh.invalidate();
+            }
+            self.start_room_info_reads(Instant::now());
+        }
+    }
+
+    pub(super) fn selected_room_key(&self) -> Option<RoomKey> {
         self.selected_room().map(RoomKey::from)
     }
 
@@ -726,7 +1079,7 @@ impl App {
             .as_ref()
             .is_some_and(|state| &state.key == key)
         {
-            self.room_info.abort_reads();
+            self.room_info.abort_reads(false);
             self.room_info.state = None;
         }
     }
@@ -2156,6 +2509,7 @@ mod tests {
         let state = loaded(
             Some(full_metadata()),
             Some(RoomInfoDto {
+                identity_changes: None,
                 member_counts: Some(Some(RoomMemberCountsDto {
                     joined: 412,
                     invited: 3,
@@ -2227,6 +2581,7 @@ mod tests {
         let state = loaded(
             Some(all_unknown()),
             Some(RoomInfoDto {
+                identity_changes: None,
                 member_counts: Some(None),
             }),
             Some(RoomUpgradeDto::default()),
@@ -2595,7 +2950,10 @@ mod tests {
     #[tokio::test]
     async fn oversized_room_reads_are_refused() {
         let (client, _server) = stub_axon(1, |_| {
-            format!(r#"{{"data":{{"padding":"{}"}}}}"#, "x".repeat(128 * 1024))
+            format!(
+                r#"{{"data":{{"padding":"{}"}}}}"#,
+                "x".repeat(3 * 1024 * 1024)
+            )
         })
         .await;
 
@@ -3099,6 +3457,7 @@ mod tests {
 
     fn counts(joined: i64) -> RoomInfoDto {
         RoomInfoDto {
+            identity_changes: None,
             member_counts: Some(Some(RoomMemberCountsDto {
                 joined,
                 invited: 0,
@@ -3132,9 +3491,11 @@ mod tests {
     fn member_list_does_not_invent_a_joined_count() {
         let members = vec![listed_member("join", "@ada:example.com", Some("Ada"))];
         let absent = RoomInfoDto {
+            identity_changes: None,
             member_counts: None,
         };
         let unknown = RoomInfoDto {
+            identity_changes: None,
             member_counts: Some(None),
         };
         for info in [Some(absent), Some(unknown), None] {
@@ -3308,6 +3669,7 @@ mod tests {
                 redacted: false,
                 redaction_event_id: None,
                 reactions: None,
+                utd_reason: None,
                 sender_trust: None,
             }],
         );
@@ -3343,6 +3705,7 @@ mod tests {
                 redacted: false,
                 redaction_event_id: None,
                 reactions: None,
+                utd_reason: None,
                 sender_trust: None,
             }],
         );
@@ -4372,7 +4735,7 @@ mod tests {
         let text = crate::ui::popup_room_info_lines(&app).join("\n");
         assert!(text.contains("#secret:example.com"));
         assert!(text.contains("Latest refresh failed"));
-        app.refresh_open_room_info(now);
+        app.refresh_room_info(now);
         let denied: RoomHomeserverDetailsDto = serde_json::from_value(json!({
             "local_aliases": {"status": "forbidden", "aliases": null},
             "directory_visibility": {"status": "not_found", "visibility": null}
@@ -4465,6 +4828,389 @@ mod tests {
         }
     }
 
+    fn identity_popup_text(app: &mut App) -> String {
+        app.prepare_room_identity_popup(100, 15)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn identity_changes_follow_the_selected_room_and_require_review_after_replacement() {
+        use crate::api::{IdentityChangeKind, RoomIdentityChange};
+
+        let mut app = app();
+        wire_room_info(&mut app);
+        let now = Instant::now();
+        let user = "@ada:example.com".to_owned();
+        let mut change = RoomIdentityChange {
+            user_id: user.clone(),
+            kind: IdentityChangeKind::VerificationViolation,
+            fingerprint: "first".to_owned(),
+        };
+        let info = |change| {
+            RoomInfoPart::Info(Ok(RoomInfoDto {
+                identity_changes: Some(vec![change]),
+                ..Default::default()
+            }))
+        };
+        app.poll_room_info(now);
+        assert_eq!(app.room_info.reads.len(), 1);
+        settle(&mut app, info(change.clone()), now);
+        app.handle_command(crate::command::parse("/identity")).await;
+        assert!(identity_popup_text(&mut app)
+            .contains("@ada:example.com — Accept changed identity and withdraw verification"));
+        assert_eq!(app.room_info.reviewed_identities, vec![change.clone()]);
+
+        app.handle_live_frame(frame(
+            Uuid::new_v4(),
+            &key().room_id,
+            vec![RoomDetailSource::IdentityChanges],
+        ));
+        assert!(
+            app.room_info.reads.is_empty(),
+            "another account shares the same room ID"
+        );
+        app.handle_live_frame(frame(
+            key().account_id,
+            &key().room_id,
+            vec![RoomDetailSource::IdentityChanges],
+        ));
+        change.fingerprint = "replacement".to_owned();
+        settle(&mut app, info(change.clone()), now);
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
+        assert!(!app.room_info.identity_action_inflight);
+        assert!(identity_popup_text(&mut app).contains("select the current warning"));
+        assert!(app
+            .room_info
+            .identity_popup
+            .as_ref()
+            .unwrap()
+            .selected
+            .is_none());
+        assert_eq!(app.room_info.reviewed_identities[0].fingerprint, "first");
+        assert_eq!(
+            app.room_identity_changes().unwrap().collect::<Vec<_>>(),
+            vec![&change]
+        );
+
+        app.note_room_info_reconnect(now);
+        settle(
+            &mut app,
+            RoomInfoPart::Info(Ok(RoomInfoDto {
+                identity_changes: Some(Vec::new()),
+                ..Default::default()
+            })),
+            now,
+        );
+        assert_eq!(app.room_identity_changes().map(Iterator::count), Some(0));
+        assert!(app.room_info.reads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unknown_and_invalid_identity_entries_preserve_counts_and_stay_hidden() {
+        let mut app = app();
+        let mut info: RoomInfoDto = serde_json::from_value(json!({
+            "member_counts": {"joined": 3, "invited": 0, "observed_at": 1},
+            "identity_changes": [
+                {"user_id": "@future:example.com", "kind": "future_warning", "fingerprint": "key"},
+                {"user_id": "@invalid\n:example.com", "kind": "pin_violation", "fingerprint": "key"},
+                {"user_id": "@peer:example.com", "kind": "pin_violation", "fingerprint": "key"}
+            ]
+        })).unwrap();
+        assert_eq!(
+            info.member_counts
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .joined,
+            3
+        );
+        app.room_info.state = Some(loaded(None, Some(info.clone()), None));
+        assert!(app.has_room_identity_changes());
+        app.handle_command(crate::command::parse("/identity")).await;
+        assert!(
+            identity_popup_text(&mut app).contains("@peer:example.com — Accept changed identity")
+        );
+        assert_eq!(app.room_info.reviewed_identities.len(), 1);
+
+        info.identity_changes.as_mut().unwrap().pop();
+        app.room_info.state = Some(loaded(None, Some(info), None));
+        assert!(!app.has_room_identity_changes());
+        app.handle_command(crate::command::parse("/identity")).await;
+        assert_eq!(
+            identity_popup_text(&mut app),
+            "No room identity changes need attention."
+        );
+        assert!(app.room_info.reviewed_identities.is_empty());
+    }
+
+    #[tokio::test]
+    async fn identity_tab_completes_verbs_and_cycles_matching_room_users() {
+        let mut app = app();
+        let info = serde_json::from_value(json!({
+            "identity_changes": [
+                {"user_id": "@alice:example.com", "kind": "pin_violation", "fingerprint": "key"},
+                {"user_id": "@albert:example.com", "kind": "pin_violation", "fingerprint": "key"},
+                {"user_id": "@verified:example.com", "kind": "verification_violation", "fingerprint": "key"}
+            ]
+        })).unwrap();
+        app.room_info.state = Some(loaded(None, Some(info), None));
+        app.rooms
+            .display_names
+            .entry(key())
+            .or_default()
+            .insert("@verified:example.com".to_owned(), "Bob".to_owned());
+        app.insert_str("/identity a");
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
+        assert_eq!(app.input.buffer, "/identity accept ");
+        app.insert_str("@al");
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
+        assert_eq!(app.input.buffer, "/identity accept @albert:example.com");
+        assert!(app.status.text(false).contains("Open /identity to review"));
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
+        assert_eq!(app.input.buffer, "/identity accept @alice:example.com");
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
+            .await;
+        assert_eq!(app.input.buffer, "/identity accept @albert:example.com");
+
+        app.clear_input_buffer();
+        app.insert_str("/identity w");
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
+        assert_eq!(app.input.buffer, "/identity withdraw-verification ");
+        app.insert_str("bob");
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
+        assert_eq!(
+            app.input.buffer,
+            "/identity withdraw-verification @verified:example.com"
+        );
+    }
+
+    #[test]
+    fn identity_banners_preserve_the_room_and_thread_title_in_a_narrow_pane() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = app();
+        let account: crate::api::AccountDto = serde_json::from_value(json!({
+            "account_id": key().account_id, "user_id": "@me:example.com", "state": "active",
+            "own_identity_changed": true,
+        }))
+        .unwrap();
+        app.set_accounts(vec![account]);
+        let info = serde_json::from_value(json!({
+            "identity_changes": [
+                {"user_id": "@peer:example.com", "kind": "pin_violation", "fingerprint": "key"}
+            ]
+        }))
+        .unwrap();
+        app.room_info.state = Some(loaded(None, Some(info), None));
+        app.rooms_panel_hidden = true;
+        app.thread_panel = Some("$thread:example.com".to_owned());
+
+        let mut terminal = Terminal::new(TestBackend::new(34, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                crate::ui::prepare(&mut app, frame.area());
+                crate::ui::draw(frame, &mut app);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let messages = app.frame.areas.messages;
+        let top = (messages.x..messages.right())
+            .map(|x| buffer.cell((x, messages.y)).unwrap().symbol())
+            .collect::<String>();
+        assert!(top.contains("Ops  [in thread]"), "{top:?}");
+    }
+
+    #[test]
+    fn own_identity_banner_only_labels_the_selected_rooms_account() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = app();
+        let mut other = room();
+        other.account_id = Uuid::new_v4();
+        app.rooms.rooms.push(other.clone());
+        app.set_accounts(serde_json::from_value(json!([
+            {"account_id": key().account_id, "user_id": "@me:example.com", "state": "active", "own_identity_changed": true},
+            {"account_id": other.account_id, "user_id": "@other:example.com", "state": "active"}
+        ])).unwrap());
+        app.rooms_panel_hidden = true;
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        for (index, expected) in [(0, true), (1, false)] {
+            app.rooms.selected = Some(index);
+            terminal
+                .draw(|frame| {
+                    crate::ui::prepare(&mut app, frame.area());
+                    crate::ui::draw(frame, &mut app);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let messages = app.frame.areas.messages;
+            let title = (messages.x..messages.right())
+                .map(|x| buffer.cell((x, messages.y)).unwrap().symbol())
+                .collect::<String>();
+            assert_eq!(
+                title.contains("Own identity changed /status"),
+                expected,
+                "{title:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn identity_action_result_waits_for_the_originating_room() {
+        let mut app = app();
+        let mut other = room();
+        other.room_id = "!other:example.com".to_owned();
+        app.rooms.rooms.push(other);
+        app.rooms.selected = Some(1);
+        app.status = "Room B status".into();
+        app.apply_room_identity_action(
+            key(),
+            Err(ApiError::Status {
+                status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                message: "identity service unavailable".to_owned(),
+            }),
+        );
+        assert_eq!(app.status.text(false), "Room B status");
+
+        app.room_identity_command(None);
+        assert!(!identity_popup_text(&mut app).contains("Identity service unavailable"));
+        app.rooms.selected = Some(0);
+        app.room_identity_command(None);
+        assert!(identity_popup_text(&mut app).contains("Identity service unavailable"));
+        app.room_identity_command(None);
+        assert!(!identity_popup_text(&mut app).contains("Identity service unavailable"));
+    }
+
+    #[tokio::test]
+    async fn an_identity_action_result_waiting_behind_a_popup_is_shown_once() {
+        let mut app = app();
+        app.room_info.state = Some(loaded(
+            None,
+            Some(RoomInfoDto {
+                identity_changes: Some(Vec::new()),
+                ..Default::default()
+            }),
+            None,
+        ));
+        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        app.apply_room_identity_action(key(), Ok(()));
+        app.mode = Mode::Compose;
+        app.handle_command(crate::command::parse("/identity")).await;
+        assert!(identity_popup_text(&mut app).contains("Identity change acknowledged."));
+        app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+        app.handle_command(crate::command::parse("/identity")).await;
+        assert!(!identity_popup_text(&mut app).contains("Identity change acknowledged."));
+    }
+
+    #[tokio::test]
+    async fn reviewed_identity_actions_send_account_user_kind_and_fingerprint() {
+        use crate::api::{IdentityChangeKind, RoomIdentityChange};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for (kind, slash_action, endpoint, response, error_body, expected) in [
+            (
+                IdentityChangeKind::PinViolation,
+                "accept",
+                "accept",
+                "204 No Content",
+                "",
+                "acknowledged",
+            ),
+            (
+                IdentityChangeKind::VerificationViolation,
+                "withdraw-verification",
+                "withdraw_verification",
+                "409 Conflict",
+                r#"{"error":{"code":"conflict","message":"the identity warning changed; refresh room info and review it again"}}"#,
+                "Review the latest warning",
+            ),
+            (
+                IdentityChangeKind::PinViolation,
+                "accept",
+                "accept",
+                "409 Conflict",
+                r#"{"error":{"code":"conflict","message":"the account is not active or its crypto store is not ready"}}"#,
+                "encryption state is still loading",
+            ),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut app = app();
+            app.client =
+                AxonClient::new(format!("http://{}", listener.local_addr().unwrap()), None);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            app.set_bootstrap_sender(tx);
+
+            let mut state = loaded(None, None, None);
+            let change = RoomIdentityChange {
+                user_id: "@ada:example.com".to_owned(),
+                kind,
+                fingerprint: "reviewed-key".to_owned(),
+            };
+            state.info.value = Some(RoomInfoDto {
+                identity_changes: Some(vec![change]),
+                ..Default::default()
+            });
+            app.room_info.state = Some(state);
+            app.handle_command(crate::command::parse("/identity")).await;
+            assert!(identity_popup_text(&mut app).contains("@ada:example.com"));
+            let from_popup = expected != "encryption state is still loading";
+            if from_popup {
+                app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
+            } else {
+                app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+                let command = format!("/identity {slash_action} @ada:example.com");
+                app.handle_command(crate::command::parse(&command)).await;
+            }
+            assert!(app.room_info.identity_action_inflight);
+
+            let server = async {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let body = br#"{"fingerprint":"reviewed-key"}"#;
+                while !request.ends_with(body) {
+                    let mut data = [0; 1024];
+                    let n = socket.read(&mut data).await.unwrap();
+                    assert!(n > 0 && request.len() < 4096);
+                    request.extend_from_slice(&data[..n]);
+                }
+                assert!(request.starts_with(
+                    format!("POST /v1/accounts/{}/users/%40ada%3Aexample.com/identity/{endpoint} HTTP/1.1", key().account_id).as_bytes()
+                ));
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {response}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{error_body}", error_body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            };
+            let (_, outcome) = tokio::time::timeout(Duration::from_secs(3), async {
+                tokio::join!(server, rx.recv())
+            })
+            .await
+            .unwrap();
+            app.handle_bootstrap_outcome(outcome.unwrap()).await;
+            assert!(app.room_info.reviewed_identities.is_empty());
+            assert!(app.room_info.state.as_ref().unwrap().info.refresh.dirty);
+            if from_popup {
+                assert_eq!(app.mode, Mode::Popup(PopupKind::RoomIdentity));
+                assert!(identity_popup_text(&mut app).contains(expected));
+            } else {
+                assert!(app.status.text(false).contains(expected));
+            }
+            assert!(
+                app.room_info.identity_action_result.is_none(),
+                "result was already shown in the composer"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_result_settles_while_selection_temporarily_moves_away() {
         let mut app = opened();
@@ -4488,7 +5234,7 @@ mod tests {
         assert_eq!(app.room_info.generation, generation);
 
         app.rooms.selected = Some(0);
-        app.poll_open_room_info(now);
+        app.poll_room_info(now);
         assert_eq!(app.room_info.generation, generation + 1);
         settle(&mut app, success(Source::Metadata), now);
         assert!(app
@@ -4514,7 +5260,7 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
         let generation = app.room_info.generation;
         for seconds in [1, 60, 10000] {
-            app.poll_open_room_info(now + Duration::from_secs(seconds));
+            app.poll_room_info(now + Duration::from_secs(seconds));
         }
         let read = &app.room_info.state.as_ref().unwrap().metadata.refresh;
         assert_eq!(read.failures, 1);
@@ -4564,7 +5310,7 @@ mod tests {
         let now = Instant::now();
         settle_all(&mut app, now);
         let generation = app.room_info.generation;
-        app.poll_open_room_info(now + Duration::from_secs(10000));
+        app.poll_room_info(now + Duration::from_secs(10000));
         assert_eq!(app.room_info.generation, generation);
         assert!(app.room_info.reads.is_empty());
     }
@@ -4669,9 +5415,9 @@ mod tests {
                     .retry_at,
                 Some(due)
             );
-            app.poll_open_room_info(due - Duration::from_millis(1));
+            app.poll_room_info(due - Duration::from_millis(1));
             assert!(!app.room_info.reads.contains_key(&Source::Members));
-            app.poll_open_room_info(due);
+            app.poll_room_info(due);
             assert!(app.room_info.reads.contains_key(&Source::Members));
             now = due;
             settle(
@@ -4697,7 +5443,7 @@ mod tests {
             app.note_room_details_changed(&key(), &[RoomDetailSource::Metadata], now);
         }
         assert!(app.room_info.reads.is_empty());
-        app.poll_open_room_info(now + Duration::from_secs(30));
+        app.poll_room_info(now + Duration::from_secs(30));
         assert!(app.room_info.reads.contains_key(&Source::Metadata));
         settle(
             &mut app,
@@ -4705,7 +5451,7 @@ mod tests {
             now + Duration::from_secs(30),
         );
         let generation = app.room_info.generation;
-        app.poll_open_room_info(now + Duration::from_secs(10000));
+        app.poll_room_info(now + Duration::from_secs(10000));
         assert_eq!(app.room_info.generation, generation);
         assert!(app
             .room_info
@@ -4727,7 +5473,7 @@ mod tests {
             now,
         );
         let generation = app.room_info.generation;
-        app.poll_open_room_info(now + Duration::from_secs(10000));
+        app.poll_room_info(now + Duration::from_secs(10000));
         assert_eq!(app.room_info.generation, generation);
         assert_eq!(
             app.room_info.state.as_ref().unwrap().homeserver.failure,
@@ -4736,7 +5482,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closing_cancels_all_sources_and_rejects_late_outcomes() {
+    async fn closing_cancels_popup_only_sources_and_rejects_late_outcomes() {
         let mut app = opened();
         let generation = app
             .room_info
@@ -4748,7 +5494,8 @@ mod tests {
             .request
             .unwrap();
         app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
-        assert!(app.room_info.reads.is_empty());
+        assert_eq!(app.room_info.reads.len(), 1);
+        assert!(app.room_info.reads.contains_key(&Source::Info));
         app.apply_room_info_outcome(RoomInfoOutcome {
             key: key(),
             generation,
@@ -4763,7 +5510,7 @@ mod tests {
             .value
             .is_none());
         let previous = app.room_info.generation;
-        app.poll_open_room_info(Instant::now() + Duration::from_secs(10000));
+        app.poll_room_info(Instant::now() + Duration::from_secs(10000));
         assert_eq!(app.room_info.generation, previous);
     }
 
@@ -4785,7 +5532,7 @@ mod tests {
         other.account_id = Uuid::new_v4();
         app.rooms.rooms.push(other.clone());
         app.rooms.selected = Some(1);
-        app.poll_open_room_info(Instant::now());
+        app.poll_room_info(Instant::now());
         app.apply_room_info_outcome(RoomInfoOutcome {
             key: key(),
             generation,
@@ -4800,11 +5547,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn leaving_the_popup_without_esc_cancels_on_tick() {
+    async fn leaving_the_popup_without_esc_cancels_popup_only_reads_on_tick() {
         let mut app = opened();
         app.mode = Mode::MessageList;
-        app.poll_open_room_info(Instant::now());
-        assert!(app.room_info.reads.is_empty());
+        app.poll_room_info(Instant::now());
+        assert_eq!(app.room_info.reads.len(), 1);
+        assert!(app.room_info.reads.contains_key(&Source::Info));
         assert!(app
             .room_info
             .state
@@ -4868,9 +5616,9 @@ mod tests {
         settle_all(&mut app, now);
         app.note_room_info_timeline_event(&key(), "m.room.member", now);
         app.note_room_info_timeline_event(&key(), "m.room.member", now + Duration::from_secs(1));
-        app.poll_open_room_info(now + Duration::from_secs(2));
+        app.poll_room_info(now + Duration::from_secs(2));
         assert!(app.room_info.reads.is_empty());
-        app.poll_open_room_info(now + Duration::from_secs(3));
+        app.poll_room_info(now + Duration::from_secs(3));
         assert_eq!(app.room_info.reads.len(), 1);
         assert!(app.room_info.reads.contains_key(&Source::Members));
     }
@@ -4887,7 +5635,7 @@ mod tests {
                 now + Duration::from_secs(second),
             );
         }
-        app.poll_open_room_info(now + Duration::from_secs(10));
+        app.poll_room_info(now + Duration::from_secs(10));
         assert!(app.room_info.reads.contains_key(&Source::Members));
     }
 
@@ -4909,7 +5657,7 @@ mod tests {
         assert_eq!(app.room_info.reads.len(), 1);
         assert!(app.room_info.reads.contains_key(&Source::Upgrade));
         app.note_room_info_timeline_event(&key(), "m.room.redaction", now);
-        app.poll_open_room_info(now + Duration::from_secs(2));
+        app.poll_room_info(now + Duration::from_secs(2));
         assert!(app.room_info.reads.contains_key(&Source::Members));
         assert!(!app.room_info.reads.contains_key(&Source::Metadata));
     }

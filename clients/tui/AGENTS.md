@@ -64,11 +64,24 @@
   Tombstones and creation events re-read `/upgrade`; redactions re-read `/upgrade` and debounce `/members`.
   Metadata timeline events do not duplicate the persisted metadata notification.
   A refresh leaves each source's last value and error in place until its own new result arrives.
-  Closing the popup cancels every source and its retry intents.
-  Closing preserves each source's failure history; reopening retries immediately but a repeated failure keeps escalating its backoff.
+  Closing the popup cancels the popup-only sources and their retry intents.
+  The selected room keeps its `/info` read and retry intent for identity warnings.
+  Closing preserves each source's failure history, so a repeated failure after reopening keeps escalating its backoff.
   Changing the cached room resets that history.
   If the selected room changes under the open popup, the next tick fetches that room and resets the scroll.
   Paste is accepted only while that prompt is open inside the room-info popup.
+- The selected room's identity warning shares the `/info` read with `/whereami`.
+  Room selection, reconnect, explicit refresh, and `room_details.changed` naming `identity_changes` refresh this projection.
+  The `/identity` popup selects a warning with Up/Down and acknowledges it with the configured submit key.
+  The popup and slash-command forms bind each acknowledgement to the fingerprint from the reviewed warning.
+  A warning whose fingerprint or kind changes loses its popup selection.
+  Tab completes acknowledgement verbs and cycles affected member IDs, matching their Matrix IDs and cached display names.
+  An HTTP 409 refreshes the projection and requires a new review before another attempt.
+  Keep sending available while warnings are present.
+- Account reads and `account.own_identity_changed` update the own-identity alert.
+  Reconnect and explicit refresh re-read accounts.
+  A transient background account refresh failure retries after 30 seconds.
+  Scope the warning in the timeline title to the selected room’s account and show account-specific verification and recovery guidance in `/status`.
 - `/status` uses the cached `GET /v1/accounts` response and lists every client-visible account as `logged in` (`active`) or `logged out` (`deactivated`). Each account block also shows the live megolm-backup snapshot (`exists_on_server`, this-device uploading, `backup_state`, `recovery_state`). `recovery_state` is 4S completeness, not "history keys imported." Keep the account panel and `/account` navigation active-only.
 - Room titles follow ADR 0118: nonblank `name`, then `canonical_alias`, then the server's `display_name`, then room ID.
   Never derive room titles from `/members`; those reads still hydrate timeline sender names.

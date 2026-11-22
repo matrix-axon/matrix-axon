@@ -51,6 +51,9 @@ impl App {
         if self.complete_account_command_input(reverse) {
             return;
         }
+        if self.complete_identity_command_input(reverse) {
+            return;
+        }
         if self.complete_verify_command_input(reverse) {
             return;
         }
@@ -423,6 +426,85 @@ impl App {
             })
             .map(|a| a.user_id.clone())
             .collect()
+    }
+
+    fn complete_identity_command_input(&mut self, reverse: bool) -> bool {
+        let Some(target) = command_target_prefix(&self.input.buffer, "/identity") else {
+            return false;
+        };
+        let Some(boundary) = target.find(char::is_whitespace) else {
+            let mut verbs = command::IDENTITY_ACTIONS
+                .iter()
+                .map(|(verb, _)| *verb)
+                .filter(|verb| verb.starts_with(target));
+            let verb = if reverse {
+                verbs.next_back()
+            } else {
+                verbs.next()
+            };
+            if let Some(verb) = verb {
+                self.input.buffer = format!("/identity {verb} ");
+                self.move_cursor_to_end();
+            }
+            return true;
+        };
+        let verb = &target[..boundary];
+        let Some(&(verb, kind)) = command::IDENTITY_ACTIONS
+            .iter()
+            .find(|(candidate, _)| *candidate == verb)
+        else {
+            return true;
+        };
+        let target = target[boundary..].trim_start();
+        let Some(room) = self.selected_room_key() else {
+            return true;
+        };
+        let previous = self
+            .input
+            .identity_user_completion
+            .as_ref()
+            .filter(|(key, _, _)| key == &room);
+        let query = previous
+            .map_or(target, |(_, query, _)| query)
+            .trim_start_matches('@')
+            .to_lowercase();
+        let names = self.rooms.display_names.get(&room);
+        let mut candidates = self
+            .room_identity_changes()
+            .into_iter()
+            .flatten()
+            .filter(|change| change.kind == kind)
+            .filter(|change| {
+                change.user_id.to_lowercase().contains(&query)
+                    || names
+                        .and_then(|names| names.get(&change.user_id))
+                        .is_some_and(|name| name.to_lowercase().contains(&query))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_unstable_by_key(|change| &change.user_id);
+        candidates.dedup_by(|left, right| left.user_id == right.user_id);
+        if candidates.is_empty() {
+            self.input.identity_user_completion = None;
+            self.status = "No matching room identity warnings.".into();
+            return true;
+        }
+
+        let selected = previous.map_or_else(
+            || if reverse { candidates.len() - 1 } else { 0 },
+            |(_, _, index)| cycle_index(*index, candidates.len(), reverse),
+        );
+        let change = candidates[selected];
+        let completed = format!("/identity {verb} {}", change.user_id);
+        self.status = if self.room_identity_change_is_reviewed(change) {
+            "Press Enter to acknowledge the reviewed identity warning."
+        } else {
+            "Open /identity to review this warning before acknowledging it."
+        }
+        .into();
+        self.input.buffer = completed;
+        self.move_cursor_to_end();
+        self.input.identity_user_completion = Some((room, query, selected));
+        true
     }
 
     pub(crate) fn complete_verify_command_input(&mut self, reverse: bool) -> bool {

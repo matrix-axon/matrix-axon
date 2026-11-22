@@ -1,3 +1,13 @@
+use crate::api::IdentityChangeKind;
+
+pub(crate) const IDENTITY_ACTIONS: [(&str, IdentityChangeKind); 2] = [
+    ("accept", IdentityChangeKind::PinViolation),
+    (
+        "withdraw-verification",
+        IdentityChangeKind::VerificationViolation,
+    ),
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Login {
@@ -27,6 +37,7 @@ pub enum Command {
     Event(String),
     Whoami,
     Whereami,
+    Identity(Option<(IdentityChangeKind, String)>),
     Search(crate::search::SearchCommandInput),
     React(Option<String>),
     Unreact,
@@ -146,6 +157,7 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand::supported("/event", true),
     SlashCommand::supported("/whoami", false),
     SlashCommand::supported("/whereami", false),
+    SlashCommand::supported("/identity", true),
     SlashCommand::supported("/search", true),
     SlashCommand::supported("/react", true),
     SlashCommand::supported("/unreact", false),
@@ -315,6 +327,11 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         description: "show your Matrix ID, profile name, and this session's device",
     },
     HelpCommand {
+        label: "/identity [accept|withdraw-verification @user:server]",
+        insert_text: "/identity",
+        description: "open room identity warnings or acknowledge a reviewed change",
+    },
+    HelpCommand {
         label: "/whereami",
         insert_text: "/whereami",
         description: "show room information",
@@ -407,7 +424,7 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     HelpCommand {
         label: "/refresh, /rooms",
         insert_text: "/refresh",
-        description: "refresh rooms, pending invites, and redraw the display",
+        description: "refresh accounts, rooms, pending invites, and redraw the display",
     },
     HelpCommand {
         label: "/saveconfig",
@@ -509,6 +526,19 @@ pub fn parse(input: &str) -> Command {
         "event" => Command::Invalid("/event requires an event id".to_owned()),
         "whoami" => Command::Whoami,
         "whereami" => Command::Whereami,
+        "identity" => {
+            let tokens: Vec<_> = arg.split_whitespace().take(3).collect();
+            match tokens.as_slice() {
+                [] => Command::Identity(None),
+                [verb, user] => IDENTITY_ACTIONS
+                    .iter()
+                    .find(|(action, _)| action == verb)
+                    .map_or_else(identity_usage, |&(_, kind)| {
+                        Command::Identity(Some((kind, (*user).to_owned())))
+                    }),
+                _ => identity_usage(),
+            }
+        }
         "search" => Command::Search(crate::search::parse_search_command_arg(arg)),
         "react" => Command::React((!arg.is_empty()).then(|| arg.to_owned())),
         "unreact" => Command::Unreact,
@@ -681,6 +711,10 @@ fn join_target_from_id(id: &ruma::RoomOrAliasId, via: &[ruma::OwnedServerName]) 
         server_names,
         source: String::new(),
     }
+}
+
+fn identity_usage() -> Command {
+    Command::Invalid("usage: /identity [accept|withdraw-verification @user:server]".to_owned())
 }
 
 fn parse_backup_command(arg: &str) -> Command {

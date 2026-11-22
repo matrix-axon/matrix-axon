@@ -169,6 +169,7 @@ impl App {
             self.end_member_filter_prompt();
         }
         self.discard_device_picker_if_closed();
+        self.discard_room_identity_popup_if_closed();
         self.should_quit
     }
 
@@ -255,6 +256,19 @@ impl App {
             self.handle_invites_popup_key(key);
         } else if kind == PopupKind::DevicePicker {
             self.handle_device_picker_popup_key(key);
+        } else if kind == PopupKind::RoomIdentity {
+            if self.shortcuts.submit.matches(key) {
+                self.submit_room_identity_selection();
+            } else if key.code == KeyCode::Up {
+                self.move_room_identity_selection(-1);
+            } else if key.code == KeyCode::Down {
+                self.move_room_identity_selection(1);
+            } else if key.code == KeyCode::PageUp || self.shortcuts.message_page_up.matches(key) {
+                self.move_room_identity_selection(-8);
+            } else if key.code == KeyCode::PageDown || self.shortcuts.message_page_down.matches(key)
+            {
+                self.move_room_identity_selection(8);
+            }
         } else if key.code == KeyCode::Up {
             self.popup_scroll = self.popup_scroll.saturating_sub(1);
         } else if key.code == KeyCode::Down {
