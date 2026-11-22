@@ -2,6 +2,7 @@ import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { createApiClient } from '../api/client'
+import { setPerfEnabled, setTelemetrySink } from '../perf'
 import { createMemberDirectory } from './member-directory'
 import { createMembersStore, createMembersStoreCache } from './members'
 import type { MemberDto } from './room-list'
@@ -84,6 +85,55 @@ describe('member names across rooms', () => {
     await refreshing
     // Per-room names: this room's own entry wins once it lands.
     expect(store.displayName('@alice:example.org')).toBe('Alice (here)')
+  })
+
+  it("lends no other room's name once this room's list has landed", async () => {
+    const OTHER = '!other:example.org'
+    server.use(
+      http.get(membersPath(OTHER), () =>
+        HttpResponse.json({ data: [named('@alice:example.org', 'Alice')] }),
+      ),
+      http.get(membersPath(ROOM), () =>
+        HttpResponse.json({ data: [named('@bob:example.org', 'Bob')] }),
+      ),
+    )
+    const directory = createMemberDirectory()
+    const api = makeApi()
+    await createMembersStore(api, ACCOUNT, OTHER, directory).refresh()
+
+    const store = createMembersStore(api, ACCOUNT, ROOM, directory)
+    await store.refresh()
+
+    // Alice is not in this room's list (a bridge ghost, a sender who never
+    // joined): the room's answer is her id, not the name another room gave.
+    expect(store.displayName('@alice:example.org')).toBe('@alice:example.org')
+    expect(store.profile('@alice:example.org')).toBeUndefined()
+    expect(store.displayName('@bob:example.org')).toBe('Bob')
+  })
+
+  it('keeps lending names while the room has no list of its own', async () => {
+    const OTHER = '!other:example.org'
+    server.use(
+      http.get(membersPath(OTHER), () =>
+        HttpResponse.json({ data: [named('@alice:example.org', 'Alice')] }),
+      ),
+      http.get(membersPath(ROOM), () =>
+        HttpResponse.json(
+          { error: { code: 'upstream', message: 'down' } },
+          { status: 502 },
+        ),
+      ),
+    )
+    const directory = createMemberDirectory()
+    const api = makeApi()
+    await createMembersStore(api, ACCOUNT, OTHER, directory).refresh()
+
+    const store = createMembersStore(api, ACCOUNT, ROOM, directory)
+    await store.refresh()
+
+    // A failed read is no answer, so the fallback still stands.
+    expect(store.error.value).not.toBeNull()
+    expect(store.displayName('@alice:example.org')).toBe('Alice')
   })
 
   it('hands a room its warm store back, names and all', async () => {
@@ -236,6 +286,47 @@ describe('createMembersStore', () => {
     expect(directory.lookup(ACCOUNT, '@alice:example.org')?.display_name).toBe(
       'Alice B.',
     )
+  })
+
+  it('ends the read once, for the newest of two overlapping refreshes', async () => {
+    const members = heldMembers(ROOM)
+    const store = createMembersStore(makeApi(), ACCOUNT, ROOM)
+    const marks: { name: string; detail: Record<string, unknown> }[] = []
+    setPerfEnabled(true)
+    setTelemetrySink((name, _at, detail) => {
+      if (name.startsWith('members:refresh:')) {
+        marks.push({ name, detail: detail ?? {} })
+      }
+    })
+    try {
+      let arrived = members.arrived()
+      const older = store.refresh()
+      await arrived
+      arrived = members.arrived()
+      const newer = store.refresh()
+      await arrived
+
+      // The overtaken request answers last, as the previous visit's would.
+      members.release(1, [named('@alice:example.org', 'Alice B.')])
+      await newer
+      members.release(0, [
+        named('@alice:example.org', 'Alice'),
+        named('@bob:example.org', 'Bob'),
+      ])
+      await older
+    } finally {
+      setTelemetrySink(null)
+      setPerfEnabled(false)
+    }
+
+    // Every start is answered, by the newest list: the room-open summary
+    // takes the first end, so an older one would stamp it with stale timing.
+    expect(marks.map((mark) => mark.name)).toEqual([
+      'members:refresh:start',
+      'members:refresh:start',
+      'members:refresh:end',
+    ])
+    expect(marks[2].detail).toMatchObject({ members: 1, ok: true })
   })
 
   it('puts no names back from a list that lands after sign-out', async () => {

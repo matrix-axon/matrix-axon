@@ -20,8 +20,10 @@ export interface MembersStore {
 
   /**
    * Resolved display name for a sender id, falling back per `memberDisplay`.
-   * Until this room's list has the user, the account-wide directory lends the
-   * name another room gave them; the raw id comes back only when neither does.
+   * Until this room's first list lands, the account-wide directory lends the
+   * name another room gave them. After it, the room's list is the answer: a
+   * sender missing from it (a bridge ghost, say) shows the raw id, not a name
+   * some other room gave them.
    */
   displayName(userId: string): string
   /**
@@ -56,11 +58,17 @@ export function createMembersStore(
   const members = signal<ReadonlyMap<string, MemberDto>>(new Map())
   const loading = signal(true)
   const error = signal<string | null>(null)
+  /** True once a list for this room has landed; failed reads leave it false. */
+  const listed = signal(false)
 
   function profile(userId: string): MemberDto | undefined {
     // The room's own entry first, and only then the directory: reading the
     // directory subscribes the render to every list that lands anywhere.
-    return members.value.get(userId) ?? directory?.lookup(accountId, userId)
+    // Matrix names are per room, so the directory only bridges the wait.
+    return (
+      members.value.get(userId) ??
+      (listed.value ? undefined : directory?.lookup(accountId, userId))
+    )
   }
 
   /**
@@ -95,6 +103,7 @@ export function createMembersStore(
       members.value = new Map(
         data.data.map((member) => [member.user_id, member]),
       )
+      listed.value = true
       // Dropped by the directory itself if the reader signed out, or this
       // account was removed, while the list was in flight.
       directory?.record(accountId, data.data, epoch)
@@ -103,6 +112,10 @@ export function createMembersStore(
         error.value = cause instanceof Error ? cause.message : String(cause)
       }
     } finally {
+      // Only the newest refresh ends the read. The room-open summary takes
+      // the first end mark after its start, and an overtaken request is often
+      // the previous visit's: its end would stamp this open with that
+      // request's time. The newest always lands, so no start goes unanswered.
       if (issued === refreshes) {
         loading.value = false
         perfMark('members:refresh:end', {

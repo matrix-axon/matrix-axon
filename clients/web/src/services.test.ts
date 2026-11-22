@@ -956,6 +956,9 @@ describe('connectTimelineCacheReset', () => {
         acquire: () => {
           throw new Error('unused')
         },
+        hold: () => {
+          throw new Error('unused')
+        },
         ingestLive: () => {
           throw new Error('unused')
         },
@@ -1046,6 +1049,9 @@ describe('connectTimelineCacheLive', () => {
       } as unknown as Parameters<typeof connectTimelineCacheLive>[0],
       {
         acquire: () => {
+          throw new Error('unused')
+        },
+        hold: () => {
           throw new Error('unused')
         },
         ingestLive: (event) => {

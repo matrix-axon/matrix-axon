@@ -26,6 +26,7 @@ import type { MemberDto, RoomDto } from '../stores/room-list'
 import type { EventDto } from '../stores/timeline'
 import { RECEIPT_DEBOUNCE_MS } from '../stores/ephemeral-sender'
 import { LEAVE_PENDING_MESSAGE } from '../stores/rooms'
+import { TIMELINE_STORE_LIMIT } from '../stores/timeline-cache'
 import { memoryStorage } from '../test/memory-storage'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { RoomPage } from './RoomPage'
@@ -2353,6 +2354,30 @@ describe('RoomPage', () => {
     fireEvent.click(chip)
 
     await waitFor(() => expect(reactionPosts).toBe(1))
+  })
+
+  it('keeps taking live messages while 30 other rooms pass through the cache', async () => {
+    const { services, findByText } = renderRoom([event('$latest', T0)])
+    await findByText('body of $latest')
+
+    // An incoming share sending to many rooms while this one stays open: each
+    // acquire would otherwise push the open room's store out of the LRU, and
+    // live frames reach the page only through the cache.
+    for (let i = 0; i < TIMELINE_STORE_LIMIT; i += 1) {
+      services.timelines.acquire(ACCOUNT, `!share${i}:hs`)
+    }
+
+    services.live.start()
+    services.sockets[0].emitOpen()
+    services.sockets[0].emitMessage(
+      JSON.stringify({
+        type: 'timeline.event',
+        account_id: ACCOUNT,
+        payload: event('$live', T0 + 1),
+      }),
+    )
+
+    expect(await findByText('body of $live')).toBeTruthy()
   })
 
   it('keeps a live reaction on the newest message visible when pinned to bottom', async () => {

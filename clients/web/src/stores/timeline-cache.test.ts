@@ -200,6 +200,68 @@ describe('createTimelineStoreCache', () => {
     expect(revoked).toEqual([])
   })
 
+  describe('hold', () => {
+    it('never evicts a store a page is showing, even over the cap', () => {
+      const cache = makeCache(1)
+      const shown = cache.acquire(ACCOUNT, ROOM)
+      const release = cache.hold(ACCOUNT, ROOM)
+
+      // An incoming share acquires rooms while the page stays mounted.
+      cache.acquire(ACCOUNT, '!b:hs')
+      cache.acquire(ACCOUNT, '!c:hs')
+
+      expect(cache.size).toBe(2)
+      expect(sameStore(cache.acquire(ACCOUNT, ROOM), shown)).toBe(true)
+
+      // Released, it is an ordinary warm store again.
+      release()
+      cache.acquire(ACCOUNT, '!d:hs')
+      expect(cache.size).toBe(1)
+      expect(sameStore(cache.acquire(ACCOUNT, ROOM), shown)).toBe(false)
+    })
+
+    it('keeps the store while any holder remains, and a release counts once', () => {
+      const cache = makeCache(1)
+      const shown = cache.acquire(ACCOUNT, ROOM)
+      const first = cache.hold(ACCOUNT, ROOM)
+      const second = cache.hold(ACCOUNT, ROOM)
+
+      first()
+      first()
+      cache.acquire(ACCOUNT, '!b:hs')
+
+      expect(sameStore(cache.acquire(ACCOUNT, ROOM), shown)).toBe(true)
+      second()
+    })
+
+    it('hands a shown store back as it is, even parked in history', async () => {
+      server.use(
+        http.get(timelinePath(ROOM), ({ request }) => {
+          const atTs = new URL(request.url).searchParams.get('at_ts')
+          return HttpResponse.json({
+            data:
+              atTs === null
+                ? { events: [event('$new', 900)], next_cursor: 'c1' }
+                : { events: [event('$old', 100)], next_cursor: null },
+          })
+        }),
+      )
+      const cache = makeCache()
+      const shown = cache.acquire(ACCOUNT, ROOM)
+      const release = cache.hold(ACCOUNT, ROOM)
+      await shown.loadLatest()
+      await shown.jumpTo(100)
+
+      // A share into the room the reader has open, jumped back in history:
+      // rebuilding would dispose the store under the page.
+      const again = cache.acquire(ACCOUNT, ROOM)
+
+      expect(sameStore(again, shown)).toBe(true)
+      expect(again.events.value.map((e) => e.event_id)).toEqual(['$old'])
+      release()
+    })
+  })
+
   it('refuses to reuse a slice parked in history, which cannot be gap-filled', async () => {
     server.use(
       http.get(timelinePath(ROOM), ({ request }) => {
@@ -447,6 +509,32 @@ describe('createTimelineStoreCache', () => {
 
       expect(store.takeLiveAppended()).toBe(2)
       expect(store.takeLiveAppended()).toBe(0)
+    })
+
+    it('counts nothing for frames that land while a page shows the room', async () => {
+      server.use(
+        http.get(timelinePath(ROOM), () =>
+          HttpResponse.json({
+            data: { events: [event('$1', 100)], next_cursor: 'c1' },
+          }),
+        ),
+      )
+      const cache = makeCache()
+      const store = cache.acquire(ACCOUNT, ROOM)
+      await store.loadLatest()
+      const release = cache.hold(ACCOUNT, ROOM)
+
+      cache.ingestLive(event('$2', 200))
+      // Left: only what arrives from here on was "while away".
+      release()
+      cache.ingestLive(event('$3', 300))
+
+      expect(store.events.value.map((e) => e.event_id)).toEqual([
+        '$1',
+        '$2',
+        '$3',
+      ])
+      expect(store.takeLiveAppended()).toBe(1)
     })
 
     describe('gap-fill report on timeline:head:settled', () => {

@@ -323,8 +323,9 @@ export interface TimelineStore {
 
   /**
    * Rows `ingestLive` appended since the last call, then reset to zero. The
-   * room-open readout reads it on entry (and drains it on leave), so a warm
-   * open reports how many messages the live feed delivered while the room was
+   * room-open readout drains it on entry, and the warm-store cache drains it
+   * after each frame it routes to a room a page is showing, so a warm open
+   * reports how many messages the live feed delivered while the room was
    * closed. Diagnostic only.
    */
   takeLiveAppended(): number

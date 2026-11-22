@@ -255,6 +255,14 @@ export function RoomPage() {
     () => timelines.acquire(accountId, roomId),
     [timelines, accountId, roomId],
   )
+  // Pinned while shown. Live frames reach this store only through the cache,
+  // so an eviction while mounted (an incoming share acquiring 30 other rooms)
+  // would freeze the open room. A layout effect, so the hold is in place
+  // before the load effect below reads `takeLiveAppended`.
+  useLayoutEffect(
+    () => timelines.hold(accountId, roomId),
+    [timelines, accountId, roomId],
+  )
   const reactionLookups = useRef(new Map<TimelineStore, AbortController>())
   const signedIn = auth.signedIn.value
   useLayoutEffect(
@@ -678,8 +686,9 @@ export function RoomPage() {
   }, [openJump, setJumpAction])
 
   useEffect(() => {
-    // Drained whether or not marks are on, so the count always starts at
-    // this room's last leave rather than accumulating across visits.
+    // Drained whether or not marks are on, so the count never accumulates
+    // across visits. The cache counts only frames that found the room
+    // unheld, so nothing from a visit leaks into the next one's figure.
     const liveAway = timeline.takeLiveAppended()
     perfMark('room-page:initial-load-effect', {
       accountId,
@@ -720,11 +729,7 @@ export function RoomPage() {
     ) {
       void timeline.loadLatest().finally(releasePreviews)
     }
-    return () => {
-      releasePreviews()
-      // Leaving: what arrived while mounted is not "while away" next time.
-      timeline.takeLiveAppended()
-    }
+    return releasePreviews
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per room instance
   }, [timeline])
 
