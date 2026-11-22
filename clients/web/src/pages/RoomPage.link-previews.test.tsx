@@ -22,6 +22,7 @@ import { ServicesContext } from '../services'
 import type { DeviceLinkPreview } from '../platform'
 import type { LinkPreviewSetting } from '../stores/settings'
 import type { EventDto } from '../stores/timeline'
+import { emptyRoomInfoHandler } from '../test/room-details'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { RoomPage } from './RoomPage'
 
@@ -58,6 +59,7 @@ function event(id: string, ts: number, overrides: object = {}): EventDto {
 }
 
 const server = setupServer(
+  emptyRoomInfoHandler(TEST_BASE_URL),
   http.get(
     `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/emoji-packs`,
     () =>

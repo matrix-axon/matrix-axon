@@ -23,6 +23,7 @@ import { roomKey } from '../stores/room-list'
 import { LEAVE_PENDING_MESSAGE } from '../stores/rooms'
 import { SINGLE_PANE_QUERY } from '../layout'
 import type { EventDto } from '../stores/timeline'
+import { emptyRoomInfoHandler } from '../test/room-details'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { RoomPage } from './RoomPage'
 
@@ -99,6 +100,7 @@ function event(id: string, ts: number, overrides: object = {}): EventDto {
 }
 
 const server = setupServer(
+  emptyRoomInfoHandler(TEST_BASE_URL),
   http.get(
     `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/emoji-packs`,
     () =>
@@ -800,9 +802,9 @@ describe('editing and redacting', () => {
     expect(deleted).toBeNull()
     fireEvent.click(await findByRole('button', { name: 'Confirm delete' }))
 
-    await waitFor(() => expect(deleted).toBe('$mine'))
-    expect(clearSearch).toHaveBeenCalledOnce()
     expect(await findByText('message deleted')).toBeTruthy()
+    expect(deleted).toBe('$mine')
+    expect(clearSearch).toHaveBeenCalledOnce()
   })
 })
 

@@ -135,6 +135,30 @@ it('reads metadata, member counts and homeserver details for a joined room', asy
   expect(h.calls).toHaveLength(3)
 })
 
+it('keeps only identity information live when Room Information is closed', async () => {
+  const h = harness()
+  h.store.watchInfo({ accountId: ACCOUNT, roomId: ROOM, joined: true })
+  await vi.waitFor(() => expect(h.store.state.value.info.value).not.toBeNull())
+  expect(h.calls.map((call) => call.read)).toEqual(['info'])
+
+  h.frame(['identity_changes'], ROOM, OTHER)
+  h.frame(['identity_changes'], NEXT)
+  h.frame(['member_counts', 'metadata'])
+  h.frame(['member_counts', 'identity_changes'])
+  await vi.waitFor(() => expect(h.count('info')).toBe(2))
+
+  show(h)
+  await vi.waitFor(() => expect(h.calls).toHaveLength(5))
+  h.frame(['member_counts', 'identity_changes'])
+  await vi.waitFor(() => expect(h.count('info')).toBe(4))
+  h.store.show(null)
+  await vi.waitFor(() => expect(h.count('info')).toBe(5))
+  h.reconnects.value += 1
+  await vi.waitFor(() => expect(h.count('info')).toBe(6))
+  expect(h.count('metadata')).toBe(1)
+  expect(h.count('homeserver_details')).toBe(1)
+})
+
 it('never reads homeserver details for a room the account has not joined', async () => {
   const h = harness()
   show(h, ROOM, false)

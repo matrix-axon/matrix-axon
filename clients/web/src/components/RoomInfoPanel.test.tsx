@@ -1800,6 +1800,8 @@ it('never renders details the store holds for a different room', () => {
     state: signal(firstRoomDetails),
     preview: signal(emptyRoomPreview()),
     show: () => {},
+    watchInfo: () => {},
+    refreshInfo: () => {},
     loadMore: () => {},
     retry: () => {},
     showPreview: () => {},

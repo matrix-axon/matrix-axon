@@ -1,0 +1,97 @@
+import { expect, test, type Locator, type Page } from '@playwright/test'
+import { ACCOUNT_ID, ROOM_URL, expectRoomReady, signIn } from './helpers'
+
+async function expectWithinViewport(page: Page, target: Locator) {
+  await expect(target).toBeVisible()
+  const viewport = page.viewportSize()!
+  const box = (await target.boundingBox())!
+  expect(box.x).toBeGreaterThanOrEqual(0)
+  expect(box.y).toBeGreaterThanOrEqual(0)
+  expect(box.x + box.width).toBeLessThanOrEqual(viewport.width)
+  expect(box.y + box.height).toBeLessThanOrEqual(viewport.height)
+}
+
+test('identity warnings leave room sending available and the review dialog fits', async ({
+  page,
+}) => {
+  const warnings = [
+    {
+      user_id: `@${'long-matrix-id'.repeat(7)}:hs`,
+      kind: 'pin_violation',
+      fingerprint: 'a'.repeat(64),
+    },
+    ...Array.from({ length: 8 }, (_, index) => ({
+      user_id: `@member-${index}:hs`,
+      kind: 'verification_violation',
+      fingerprint: 'b'.repeat(64),
+    })),
+  ]
+  await page.route('**/v1/accounts/*/rooms/*/info', (route) =>
+    route.fulfill({ json: { data: { identity_changes: warnings } } }),
+  )
+  // Keep the mock server's shared timeline unchanged for later specs.
+  await page.route('**/v1/accounts/*/rooms/*/send', (route) =>
+    route.fulfill({ json: { data: { event_id: '$warning-test' } } }),
+  )
+
+  await signIn(page)
+  await page.goto(ROOM_URL)
+  await expectRoomReady(page)
+  const review = page.getByRole('button', { name: 'Review identity changes' })
+  await expect(review).toHaveCount(2)
+  const composer = page.getByRole('textbox', { name: /^Message/ })
+  await expectWithinViewport(page, composer)
+  await composer.fill('Sending with a pending identity warning')
+  const sent = page.waitForRequest(
+    (request) => request.method() === 'POST' && request.url().endsWith('/send'),
+  )
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  expect((await sent).postDataJSON().body).toBe(
+    'Sending with a pending identity warning',
+  )
+
+  await review.last().click()
+  const dialog = page.getByRole('dialog', { name: 'Review identity changes' })
+  await expectWithinViewport(page, dialog.locator('.overlay-panel'))
+  await expect(dialog.getByText(warnings[0].user_id)).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Close' })).toBeFocused()
+  const lastAction = dialog
+    .getByRole('button', { name: 'Withdraw verification' })
+    .last()
+  await lastAction.scrollIntoViewIfNeeded()
+  await expectWithinViewport(page, lastAction)
+  await page.keyboard.press('Escape')
+  await expect(dialog).toHaveCount(0)
+  await expect(review.last()).toBeFocused()
+})
+
+test('own-identity warning links directly to this account’s recovery form', async ({
+  page,
+}) => {
+  await page.route('**/v1/accounts', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json()
+    for (const account of body.data) {
+      if (account.account_id === ACCOUNT_ID) {
+        account.own_identity_changed = true
+        account.verified = false
+      }
+    }
+    await route.fulfill({ response, json: body })
+  })
+
+  await signIn(page)
+  await page.goto(ROOM_URL)
+  await expectRoomReady(page)
+  const warning = page.locator('.trust-warning').filter({
+    hasText: 'Your Matrix identity changed.',
+  })
+  await expect(
+    warning.getByRole('button', { name: 'Verify this device' }),
+  ).toBeVisible()
+  await warning.getByRole('link', { name: 'Recover keys' }).click()
+  await expect(page).toHaveURL(new RegExp(`/accounts\\?recover=${ACCOUNT_ID}$`))
+  const recoveryKey = page.getByLabel('Recovery key', { exact: true })
+  await expect(recoveryKey).toHaveCount(1)
+  await expect(recoveryKey).toBeFocused()
+})

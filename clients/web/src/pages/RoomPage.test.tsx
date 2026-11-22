@@ -28,7 +28,8 @@ import { RECEIPT_DEBOUNCE_MS } from '../stores/ephemeral-sender'
 import { LEAVE_PENDING_MESSAGE } from '../stores/rooms'
 import { TIMELINE_STORE_LIMIT } from '../stores/timeline-cache'
 import { memoryStorage } from '../test/memory-storage'
-import { TEST_BASE_URL, testServices } from '../test/services'
+import { emptyRoomInfoHandler } from '../test/room-details'
+import { TEST_BASE_URL, UNKNOWN_BACKUP, testServices } from '../test/services'
 import { RoomPage } from './RoomPage'
 
 const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
@@ -80,6 +81,7 @@ const DAY = 86_400_000
 const T0 = Date.UTC(2026, 5, 1, 12, 0, 0)
 
 const server = setupServer(
+  emptyRoomInfoHandler(TEST_BASE_URL),
   // Threads are refreshed on every room mount; empty by default.
   http.get(
     `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads`,
@@ -1125,6 +1127,189 @@ describe('RoomPage', () => {
       name: 'Recover keys',
     }) as HTMLAnchorElement
     expect(recover.getAttribute('href')).toBe('/accounts')
+  })
+
+  it('uses live account verification for withheld keys and own-identity alerts', async () => {
+    const services = testServices()
+    let ownChanged = false
+    let verified = false
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/accounts`, () =>
+        HttpResponse.json({
+          data: [
+            {
+              account_id: ACCOUNT,
+              state: 'active',
+              user_id: '@me:hs',
+              device_id: 'AXON',
+              backup: UNKNOWN_BACKUP,
+              verified,
+              own_identity_changed: ownChanged,
+            },
+          ],
+        }),
+      ),
+    )
+    await services.accounts.refresh()
+    const { findByText, getByRole, queryByText } = renderRoom(
+      [
+        event('$utd', T0, {
+          type: 'm.room.encrypted',
+          content: null,
+          body: null,
+          utd_reason: { kind: 'withheld', withheld_code: 'm.unverified' },
+        }),
+      ],
+      { services },
+    )
+    expect(await findByText(/sender’s app does not share keys/)).toBeTruthy()
+    fireEvent.click(getByRole('button', { name: 'Verify this device' }))
+    expect(services.verification.picker.value).toEqual({
+      accountId: ACCOUNT,
+      ownDeviceId: 'AXON',
+    })
+
+    services.live.start()
+    const socket = services.sockets[0]
+    onTestFinished(() => services.live.stop())
+    socket.emitOpen()
+    ownChanged = true
+    socket.emitMessage(
+      JSON.stringify({
+        type: 'account.own_identity_changed',
+        account_id: ACCOUNT,
+        payload: { own_identity_changed: true, identity_replaced: true },
+      }),
+    )
+    expect(await findByText(/Your Matrix identity changed/)).toBeTruthy()
+
+    // The clearance frame was lost. Reconnect must repair both the alert and
+    // the UTD prompt, while the recorded withholding reason stays visible.
+    ownChanged = false
+    verified = true
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      socket.emitClose()
+      vi.runOnlyPendingTimers()
+      services.sockets.at(-1)!.emitOpen()
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(
+      await findByText(/sender withheld the key from an unverified device/),
+    ).toBeTruthy()
+    expect(queryByText(/Your Matrix identity changed/)).toBeNull()
+  })
+
+  it('reviews changed identities and submits only the reviewed fingerprints', async () => {
+    const services = testServices()
+    const revision = 'b'.repeat(64)
+    const first = {
+      user_id: '@alice:hs',
+      kind: 'pin_violation',
+      fingerprint: 'a'.repeat(64),
+    }
+    const second = {
+      user_id: '@bob:hs',
+      kind: 'verification_violation',
+      fingerprint: 'c'.repeat(64),
+    }
+    let changes = [first, second]
+    const requests: unknown[] = []
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/info`,
+        () => HttpResponse.json({ data: { identity_changes: changes } }),
+      ),
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/:accountId/users/:userId/identity/:action`,
+        async ({ params, request }) => {
+          requests.push([
+            params.accountId,
+            params.userId,
+            params.action,
+            await request.json(),
+          ])
+          if (requests.length === 1) {
+            changes = [{ ...first, fingerprint: revision }, second]
+            return HttpResponse.json(
+              {
+                error: {
+                  code: 'conflict',
+                  message: 'The identity warning changed. Review it again.',
+                },
+              },
+              { status: 409 },
+            )
+          }
+          changes = changes.filter((change) => change.user_id !== params.userId)
+          return new HttpResponse(null, { status: 204 })
+        },
+      ),
+    )
+    const { findAllByRole, findByRole, getByLabelText, queryByRole } =
+      renderRoom([event('$1', T0)], { services })
+    const review = await findAllByRole('button', {
+      name: 'Review identity changes',
+    })
+    expect(review).toHaveLength(2)
+    const composer = getByLabelText('Message Ops') as HTMLTextAreaElement
+    expect(composer.disabled).toBe(false)
+    fireEvent.input(composer, { target: { value: 'Keep my draft' } })
+    fireEvent.click(review[1])
+    const dialog = within(
+      await findByRole('dialog', { name: 'Review identity changes' }),
+    )
+    fireEvent.click(dialog.getByRole('button', { name: 'Accept new identity' }))
+    expect(await dialog.findByText(/identity warning changed/)).toBeTruthy()
+    await waitFor(() =>
+      expect(
+        services.roomDetails.state.value.info.value?.identity_changes?.[0]
+          ?.fingerprint,
+      ).toBe(revision),
+    )
+    expect(requests).toEqual([
+      [ACCOUNT, first.user_id, 'accept', { fingerprint: first.fingerprint }],
+    ])
+
+    fireEvent.click(dialog.getByRole('button', { name: 'Accept new identity' }))
+    expect(await dialog.findByText('New identity accepted.')).toBeTruthy()
+    expect(dialog.queryByText(first.user_id)).toBeNull()
+    fireEvent.click(
+      dialog.getByRole('button', { name: 'Withdraw verification' }),
+    )
+    await waitFor(() =>
+      expect(
+        queryByRole('button', { name: 'Review identity changes' }),
+      ).toBeNull(),
+    )
+    expect(requests.slice(1)).toEqual([
+      [ACCOUNT, first.user_id, 'accept', { fingerprint: revision }],
+      [
+        ACCOUNT,
+        second.user_id,
+        'withdraw_verification',
+        { fingerprint: second.fingerprint },
+      ],
+    ])
+    fireEvent.click(dialog.getByRole('button', { name: 'Close' }))
+    expect(composer.value).toBe('Keep my draft')
+
+    services.live.start()
+    const socket = services.sockets[0]
+    onTestFinished(() => services.live.stop())
+    socket.emitOpen()
+    changes = [first]
+    socket.emitMessage(
+      JSON.stringify({
+        type: 'room_details.changed',
+        account_id: ACCOUNT,
+        payload: { room_id: ROOM, sources: ['identity_changes'] },
+      }),
+    )
+    expect(
+      await findAllByRole('button', { name: 'Review identity changes' }),
+    ).toHaveLength(2)
   })
 
   it('loads the destination timeline after clicking a room hyperlink', async () => {
@@ -3104,12 +3289,26 @@ describe('RoomPage', () => {
      * makes the cap the thing under test.
      */
     function installIntersectionObserver() {
-      const callbacks: IntersectionObserverCallback[] = []
+      let resolveTopObserver: (callback: IntersectionObserverCallback) => void
+      const ready = new Promise<IntersectionObserverCallback>((resolve) => {
+        resolveTopObserver = resolve
+      })
       class FakeIntersectionObserver {
+        private readonly callback: IntersectionObserverCallback
+
         constructor(callback: IntersectionObserverCallback) {
-          callbacks.push(callback)
+          this.callback = callback
         }
-        observe() {}
+
+        observe(target: Element) {
+          const parent = target.parentElement
+          if (
+            parent?.matches('.timeline') &&
+            parent.firstElementChild === target
+          ) {
+            resolveTopObserver(this.callback)
+          }
+        }
         disconnect() {}
         unobserve() {}
         takeRecords() {
@@ -3117,12 +3316,15 @@ describe('RoomPage', () => {
         }
       }
       vi.stubGlobal('IntersectionObserver', FakeIntersectionObserver)
-      return () => {
-        // The top sentinel is the first observer RoomPage creates.
-        callbacks[0]?.(
-          [{ isIntersecting: true } as IntersectionObserverEntry],
-          null as unknown as IntersectionObserver,
-        )
+      return {
+        ready,
+        async fire() {
+          const callback = await ready
+          callback(
+            [{ isIntersecting: true } as IntersectionObserverEntry],
+            null as unknown as IntersectionObserver,
+          )
+        },
       }
     }
 
@@ -3156,11 +3358,11 @@ describe('RoomPage', () => {
         '',
         `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
       )
-      const fire = installIntersectionObserver()
+      const { fire } = installIntersectionObserver()
       render(routedRoomPage(testServices()))
       await waitFor(() => expect(calls).toBe(1))
 
-      fire()
+      await fire()
 
       // One arrival at the top pulls up to the cap, then leaves the rest to
       // the button rather than walking history unattended.
@@ -3195,13 +3397,13 @@ describe('RoomPage', () => {
         '',
         `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
       )
-      const fire = installIntersectionObserver()
+      const { fire } = installIntersectionObserver()
       render(routedRoomPage(testServices()))
       await waitFor(() => expect(calls).toBe(1))
 
       // Four arrivals at the top: 20 pages, well past the 12-page cap.
       for (const expected of [6, 11, 16, 21]) {
-        fire()
+        await fire()
         await waitFor(() => expect(calls).toBe(expected))
       }
     })
@@ -3233,11 +3435,11 @@ describe('RoomPage', () => {
         '',
         `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
       )
-      const fire = installIntersectionObserver()
+      const { fire } = installIntersectionObserver()
       const { findByText } = render(routedRoomPage(testServices()))
       await waitFor(() => expect(calls).toBe(1))
 
-      fire()
+      await fire()
 
       await waitFor(() => expect(calls).toBe(6))
       // The pages past the empty one are loaded, not stranded behind it.
@@ -3268,10 +3470,11 @@ describe('RoomPage', () => {
         '',
         `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
       )
-      installIntersectionObserver()
+      const { ready } = installIntersectionObserver()
       const { container } = render(routedRoomPage(testServices()))
       await waitFor(() => expect(calls).toBe(1))
 
+      await ready
       const scroller = container.querySelector('.timeline')!
       fireEvent.scroll(scroller)
 
@@ -3305,11 +3508,11 @@ describe('RoomPage', () => {
         '',
         `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
       )
-      const fire = installIntersectionObserver()
+      const { fire } = installIntersectionObserver()
       const { findByText } = render(routedRoomPage(testServices()))
       await waitFor(() => expect(calls).toBe(1))
 
-      fire()
+      await fire()
 
       expect(await findByText('Beginning of room history.')).toBeTruthy()
       await new Promise((resolve) => setTimeout(resolve, 20))

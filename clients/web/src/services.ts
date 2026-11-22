@@ -9,6 +9,7 @@ import { useContext } from 'preact/hooks'
 import { exec } from 'preact-iso/router'
 import { createApiClient, inBackground, type ApiClient } from './api/client'
 import {
+  ACCOUNT_OWN_IDENTITY_CHANGED,
   deviceStateChange,
   ephemeralPassthrough,
   inviteAdded,
@@ -1592,7 +1593,8 @@ export function connectMessageGestureSession(
 }
 
 /**
- * Keep SAS verification live (ADR 0027/0061). GET is the source of truth on
+ * Keep SAS verification and own-identity warnings live (ADRs 0027, 0061 and
+ * 0136). GET is the source of truth on
  * reconnect and visibility; the first-load GET is `ensureLoaded` from the
  * always-mounted RoomList (same shape as invites), so constructing the
  * service graph does not fire `GET …/verify` in every test harness.
@@ -1603,9 +1605,6 @@ export function connectLiveVerification(
   verification: VerificationStore,
   accounts: AccountsStore,
 ): () => void {
-  /** One shared accounts refresh when reconnect beats the store's first load. */
-  let accountsLoad: Promise<void> | null = null
-
   const activeIds = (): string[] =>
     accounts.accounts.value
       .filter((account) => account.state === 'active')
@@ -1618,6 +1617,11 @@ export function connectLiveVerification(
   }
 
   const unsubscribe = live.subscribe((frame) => {
+    if (frame.type === ACCOUNT_OWN_IDENTITY_CHANGED) {
+      // The list is authoritative for both the warning and device verification.
+      inBackground(accounts.refresh())
+      return
+    }
     const decoded = verificationFrame(frame)
     if (decoded === null) {
       return
@@ -1641,15 +1645,15 @@ export function connectLiveVerification(
     // a `verification.done` frame refreshes accounts, one completed
     // verification would then loop back into a full verify refresh.
     untracked(() => {
+      // A missed identity warning or clearance is repaired even when account
+      // rows have already loaded. Existing SAS flows can refresh in parallel.
+      const refreshed = accounts.refresh()
       const ids = activeIds()
       if (ids.length === 0) {
-        accountsLoad ??= accounts.refresh().catch(() => {})
-        void accountsLoad.then(() => {
-          hydrate(activeIds())
-        })
-        return
+        inBackground(refreshed.then(() => hydrate(activeIds())))
+      } else {
+        hydrate(ids)
       }
-      hydrate(ids)
     })
   })
 

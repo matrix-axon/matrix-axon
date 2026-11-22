@@ -20,6 +20,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { ServicesContext } from '../services'
 import { RECEIPT_DEBOUNCE_MS } from '../stores/ephemeral-sender'
 import type { EventDto } from '../stores/timeline'
+import { emptyRoomInfoHandler } from '../test/room-details'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { RoomPage } from './RoomPage'
 
@@ -71,7 +72,7 @@ const REDACTION: EventDto = {
   redacts: DELETED.event_id,
 } as unknown as EventDto
 
-const server = setupServer()
+const server = setupServer(emptyRoomInfoHandler(TEST_BASE_URL))
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
   cleanup()
