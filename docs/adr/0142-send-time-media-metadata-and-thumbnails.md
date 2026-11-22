@@ -92,7 +92,7 @@ An older server rejects `kind=video` or `kind=audio` while parsing the staging q
 The web shells and the TUI can connect to any server, so they meet this in both upgrade orders.
 
 - `CapabilitiesDto` gains `media_upload_kinds`, the kinds staging accepts (`["image", "file", "video", "audio"]`), and `send_media_thumbnails: true`.
-- **`send_media_thumbnails` means "accepts and applies section 4's `info` and `thumbnail_upload_id`".**
+- **`send_media_thumbnails` means "accepts and applies section 4's `info`, `thumbnail_upload_id` and `txn_id`".**
   It does not depend on `media.send_thumbnails` (section 5), and stays true when that switch is off.
   The switch turns off only the server's own generation: a thumbnail a client supplies is still normalised and attached, so a poster a client stages is never discarded.
 - A client stages `video/*` and `audio/*` files with the new kinds only when `media_upload_kinds` lists them.
@@ -101,7 +101,9 @@ The web shells and the TUI can connect to any server, so they meet this in both 
 - **An older server ignores the new `send-media` fields rather than rejecting them.**
   `SendMediaRequest` has no `#[serde(deny_unknown_fields)]`, in the released v0.1.28, v0.1.29 and v0.1.30 or on `main`, so it skips fields it does not know.
   That is why `thumbnail_upload_id` needs the flag: without it a poster would be uploaded, never attached, and left staged until it expires.
-  `txn_id` (section 4) needs no flag; an older server ignores it, and the send is not deduplicated.
+  `txn_id` (section 4) needs no flag to be sent: an older server ignores it, and a retry there can post twice, as it does today.
+  So the deduplication holds only against a server whose capabilities include `send_media_thumbnails`, which ships with `txn_id` in the same delivery step (3).
+  The flag stands for all three fields.
 - A server without the route (a `404`), or without the field, supports neither.
 - Both orders are tested: a new client against an old server sends `file` and no thumbnail, and an old client against a new server is unchanged.
 
@@ -167,9 +169,13 @@ The TUI makes none of its own: it has no video decoder, and the server covers it
     So every published thumbnail meets section 2 whoever made it, carries no EXIF, and has a `thumbnail_info` that describes the bytes actually sent.
     This runs where the validation already does: in `spawn_blocking`, under the staging semaphore that `claim_preview_upload` holds.
     For a link preview, the wait for that semaphore is bounded by `media.upload_request_timeout_secs` (60 s).
-    In `send-media` it is bounded by 5 s instead.
-    A thumbnail that gets no permit in time is not claimed or attached, so the send goes without it, and the upload is deleted when the send succeeds.
-    A busy decoder is not a client error, so this is never a `400`.
+  - **In `send-media`, the claim comes first and the thumbnail work has a 5 s budget.**
+    The task claims the thumbnail (staged to `sending`, reading at most 2 MiB) before it waits for a permit, so it owns the row on every path below.
+    The permit wait, the decode, the normalisation and the encode then share one 5 s budget.
+    When the budget expires, the thumbnail is not attached and the send goes without it.
+    A decode that is still running keeps its permit until it finishes, as section 5's does.
+    The claimed thumbnail then settles with the send, like any other (see "shares the send's fate" below): consumed if the event is sent, released if the send fails.
+    A busy or slow decoder is not a client error, so this is never a `400`; only a thumbnail whose validation finished and failed is.
 - **Distinct ids.** `upload_id`, `thumbnail_upload_id` and every link preview's `image_upload_id` must all differ.
   This extends the check `bundled_previews::send` already makes, and runs before any claim, so a collision is a `400` that consumes nothing.
 - **Validation before anything is sent.** A malformed `info`, an invalid thumbnail or a wrong kind is a `400`, and every upload the send had claimed is released.
@@ -191,7 +197,12 @@ The TUI makes none of its own: it has no video decoder, and the server covers it
     All of an account's Axon clients share one Matrix device, so the prefix and the client's UUID keep their ids apart from each other's and from the SDK's own.
   - **The server joins a retry to the first send.**
     It keeps each account's recent ids in memory, checked before any claim: an id in flight, and an id that succeeded within the last 10 minutes, at most 256 per account.
+    An entry is keyed on the account, the room and the `txn_id`, no wider than the homeserver's scope.
+    The spec scopes a transaction id to one device and one endpoint, and Synapse keys its transaction cache on the full request path, which names the room (`PUT /rooms/{roomId}/send/{eventType}/{txnId}`).
+    So an id reused in another room, by a client bug or a script, is a separate send in both places.
+    It never returns the first room's event as if it had been sent to the second.
     A retry whose id is in flight waits for the first task.
+    That wait has no bound of its own: the first task's steps are each bounded (section 8), so the join waits no longer than the first send has left.
     A retry whose id succeeded gets the first event's id back, without uploading anything, and the retry's own staged uploads are deleted, because they were staged for the send that already happened.
     A failed send is not remembered, so its retry runs as a new send.
   - **After a restart** the map is empty, so a retry uploads the file again, but the homeserver still returns the first event's id for as long as it keeps transaction ids.
@@ -199,7 +210,9 @@ The TUI makes none of its own: it has no video decoder, and the server covers it
     Until it retries, the event from the live stream and the failed echo both show, as they do today.
   - The asynchronous send (section 8) uses the same id as its status key.
     Text and sticker sends have the same lost-response duplicate today; [issue 1223](https://github.com/matrix-axon/matrix-axon/issues/1223) gives them the same field.
-- **The thumbnail upload shares the send's fate.** It is consumed when the event is sent, including a send where the thumbnail's own upload failed (section 6), and released when the send fails.
+- **The thumbnail upload shares the send's fate.** It is consumed when the event is sent and released when the send fails.
+  That holds whether or not the thumbnail made it into the event: it was attached, its upload failed (section 6), or its 5 s budget ran out.
+  A thumbnail that fails validation fails the send with a `400`, so it is released too.
 - **Precedence.**
   - When the server can read an image's header, the dimensions it reads win; a client's `width` and `height` are used only for formats the server cannot read.
   - A supplied thumbnail is used, normalised as above, and the server generates none.
@@ -243,9 +256,11 @@ When an `image` send arrives without a thumbnail, the server derives what it can
     The bounds are swapped for a 90° orientation.
     Everything else runs on the scaled image: the rotation, the alpha check of section 2, and the conversion to 8-bit RGB or RGBA for the encoder.
     `DynamicImage::apply_orientation` would allocate a second full-size buffer for a quarter turn, and converting a 16-bit image first would allocate another, which this avoids.
-  - **A 5 s budget** for waiting for the permit and for the decode.
-    The decode runs in `spawn_blocking` and keeps its permit until it finishes, even after the budget expires, as `PreviewGenerationService` does.
+  - **A 5 s budget** for all of it: the wait for the permit, the decode, the scale, the alpha check, the rotation and the encode.
+    The work runs in `spawn_blocking` and keeps its permit until it finishes, even after the budget expires, as `PreviewGenerationService` does.
     When the budget expires, the image is sent without a thumbnail.
+    Because the permit is held until the work finishes, an abandoned decode never overlaps the next send's decode.
+    The next send waits for the permit within its own budget, and goes without a thumbnail if the abandoned work does not finish in time.
     Generation starts when the send starts and runs while the original uploads (section 6), so on any upload of more than a few seconds it adds no time.
   - **A failure never fails the send.** A decode error, a busy pool or an expired budget sends the image without a thumbnail and logs the reason as an `error_kind`.
 - **The memory budget of one decode**, all inside the single permit:
@@ -257,9 +272,23 @@ When an `image` send arrives without a thumbnail, the server derives what it can
   | Row and MCU buffers, the scaled and rotated thumbnail, its 8-bit conversion and its encoding | under 10 MiB: a 16-bit RGBA thumbnail is 3.7 MiB, its 8-bit copy 1.8 MiB, the encoding at most 2 MiB, and no side over 16,384 pixels keeps the row buffers to a few MiB |
 
   So one decode peaks near 252 MiB, below the 256 MiB `max_alloc` backstop.
-  The staged file the send already holds is not in this table.
-  The `send-media` route reads the whole staged file into memory today, for every kind, before any of this runs.
+
+- **The whole process.** That figure is one decode.
+  Image decoding in the whole process is bounded by three pools, each with its own permits:
+
+  | Pool                                                                                    | Permits                           | Each at most                                                                                                       | Pool at most               |
+  | --------------------------------------------------------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------ | -------------------------- |
+  | Send thumbnails (this section)                                                          | 1; an abandoned decode keeps it   | about 252 MiB                                                                                                      | 252 MiB                    |
+  | Staging (`claim_preview_upload`): client thumbnails (section 4) and link-preview images | `media.max_concurrent_uploads`, 4 | 2 MiB of bytes, a decode of at most 4 MP under a 32 MiB `max_alloc`, and under 8 MiB for section 4's normalisation | about 42 MiB × 4 = 168 MiB |
+  | Link-preview generation (`PreviewGenerationService`)                                    | 4                                 | 2 MiB of bytes and a decode under the same 32 MiB `max_alloc`                                                      | about 34 MiB × 4 = 136 MiB |
+
+  So decoding peaks near 556 MiB across the process.
+  This ADR adds the first pool and the normalisation share of the second, about 284 MiB; the rest exists today.
+  An operator on a small machine turns off the largest part with `media.send_thumbnails = false`, and shrinks the second with `media.max_concurrent_uploads`.
+  The staged originals are outside these pools.
+  The `send-media` route reads the whole staged file into memory today, for every kind, before any of this runs: up to `media.max_upload_bytes` (100 MiB) for each send in flight.
   That is the send path's existing cost, not this ADR's, and [issue 1185](https://github.com/matrix-axon/matrix-axon/issues/1185) removes it.
+  Issue 1208's implementation measures the process's peak memory with all three pools busy before the caps are kept.
 
 - **Placement.** A consumer-owned port in `axon-api` (`SendThumbnailer`, called by the `send-media` route), with its adapter in `axon-server` next to `validate_preview_image` (ADR 0021).
   `axon-api` and `axon-sync` take no `image` dependency.
@@ -289,7 +318,8 @@ Instead, every media send takes the steps the two hand-built paths (`send_thread
 3. Build the content with `thumbnail_source` and `thumbnail_info` when the thumbnail uploaded, and with the relation the request asked for.
    A thread member keeps its existing hand-built relation.
    A reply uses `Room::make_reply_event`, which is what `send_attachment` calls internally.
-4. Send it with `Room::send`, with section 4's `txn_id` as the transaction id when there is one, bounded by `sync.send_mutation_timeout_secs` (30 s), as a text send is.
+4. Send it with `Room::send`, with section 4's `txn_id` as the transaction id when there is one.
+   Step 3's reply lookup and this send share one `sync.send_mutation_timeout_secs` (30 s) bound, as a text send's do.
 
 **Each step has its own bound.**
 Today one `media.upstream_upload_timeout_secs` (60 s) bounds the whole gateway call, upload and event send together.
@@ -334,6 +364,7 @@ The web client generates, stages and attaches what the server cannot.
 - **One `txn_id` per send, kept across retries** (section 4).
   The id is created with the echo.
   `retrySend` builds a fresh echo today, so the id moves to the new echo, or a retry would not be recognised.
+  The client sends it to any server, but only a server with `send_media_thumbnails` deduplicates; against an older one a retry can post twice, as it does today.
 - All of this, and the new kinds, only against a server whose capabilities list them (section 1).
 
 Native share extensions (issues 819 and 820) may use the OS's thumbnailers instead (`QLThumbnailGenerator` or `AVAssetImageGenerator` on iOS, `ThumbnailUtils` on Android).
@@ -347,21 +378,26 @@ Section 4's validation happens when the request is accepted, so its errors stay 
 Section 5's generation and section 6's upload run in the send itself, so in the asynchronous model they no longer delay the response.
 Until then, a synchronous send runs these steps in order:
 
-| Step                                                                                                                       | Bound                                                                          |
-| -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| 1. Validation and claims, including a client thumbnail's decode, normalisation and encode (section 4), at most 4 MP        | 5 s for the decode permit; the 4 MP decode and encode are not timed separately |
-| 2. The original's upload, with server generation (section 5) running alongside it, so the step takes the longer of the two | `media.upstream_upload_timeout_secs` (60 s); generation 5 s                    |
-| 3. The thumbnail's upload (section 6)                                                                                      | 10 s                                                                           |
-| 4. The event send                                                                                                          | `sync.send_mutation_timeout_secs` (30 s)                                       |
+| Step                                                                                                                       | Bound                                                              |
+| -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| 1. Validation and claims, including a client thumbnail's permit wait, decode, normalisation and encode (section 4)         | 5 s for all of the thumbnail work                                  |
+| 2. The original's upload, with server generation (section 5) running alongside it, so the step takes the longer of the two | `media.upstream_upload_timeout_secs` (60 s); all of generation 5 s |
+| 3. The thumbnail's upload (section 6)                                                                                      | 10 s                                                               |
+| 4. Building and sending the event, including fetching the replied-to event for a reply                                     | `sync.send_mutation_timeout_secs` (30 s)                           |
 
-So the worst case is 5 s, plus 60 s, plus 10 s, plus 30 s: 105 s with the default settings, plus the time to decode and encode a thumbnail of at most 4 MP.
+So the worst case is 5 s, plus 60 s, plus 10 s, plus 30 s: 105 s with the default settings.
+Every piece of thumbnail work is inside a bound, the client's in step 1 and the server's in step 2.
+The only untimed work is what today's send also does untimed: reading the staged original from local disk at the claim.
+A retry that joins an in-flight send (section 4) waits only for what is left of the first send, so it adds nothing to the ceiling.
 Today steps 2 and 4 share one 60 s bound, so the ceiling rises by about 45 s.
 Each step reaches its bound only when the homeserver is slow or failing; on a healthy one, the thumbnail adds well under a second, and generation adds nothing once the original takes longer than the decode.
 
 A client that bounds `send-media` must allow for the new ceiling.
 The web client derives its timeout from the upstream upload bound (`AXON_UPSTREAM_UPLOAD_MS` in `clients/web/src/api/client.ts`).
-Step 5 of the delivery changes it to the sum above.
-A client that still gives up early is covered by section 4's `txn_id`: its retry gets the event the first send posted.
+Step 5 of the delivery changes it to the sum above, keeping its existing `PAST_AXON_MS` margin for the untimed work and the network.
+A client that still gives up early is covered by section 4's `txn_id`, against a server that advertises `send_media_thumbnails` (section 1): its retry joins the first send or gets the event it posted.
+A joined retry can itself time out on the client if little of its own timeout is left.
+The next retry with the same id joins again, or, once the first send has finished, gets its event.
 
 ### 9. Not in this ADR
 
@@ -385,7 +421,8 @@ A client that still gives up early is covered by section 4's `txn_id`: its retry
 - Axon stops using `send_attachment` for media and builds every media event itself.
   That is more of the event under Axon's control, and one path for issue 1185 to change.
 - A client disconnect can no longer strand a claimed upload as `sending` until the next boot.
-- A media send whose response is lost can be retried without posting twice, as long as the client keeps its `txn_id`.
+- A media send whose response is lost can be retried without posting twice, as long as the client keeps its `txn_id` and the server advertises `send_media_thumbnails`.
+  Against an older server a retry can still post twice, as it does today.
   Text and sticker sends still can post twice until issue 1223.
 - A synchronous media send can take up to about 105 s with the default settings, rather than 60 s, until the asynchronous send (section 8).
 - Clients check `GET /v1/capabilities` before using the new kinds and fields.
