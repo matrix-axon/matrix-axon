@@ -1,5 +1,6 @@
 import { signal } from '@preact/signals'
 import { API_ROUTES, KNOWN_SLOT_VALUES } from './api/routes'
+import { identifierish } from './stores/telemetry'
 import type {
   TransportFailureKind,
   TransportVersion,
@@ -1625,16 +1626,9 @@ function matchRoute(segments: readonly string[]): RouteTemplate | null {
   return best
 }
 
-/** An account id, in a path no template matches. */
+/** A UUID, as an account id is. */
 const UUID_SEGMENT =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
-/**
- * A Matrix id, decoded. Event ids and v12 room ids carry no server part, so a
- * bare `$` or `!` is enough; a user, alias or group needs its `:server`, so an
- * asset named `@vite` or `+page.js` keeps its name.
- */
-const MATRIX_ID = /^(?:[$!]|[@#+][^/]*:)/
 
 /**
  * A route shape short enough to read on a phone: ids collapsed, query dropped.
@@ -1647,14 +1641,19 @@ const MATRIX_ID = /^(?:[$!]|[@#+][^/]*:)/
  * `tags/{id}`, though `work` is as plain a word as `timeline`. The one
  * exception is a value from the client's own vocabulary for that slot
  * (`KNOWN_SLOT_VALUES`: device-state namespaces, preference keys), kept as
- * written. A path no template matches keeps only words some route uses.
+ * written. A path no template matches keeps only words some route uses, and
+ * calls a UUID `{account}` only where it follows `accounts`: device, upload
+ * and flow ids are UUIDs too.
  *
  * Shape rules alone kept failing: a sigil check let event ids through,
  * because the client percent-encodes `$` as `%24`; a "lowercase words only"
  * rule let tag names and dotless server names through.
  *
- * Other paths (the app's own assets) keep their names, minus any segment that
- * decodes to a Matrix id.
+ * Other paths (the app's own assets) keep their names, minus any segment
+ * `scrub` would refuse (`identifierish`): a sigil at its start, written or
+ * percent-encoded, or a UUID in it. `/@vite/client` logs as `/{id}/client`.
+ * Collapsing by scrub's own rule is what keeps the route: a segment left
+ * as written there would drop the whole `route` field on its way to disk.
  */
 function shortRoute(url: string): string {
   let path = url
@@ -1678,10 +1677,10 @@ function shortRoute(url: string): string {
         .join('/')
     }
     return segments
-      .map((segment) =>
+      .map((segment, i) =>
         segment === '' || ROUTE_WORDS.has(segment)
           ? segment
-          : UUID_SEGMENT.test(segment)
+          : segments[i - 1] === 'accounts' && UUID_SEGMENT.test(segment)
             ? '{account}'
             : '{id}',
       )
@@ -1689,23 +1688,8 @@ function shortRoute(url: string): string {
   }
   return path
     .split('/')
-    .map((segment) =>
-      UUID_SEGMENT.test(segment)
-        ? '{account}'
-        : MATRIX_ID.test(decodeSegment(segment))
-          ? '{id}'
-          : segment,
-    )
+    .map((segment) => (identifierish(segment) ? '{id}' : segment))
     .join('/')
-}
-
-/** `decodeURIComponent`, or the raw segment when it is not valid encoding. */
-function decodeSegment(segment: string): string {
-  try {
-    return decodeURIComponent(segment)
-  } catch {
-    return segment
-  }
 }
 
 /**

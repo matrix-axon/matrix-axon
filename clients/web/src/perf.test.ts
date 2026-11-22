@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { API_ROUTES } from './api/routes'
+import { scrub } from './stores/telemetry'
 import {
   perfActive,
   perfMark,
@@ -793,19 +794,53 @@ describe('room-open summary', () => {
     expect(
       deadlineRoutes([
         `https://axon.test/v1/accounts/${ACCOUNT}/rooms/work/novel/timeline`,
+        // A UUID that does not follow `accounts` is some other id.
+        `https://axon.test/v1/devices/${ACCOUNT}/novel`,
       ]),
-    ).toEqual(['accounts/{account}/rooms/{id}/{id}/timeline'])
+    ).toEqual([
+      'accounts/{account}/rooms/{id}/{id}/timeline',
+      'devices/{id}/{id}',
+    ])
   })
 
-  it("keeps the app's own asset names, minus a Matrix id", () => {
+  it("keeps the app's own asset names, minus anything scrub would refuse", () => {
     expect(
       deadlineRoutes([
         'https://axon.test/@vite/client',
         'https://axon.test/assets/+page.js',
+        `https://axon.test/assets/chunk-${ACCOUNT}.js`,
+        'https://axon.test/assets/index-abc.js',
         `https://axon.test/room/${encodeURIComponent('@alice:hs')}`,
         `https://axon.test/room/${encodeURIComponent('$event')}`,
       ]),
-    ).toEqual(['/@vite/client', '/assets/+page.js', '/room/{id}', '/room/{id}'])
+    ).toEqual([
+      '/{id}/client',
+      '/assets/{id}',
+      '/assets/{id}',
+      '/assets/index-abc.js',
+      '/room/{id}',
+      '/room/{id}',
+    ])
+  })
+
+  it('writes only routes that scrub lets through to disk', () => {
+    // A route scrub refused would drop the mark's whole `route` field.
+    const routes = deadlineRoutes([
+      'https://axon.test/@vite/client',
+      'https://axon.test/assets/+page.js',
+      `https://axon.test/assets/chunk-${ACCOUNT}.js`,
+      `https://axon.test/room/${encodeURIComponent('#room:hs')}`,
+      `https://axon.test/v1/devices/${ACCOUNT}/novel`,
+      `https://axon.test/v1/accounts/${ACCOUNT}/events/${encodeURIComponent('$event')}`,
+      ...API_ROUTES.map(
+        (route) =>
+          `https://axon.test${route.replace(/\{[^}]+\}/g, '%40secret')}`,
+      ),
+    ])
+    expect(routes.length).toBe(API_ROUTES.length + 6)
+    for (const route of routes) {
+      expect(scrub({ route })).toEqual({ route })
+    }
   })
 
   const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'

@@ -150,11 +150,13 @@ const SIGIL = /(?:^|\/)(?:[!@#$+]|%2[134b]|%40)/i
  * point: a backstop that trusted a field's name would miss the field nobody
  * vetted. The cost is that a harmless value shaped like an id (an asset path
  * through `@vite`, a note quoting a UUID) is dropped too. No mark writes one
- * today; `route` fields arrive already collapsed by `shortRoute`, so a route
- * this drops is a `shortRoute` bug, and `perf.test.ts` is where that shows.
+ * today; `route` fields arrive already collapsed by `shortRoute`, which
+ * collapses by this same predicate, so a route this drops is a `shortRoute`
+ * bug, and `perf.test.ts` is where that shows.
  */
 
-function identifierish(value: string): boolean {
+/** True for a value `scrub` drops. `shortRoute` collapses path segments by it. */
+export function identifierish(value: string): boolean {
   return SIGIL.test(value) || UUID.test(value)
 }
 
