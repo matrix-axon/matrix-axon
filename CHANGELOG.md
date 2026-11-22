@@ -3,6 +3,33 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](https://github.com/matrix-axon/matrix-axon/releases) page.
 
+## v0.1.31 - 2026-11-22
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Features
+* feat(web): play video and audio from stream tickets (ADR 0139 phase 3) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1190
+* feat(server): report and resolve room member identity changes by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1187
+* feat(server): report changes to an account's own Matrix identity by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1193
+* feat(web): play video and audio in the shells through an axon-media scheme (ADR 0139 phase 4) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1191
+* feat(web): stream video and audio in the Linux shell through a loopback server by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1202
+* fix(ios): skip sender previews for Matrix links by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1215
+* feat(tui): show decryption reasons and identity changes by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1204
+#### Bug Fixes
+* fix: hide spoilers in web room-list previews by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1198
+#### Performance
+* feat(deploy): use BBR congestion control for the stack's front doors by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1195
+#### Documentation
+* docs(adr): ADR 0141 — prefer the self-hosted CI runners when one is free by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1183
+#### Build and CI
+* ci: compile the Tauri shell crate on macOS for pull requests by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1199
+#### Other Changes
+* test(api): keep a minted ticket out of a test's assertion message by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1180
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.30...v0.1.31
+
 ## v0.1.30 - 2026-11-19
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
