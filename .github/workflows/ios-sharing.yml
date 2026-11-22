@@ -31,7 +31,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   native:
-    runs-on: macos-latest
+    runs-on: xcode-27
     # Observed passing runs take 16-24 min; leave room for one xcodegen retry.
     timeout-minutes: 40
     steps:

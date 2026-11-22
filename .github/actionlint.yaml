@@ -4,6 +4,8 @@ self-hosted-runner:
   labels:
     - "axon-linux"
     - "axon-macos"
+    # A runner image carrying Xcode 27, which actionlint's built-in list predates.
+    - "xcode-27"
 paths:
   .github/workflows/pick-runner.yml:
     ignore:
