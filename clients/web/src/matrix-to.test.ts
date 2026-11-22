@@ -6,6 +6,7 @@ import {
   parseMatrixRoomReference,
 } from './matrix-to'
 import type { RoomDto } from './stores/room-list'
+import matrixLinks from './incoming-share/fixtures/matrix-link-urls.json'
 
 describe('matrixToRoomReferenceLink', () => {
   it('adds via hints for room IDs without an embedded server name', () => {
@@ -194,23 +195,8 @@ describe('parseMatrixRoomReference', () => {
 })
 
 describe('isMatrixLink', () => {
-  it.each([
-    'https://matrix.to/#/!room:example.org/$event',
-    'https://matrix.to/#/@alice:example.org',
-    'https://MATRIX.to/#/#room:example.org',
-    'matrix:roomid/room:example.org/e/event',
-    'MATRIX:u/alice:example.org',
-  ])('is true for %s', (url) => {
-    expect(isMatrixLink(url)).toBe(true)
-  })
-  it.each([
-    'http://matrix.to/#/!room:example.org',
-    'https://matrix.to:8443/#/!room:example.org',
-    'https://www.matrix.to/#/!room:example.org',
-    'https://matrix.org/',
-    'not a link',
-  ])('is false for %s', (url) => {
-    expect(isMatrixLink(url)).toBe(false)
+  it.each(matrixLinks)('$url is a Matrix link: $matrix', ({ url, matrix }) => {
+    expect(isMatrixLink(url)).toBe(matrix)
   })
 })
 

@@ -105,9 +105,32 @@ public enum TextShare {
   }
   /// Static eligibility only; DNS and redirect/image addresses are checked
   /// again by the restricted transport immediately before every connection.
+  /// A Matrix link passes this check. The sender exclusion is `isMatrixLink`,
+  /// applied beside it (ADR 0138 § 1), so the shared fixture still describes
+  /// this function alone.
   public static func devicePreviewURL(_ raw: String) -> Bool {
     guard previewURL(raw), let url = URL(string: raw) else { return false }
     return (try? PreviewNetwork.validate(url)) != nil
+  }
+  /// Whether `raw` is a Matrix link (ADR 0138 § 1): any `matrix:` URI, and any
+  /// `https` URL whose origin is `https://matrix.to`. The same test as
+  /// `isMatrixLink` in `matrix-to.ts`. `URL.host` is that origin's host:
+  /// percent-decoded, IDNA (punycode), trailing dot kept. Foundation does not
+  /// lowercase it, and it reports an explicit port 443, which the origin omits.
+  public static func isMatrixLink(_ raw: String) -> Bool {
+    if raw.range(of: #"^matrix:"#, options: [.regularExpression, .caseInsensitive]) != nil {
+      return true
+    }
+    guard let url = URL(string: raw), url.scheme?.lowercased() == "https",
+      url.host?.lowercased() == "matrix.to", url.port == nil || url.port == 443
+    else { return false }
+    return true
+  }
+  /// Links the sender may build a card for, in text order. A Matrix link
+  /// passes `devicePreviewURL` and is left out: its card is the recipient's
+  /// to build.
+  public static func senderPreviewLinks(_ text: String) -> [String] {
+    links(text).filter { devicePreviewURL($0) && !isMatrixLink($0) }
   }
   public static func previewURL(_ raw: String) -> Bool {
     validURL(raw) && URLComponents(string: raw)?.scheme == "https"
@@ -121,19 +144,37 @@ public enum TextShare {
   }
 
   public static func links(_ text: String) -> [String] {
+    linkCandidates(text).filter(validURL)
+  }
+  /// Every bare link the scanner finds, before the http(s) check. A `matrix:`
+  /// URI stays in this list and is dropped by `links`.
+  private static func linkCandidates(_ text: String) -> [String] {
     let value = text as NSString
     return linkExpression.matches(in: text, range: NSRange(location: 0, length: value.length))
       .map {
         value.substring(with: $0.range).trimmingCharacters(
           in: CharacterSet(charactersIn: ".,;:!?)]'\""))
       }
-      .filter(validURL)
+  }
+  /// Whether `text` has a link and every link is a Matrix link. The decision
+  /// follows the body, not which cards happen to be staged (ADR 0138 § 1).
+  private static func matrixLinksOnly(_ text: String) -> Bool {
+    let found = linkCandidates(text).filter { isMatrixLink($0) || validURL($0) }
+    return !found.isEmpty && found.allSatisfy(isMatrixLink)
   }
 
   public static func wire(
     _ manifest: ShareManifest, reserveImages: Bool = false
   ) -> [String: Any] {
-    let previews: [[String: Any]] = (manifest.previews ?? []).map { preview in
+    // A Matrix link's card is the recipient's (ADR 0138 § 1). A body whose
+    // only links are Matrix links omits the field, staged card or not, so
+    // other clients are not told to skip building their own. Any other body
+    // sends the remaining cards, or an empty list when it has none.
+    let kept = (manifest.previews ?? []).filter { !isMatrixLink($0.matched_url) }
+    if matrixLinksOnly(manifest.text) {
+      return ["body": manifest.text]
+    }
+    let previews: [[String: Any]] = kept.map { preview in
       var entry: [String: Any] = ["matched_url": preview.matched_url]
       entry["title"] = preview.title
       entry["description"] = preview.description
@@ -314,7 +355,7 @@ public final class TextShareSender {
     _ input: ShareManifest, url: String,
     imageState: (SharePreviewImageState) -> Void = { _ in }
   ) throws -> ShareManifest {
-    guard TextShare.links(input.text).contains(url),
+    guard TextShare.links(input.text).contains(url), !TextShare.isMatrixLink(url),
       (input.previews?.count ?? 0) < 8
         || input.previews?.contains(where: { $0.matched_url == url }) == true
     else { throw ShareFailure.invalid }
@@ -445,6 +486,10 @@ public final class TextShareSender {
     // bytes. Neither handle expiry nor a missing copy triggers regeneration.
     for index in (next.previews ?? []).indices {
       let preview = next.previews![index]
+      // A Matrix card is not part of the send. Skipping it here also skips
+      // the missing-file failure below, so a stale card cannot fail the
+      // message or upload a thumbnail the recipient will not use.
+      if TextShare.isMatrixLink(preview.matched_url) { continue }
       if let thumbnail = preview.thumbnail {
         let uploaded = try store.withVerifiedFile(next.id, file: thumbnail, owner: next.owner!) {
           url, file in

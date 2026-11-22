@@ -380,6 +380,9 @@
         guard failures.isEmpty else { break }
         try cancellation.check()
         guard let raw = TextShare.matchedLink(link.url, in: normalized) else { continue }
+        // A source may already have fetched matrix.to. Keep the link in the
+        // message and do not stage that card (ADR 0138 § 1).
+        if TextShare.isMatrixLink(raw) { continue }
         if (manifest.previews?.count ?? 0) >= 8
           && manifest.previews?.contains(where: { $0.matched_url == raw }) != true
         {

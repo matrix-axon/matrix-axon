@@ -619,6 +619,26 @@
         }
       }
     }
+    func testMatrixLinkKeepsTheURLAndStagesNoCard() async throws {
+      let matrix = "https://matrix.to/#/!room:example.org/$event"
+      let metadata = LPLinkMetadata()
+      metadata.originalURL = URL(string: matrix)
+      metadata.title = "matrix.to"
+      let provider = NSItemProvider()
+      provider.registerItem(forTypeIdentifier: UTType.url.identifier) { completion, _, _ in
+        completion?(metadata, nil)
+      }
+      let item = NSExtensionItem()
+      item.attachments = [provider]
+      let result = try await Task.detached {
+        try ShareIntake.importItems([item], store: self.store)
+      }.value
+      XCTAssertEqual(result.text, matrix)
+      XCTAssertNil(result.previews)
+      XCTAssertTrue(result.importFailures.isEmpty)
+      XCTAssertNil(TextShare.validation(result))
+    }
+
     func testUnrecognizedImageFallsBackToTextCard() async throws {
       let image = root.appendingPathComponent("image.png")
       try Data("Not an image".utf8).write(to: image)

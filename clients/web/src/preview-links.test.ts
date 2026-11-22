@@ -12,7 +12,7 @@ import identity from './fixtures/link-identity.json'
 
 describe('portable native preview URLs', () => {
   // The fixture describes `isPreviewLink` alone, the boundary the native
-  // readers mirror; the Matrix-link rule is web-only (ADR 0138 § 1).
+  // readers mirror. The Matrix-link exclusion is covered by its own test.
   it.each(cases)(
     'matches native static eligibility for $url',
     ({ url, eligible }) => {
