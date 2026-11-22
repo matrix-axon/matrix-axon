@@ -111,7 +111,7 @@ jobs:
           if [ "$NEED_ASC" = "yes" ]; then args+=(--asc); fi
           scripts/ci/store-credentials.sh check-secrets ios ${args[@]+"${args[@]}"}
 
-      - name: Select an Xcode with the iOS 26 SDK
+      - name: Select an Xcode with the iOS 26 SDK, system-wide as well
         run: scripts/ci/store-credentials.sh xcode --min-sdk 26
 
       - name: Install Rust toolchain
@@ -336,6 +336,12 @@ jobs:
           args=()
           if [ "$NEED_ASC" = "yes" ]; then args+=(--asc); fi
           scripts/ci/store-credentials.sh check-secrets macos ${args[@]+"${args[@]}"}
+
+      # The same Xcode as the iOS job, chosen the same way, rather than whichever the
+      # runner image defaults to. The check is on the iOS SDK, which matches the macOS
+      # SDK's major version in every Xcode release.
+      - name: Select an Xcode with the 26 SDKs
+        run: scripts/ci/store-credentials.sh xcode --min-sdk 26
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
