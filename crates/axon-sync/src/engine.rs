@@ -838,8 +838,9 @@ pub(crate) async fn persist_timeline_event(
     .flatten();
     // The live sync path: persist and emit the fresh event to `/v1/ws`. A UTD
     // gets one local decryption retry first (see [`persist_live_event`]), which
-    // records its reason, so nothing comes back. Production always rechecks
-    // with [`LiveUtdRecheck`]; the tests pass their own counter (#949).
+    // records its reason, so nothing comes back. This handler passes
+    // [`LiveUtdRecheck`]. The unit tests call [`persist_live_event`] with their
+    // own counter, so they do not cover this call (#949, #1220).
     let recheck = LiveUtdRecheck {
         room: &room,
         store: &ctx.store,
@@ -931,8 +932,8 @@ enum UtdCheck<'a> {
     /// will not run again, so the row would stay a UTD until the next restart
     /// (#938).
     ///
-    /// [`persist_live_event`] is the only production caller, and its tests are
-    /// the only other one. Both pass a [`PersistedUtdRecheck`].
+    /// [`persist_live_event`] passes this variant, and its tests do too.
+    /// Those tests do not call [`persist_timeline_event`] (#1220).
     Recheck(&'a dyn PersistedUtdRecheck),
     /// The backfill path: the SDK's reason for a paged UTD, handed back to the
     /// caller to record with its page. Nothing is emitted live.
@@ -1009,7 +1010,7 @@ impl TimelineWrite for Store {
 /// What [`persist_event_core`] needs from the account run, apart from the event
 /// itself. Split out of [`PersistContext`] so a test can drive the ingest path
 /// without a connected [`Store`].
-struct Ingest<'a, S: TimelineWrite + ?Sized> {
+struct Ingest<'a, S: TimelineWrite> {
     account_id: Uuid,
     rows: &'a S,
     live_tx: &'a broadcast::Sender<LiveFrame>,
@@ -1034,8 +1035,10 @@ fn ingest_from(ctx: &PersistContext) -> Ingest<'_, Store> {
 /// [`UtdCheck::Known`] and emits nothing.
 ///
 /// The unit tests call this function with their own [`PersistedUtdRecheck`].
-/// Changing the variant to [`UtdCheck::Known`], or dropping the attempt, fails
-/// `cargo test` (#949). That is the live re-check #938 added.
+/// Changing the variant here to [`UtdCheck::Known`], or dropping the attempt,
+/// fails `cargo test` (#949). That is the live re-check #938 added.
+/// The tests do not call [`persist_timeline_event`], so that handler can stop
+/// using this function without a test failing (#1220).
 async fn persist_live_event<S: TimelineWrite>(
     ingest: &Ingest<'_, S>,
     ev: &AnySyncTimelineEvent,
@@ -5334,16 +5337,19 @@ mod purge_ingestion_tests {
     }
 }
 
-/// #949: the live re-check is [`persist_live_event`].
-/// Dropping it, or switching it to [`UtdCheck::Known`], fails here under
-/// `cargo test`, without Postgres or a megolm session.
+/// #949: [`persist_live_event`] rechecks a stored UTD and skips every other event.
+/// Switching that function to [`UtdCheck::Known`], or dropping the attempt,
+/// fails here under `cargo test`, without Postgres or a megolm session.
+/// These tests do not call [`persist_timeline_event`] (#1220).
 #[cfg(test)]
 mod persisted_utd_recheck_tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use axon_core::{LiveFrame, UtdReason, UtdReasonKind};
+    use matrix_sdk::deserialized_responses::{AlgorithmInfo, EncryptionInfo, VerificationState};
     use matrix_sdk::ruma::events::AnySyncTimelineEvent;
+    use matrix_sdk::ruma::user_id;
     use serde_json::{json, Value};
     use tokio::sync::broadcast;
     use uuid::Uuid;
@@ -5358,11 +5364,17 @@ mod persisted_utd_recheck_tests {
         stored: Vec<String>,
         /// Event id, and whether that row was already stored when the attempt ran.
         attempts: Vec<(String, bool)>,
+        ciphertext: Vec<String>,
+        /// Event id and the `sender_trust` the crypto row carried in.
+        crypto_trust: Vec<(String, Option<String>)>,
     }
 
     struct FakeRows {
         log: Arc<Mutex<Log>>,
         fail: bool,
+        fail_crypto: bool,
+        /// What a successful crypto upsert reports as the stored verdict.
+        stored_trust: Option<String>,
     }
 
     impl TimelineWrite for FakeRows {
@@ -5386,16 +5398,29 @@ mod persisted_utd_recheck_tests {
 
         async fn insert_event_ciphertext(
             &self,
-            _row: &EventCiphertext<'_>,
+            row: &EventCiphertext<'_>,
         ) -> Result<(), StoreError> {
+            self.log
+                .lock()
+                .expect("log")
+                .ciphertext
+                .push(row.event_id.to_owned());
             Ok(())
         }
 
         async fn upsert_event_crypto(
             &self,
-            _row: &EventCrypto<'_>,
+            row: &EventCrypto<'_>,
         ) -> Result<Option<String>, StoreError> {
-            Ok(None)
+            if self.fail_crypto {
+                return Err(StoreError::Sqlx(sqlx_core::Error::PoolClosed));
+            }
+            self.log
+                .lock()
+                .expect("log")
+                .crypto_trust
+                .push((row.event_id.to_owned(), row.sender_trust.map(str::to_owned)));
+            Ok(self.stored_trust.clone())
         }
     }
 
@@ -5440,20 +5465,54 @@ mod persisted_utd_recheck_tests {
         })
     }
 
+    struct Drive {
+        fail_row: bool,
+        fail_crypto: bool,
+        stored_trust: Option<String>,
+        enc_info: Option<EncryptionInfo>,
+    }
+
+    fn plain(fail_row: bool) -> Drive {
+        Drive {
+            fail_row,
+            fail_crypto: false,
+            stored_trust: None,
+            enc_info: None,
+        }
+    }
+
+    /// A verified Olm decryption, so `crypto_meta` yields `sender_trust =
+    /// "verified"`. The frame must carry the store's return value instead.
+    fn verified_olm() -> EncryptionInfo {
+        EncryptionInfo {
+            sender: user_id!("@alice:example.org").to_owned(),
+            sender_device: None,
+            forwarder: None,
+            algorithm_info: AlgorithmInfo::OlmV1Curve25519AesSha2 {
+                curve25519_public_key_base64: "curve".to_owned(),
+            },
+            verification_state: VerificationState::Verified,
+        }
+    }
+
     struct Observed {
         log: Log,
         frame: Option<axon_core::LiveEvent>,
         failed: bool,
     }
 
-    async fn observe(raw: Value, outcome: Attempt, fail: bool) -> Observed {
+    async fn observe(raw: Value, outcome: Attempt, drive: Drive) -> Observed {
         let log = Arc::new(Mutex::new(Log {
             stored: Vec::new(),
             attempts: Vec::new(),
+            ciphertext: Vec::new(),
+            crypto_trust: Vec::new(),
         }));
         let rows = FakeRows {
             log: Arc::clone(&log),
-            fail,
+            fail: drive.fail_row,
+            fail_crypto: drive.fail_crypto,
+            stored_trust: drive.stored_trust,
         };
         let recheck = CountingRecheck {
             log: Arc::clone(&log),
@@ -5471,7 +5530,7 @@ mod persisted_utd_recheck_tests {
             &ev,
             raw,
             "!room:example.org",
-            None,
+            drive.enc_info.as_ref(),
             &recheck,
         )
         .await;
@@ -5485,6 +5544,8 @@ mod persisted_utd_recheck_tests {
             log: Log {
                 stored: log.stored.clone(),
                 attempts: log.attempts.clone(),
+                ciphertext: log.ciphertext.clone(),
+                crypto_trust: log.crypto_trust.clone(),
             },
             frame,
             failed: result.is_err(),
@@ -5496,11 +5557,13 @@ mod persisted_utd_recheck_tests {
         let observed = observe(
             encrypted("$utd:example.org"),
             Attempt::StillUtd(UtdReason::new(UtdReasonKind::MissingKey)),
-            false,
+            plain(false),
         )
         .await;
         assert!(!observed.failed);
         assert_eq!(observed.log.stored, ["$utd:example.org"]);
+        assert_eq!(observed.log.ciphertext, ["$utd:example.org"]);
+        assert!(observed.log.crypto_trust.is_empty());
         assert_eq!(
             observed.log.attempts,
             [("$utd:example.org".to_owned(), true)],
@@ -5521,7 +5584,7 @@ mod persisted_utd_recheck_tests {
         let observed = observe(
             message("$msg:example.org"),
             Attempt::StillUtd(UtdReason::new(UtdReasonKind::MissingKey)),
-            false,
+            plain(false),
         )
         .await;
         assert!(!observed.failed);
@@ -5541,12 +5604,61 @@ mod persisted_utd_recheck_tests {
         let observed = observe(
             encrypted("$utd:example.org"),
             Attempt::StillUtd(UtdReason::new(UtdReasonKind::MissingKey)),
-            true,
+            plain(true),
         )
         .await;
         assert!(observed.failed);
         assert!(observed.log.stored.is_empty());
+        assert!(observed.log.ciphertext.is_empty());
         assert!(observed.log.attempts.is_empty());
         assert!(observed.frame.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_decrypted_frame_carries_the_stored_trust() {
+        let observed = observe(
+            message("$msg:example.org"),
+            Attempt::Decrypted,
+            Drive {
+                fail_row: false,
+                fail_crypto: false,
+                stored_trust: Some("kept".to_owned()),
+                enc_info: Some(verified_olm()),
+            },
+        )
+        .await;
+        assert!(!observed.failed);
+        assert!(observed.log.attempts.is_empty());
+        assert!(observed.log.ciphertext.is_empty());
+        assert_eq!(
+            observed.log.crypto_trust,
+            [("$msg:example.org".to_owned(), Some("verified".to_owned()))],
+            "the crypto row carries the verdict derived from enc_info"
+        );
+        let frame = observed.frame.expect("live frame");
+        assert_eq!(frame.sender_trust.as_deref(), Some("kept"));
+        assert!(frame.utd_reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_failed_crypto_sibling_still_emits_the_frame() {
+        let observed = observe(
+            message("$msg:example.org"),
+            Attempt::Decrypted,
+            Drive {
+                fail_row: false,
+                fail_crypto: true,
+                stored_trust: Some("kept".to_owned()),
+                enc_info: Some(verified_olm()),
+            },
+        )
+        .await;
+        assert!(!observed.failed);
+        assert_eq!(observed.log.stored, ["$msg:example.org"]);
+        assert!(observed.log.crypto_trust.is_empty());
+        assert!(observed.log.attempts.is_empty());
+        let frame = observed.frame.expect("live frame");
+        assert!(frame.sender_trust.is_none());
+        assert!(frame.content.is_some());
     }
 }
