@@ -1974,7 +1974,7 @@ third-party/chromium/LICENSE.
       - foreign-types-macros 0.2.4
       - foreign-types-shared 0.3.1
   - Copyright (c) 2013-2016 The rust-url developers
-      - form_urlencoded 1.2.2
+      - form_urlencoded 1.2.3
   - Copyright (c) 2016 Alex Crichton
     Copyright (c) 2017 The Tokio Authors
       - futures-channel 0.3.34
@@ -2028,7 +2028,7 @@ third-party/chromium/LICENSE.
   - Copyright (c) 2013-2025 The rust-url developers
       - idna 1.1.0
       - percent-encoding 2.3.2
-      - url 2.5.8
+      - url 2.5.9
   - Copyright (c) The rust-url developers
       - idna_adapter 1.2.2
   - Copyright (c) 2016--2017

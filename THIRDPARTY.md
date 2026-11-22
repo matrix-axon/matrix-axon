@@ -3,7 +3,7 @@
 The following open-source components are used in this application.
 
 ## OVERVIEW
-- MIT License (used by 583 crates)
+- MIT License (used by 579 crates)
 - Apache License 2.0 (used by 27 crates)
 - Unicode License v3 (used by 21 crates)
 - BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License (used by 14 crates)
@@ -1300,7 +1300,7 @@ THIS SOFTWARE.
   - Copyright (c) 2017 Contributors
       - fnv 1.0.7
   - Copyright (c) 2013-2016 The rust-url developers
-      - form_urlencoded 1.2.2
+      - form_urlencoded 1.2.3
   - Copyright (c) 2015 The Rust Project Developers
       - fs4 0.13.1
       - heck 0.5.0
@@ -1375,7 +1375,7 @@ THIS SOFTWARE.
   - Copyright (c) 2013-2025 The rust-url developers
       - idna 1.1.0
       - percent-encoding 2.3.2
-      - url 2.5.8
+      - url 2.5.9
   - Copyright (c) The rust-url developers
       - idna_adapter 1.2.2
   - Copyright (c) 2016--2017
@@ -1988,17 +1988,13 @@ SOFTWARE.
       - quantette 0.5.1
       - r-efi 5.3.0
       - r-efi 6.0.0
-      - ruma 0.16.0
-      - ruma 0.17.0
-      - ruma-client-api 0.25.0
-      - ruma-common 0.19.0
-      - ruma-common 0.20.0
-      - ruma-events 0.35.0
-      - ruma-html 0.8.0
+      - ruma 0.17.2
+      - ruma-client-api 0.25.2
+      - ruma-common 0.20.2
+      - ruma-events 0.35.2
       - ruma-html 0.9.0
-      - ruma-identifiers-validation 0.12.1
-      - ruma-macros 0.19.0
-      - ruma-macros 0.20.0
+      - ruma-identifiers-validation 0.14.1
+      - ruma-macros 0.20.2
       - rustls-platform-verifier-android 0.1.1
       - siphasher 1.0.3
       - tantivy-bitpacker 0.10.0
