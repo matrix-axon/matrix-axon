@@ -453,6 +453,41 @@ describe('room-open summary', () => {
     expect(summary!.attempts).toBe(2)
   })
 
+  /**
+   * 2026-11-22 capture: `phase=settled heads=pending rows=null` on a cold open
+   * whose page had landed. `/members` and `/threads` answered within a
+   * millisecond of the timeline, inside the two frames the summary waits, and
+   * each of them wrote the line at once.
+   */
+  it('waits for the paint when a competitor lands just after the page', async () => {
+    openRoom()
+    const head = { kind: 'head', roomId: ROOM, thread: false }
+    perfMark('timeline:fetch:start', head)
+    startCompetitors()
+    perfMark('timeline:fetch:end', { ...head, ok: true })
+    perfMark('rooms:refresh:end', { ok: true, rooms: 2 })
+    perfMark('members:refresh:end', { roomId: ROOM, members: 4, ok: true })
+    perfMark('threads:refresh:end', { roomId: ROOM, threads: 3, ok: true })
+    // The page is applied and painted after the competitors have answered.
+    perfMark('timeline:head:settled', {
+      roomId: ROOM,
+      thread: false,
+      outcome: 'applied',
+    })
+    perfMark('room-page:timeline-render', {
+      roomId: ROOM,
+      loading: false,
+      visible: 30,
+      hasRows: true,
+    })
+    await frames()
+
+    const summary = roomOpenSummary()
+    expect(summary).not.toBeNull()
+    expect(summary!.rows).not.toBeNull()
+    expect(summary!.heads).toMatch(/^applied@\d+$/)
+  })
+
   it("writes the shell transport's counters once per room open", async () => {
     const source = vi.fn(() =>
       Promise.resolve({

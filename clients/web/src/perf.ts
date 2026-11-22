@@ -633,6 +633,13 @@ interface RoomOpen {
   membersStarted: boolean
   threadsStarted: boolean
   settled: boolean
+  /**
+   * Two frames have run since `settled`, so the render that paints the rows
+   * has had its turn. `readyToEmit` waits for it whichever request lands
+   * last: a competitor answering inside those frames used to write the line
+   * at once, with `rows` and `heads` taken before the page was applied.
+   */
+  painted: boolean
   emitted: boolean
   watchdog: ReturnType<typeof setTimeout> | null
   grace: ReturnType<typeof setTimeout> | null
@@ -760,6 +767,7 @@ function noteRoomOpen(
       membersStarted: inFlight.members,
       threadsStarted: inFlight.threads,
       settled: false,
+      painted: false,
       emitted: false,
       grace: null,
       watchdog: null,
@@ -834,9 +842,7 @@ function noteRoomOpen(
         // Two frames, for the reason `perfMarkBootRoomList` documents: the
         // render that paints the rows has not run when the fetch settles, so
         // summarising inline reports `rows: null` on every load that worked.
-        requestAnimationFrame(() =>
-          requestAnimationFrame(() => readyToEmit(open)),
-        )
+        afterPaint(open)
       }
       break
     case 'room-row:hydrate-preview':
@@ -857,9 +863,7 @@ function noteRoomOpen(
         if (!open.settled) {
           open.settled = true
           open.via = 'paint'
-          requestAnimationFrame(() =>
-            requestAnimationFrame(() => readyToEmit(open)),
-          )
+          afterPaint(open)
         }
       }
       break
@@ -893,6 +897,16 @@ function noteRoomOpen(
   }
 }
 
+/** Mark the open painted two frames from now, then see whether it can emit. */
+function afterPaint(open: RoomOpen): void {
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      open.painted = true
+      readyToEmit(open)
+    }),
+  )
+}
+
 /**
  * Emit once the timeline page has landed **and** the three requests beside it
  * have, or once the grace period says one of them is not going to.
@@ -904,7 +918,7 @@ function noteRoomOpen(
  * case as missing data.
  */
 function readyToEmit(open: RoomOpen): void {
-  if (roomOpen !== open || open.emitted || !open.settled) {
+  if (roomOpen !== open || open.emitted || !open.painted) {
     return
   }
   // A competitor that was never requested is not something to wait for —
