@@ -55,6 +55,13 @@ function harness() {
             : read === 'info'
               ? {
                   member_counts: { joined: answer, invited: 0, observed_at: 0 },
+                  identity_changes: [
+                    {
+                      user_id: '@alice:hs',
+                      kind: 'pin_violation',
+                      fingerprint: 'a'.repeat(64),
+                    },
+                  ],
                 }
               : homeserverDetailsDto(),
       })
@@ -138,7 +145,10 @@ it('reads metadata, member counts and homeserver details for a joined room', asy
 it('keeps only identity information live when Room Information is closed', async () => {
   const h = harness()
   h.store.watchInfo({ accountId: ACCOUNT, roomId: ROOM, joined: true })
-  await vi.waitFor(() => expect(h.store.state.value.info.value).not.toBeNull())
+  await vi.waitFor(() =>
+    expect(h.store.state.value.identityChanges).toHaveLength(1),
+  )
+  expect(h.store.state.value.info.value).toBeNull()
   expect(h.calls.map((call) => call.read)).toEqual(['info'])
 
   h.frame(['identity_changes'], ROOM, OTHER)

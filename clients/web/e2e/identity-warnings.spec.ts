@@ -14,7 +14,7 @@ async function expectWithinViewport(page: Page, target: Locator) {
 test('identity warnings leave room sending available and the review dialog fits', async ({
   page,
 }) => {
-  const warnings = [
+  let warnings = [
     {
       user_id: `@${'long-matrix-id'.repeat(7)}:hs`,
       kind: 'pin_violation',
@@ -28,6 +28,16 @@ test('identity warnings leave room sending available and the review dialog fits'
   ]
   await page.route('**/v1/accounts/*/rooms/*/info', (route) =>
     route.fulfill({ json: { data: { identity_changes: warnings } } }),
+  )
+  await page.route(
+    '**/v1/accounts/*/users/*/identity/withdraw_verification',
+    (route) => {
+      const userId = decodeURIComponent(
+        new URL(route.request().url()).pathname.split('/').at(-3)!,
+      )
+      warnings = warnings.filter((warning) => warning.user_id !== userId)
+      return route.fulfill({ status: 204 })
+    },
   )
   // Keep the mock server's shared timeline unchanged for later specs.
   await page.route('**/v1/accounts/*/rooms/*/send', (route) =>
@@ -55,11 +65,18 @@ test('identity warnings leave room sending available and the review dialog fits'
   await expectWithinViewport(page, dialog.locator('.overlay-panel'))
   await expect(dialog.getByText(warnings[0].user_id)).toBeVisible()
   await expect(dialog.getByRole('button', { name: 'Close' })).toBeFocused()
-  const lastAction = dialog
-    .getByRole('button', { name: 'Withdraw verification' })
-    .last()
+  const lastAction = dialog.getByRole('button', {
+    name: 'Withdraw verification for @member-7:hs',
+  })
   await lastAction.scrollIntoViewIfNeeded()
   await expectWithinViewport(page, lastAction)
+  await lastAction.press('Enter')
+  await expect(lastAction).toHaveCount(0)
+  await expect(
+    dialog.getByRole('button', {
+      name: 'Withdraw verification for @member-6:hs',
+    }),
+  ).toBeFocused()
   await page.keyboard.press('Escape')
   await expect(dialog).toHaveCount(0)
   await expect(review.last()).toBeFocused()

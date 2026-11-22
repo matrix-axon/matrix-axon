@@ -245,6 +245,7 @@ Recovering older messages depends on whether their keys are available in backup.
 
 When a room member's identity changes, **Review identity changes** is available above the room and beside the room and thread composers.
 Accept a new identity for a member you had not verified, or withdraw your previous verification for a verified member whose identity changed.
+After a successful action, keyboard focus moves to the next remaining action or to **Close** when the list is empty.
 You can keep sending while a warning is pending.
 The room and the affected card on **Accounts** also warn when your own Matrix identity changes and point you to device verification and key recovery.
 

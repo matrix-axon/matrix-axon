@@ -1,4 +1,4 @@
-import { useRef, useState } from 'preact/hooks'
+import { useLayoutEffect, useRef, useState } from 'preact/hooks'
 import { apiErrorMessage } from '../api/client'
 import type { components } from '../api/schema'
 import { useServices } from '../services'
@@ -51,6 +51,8 @@ export function RoomIdentityReview({
 }) {
   const { api, roomDetails } = useServices()
   const closeButton = useRef<HTMLButtonElement>(null)
+  const actionList = useRef<HTMLUListElement>(null)
+  const nextActionIndex = useRef<number | null>(null)
   const { containerRef } = useModalFocus<HTMLDivElement>({ restoreTo })
   const inFlight = useRef(false)
   const [busy, setBusy] = useState(false)
@@ -70,7 +72,19 @@ export function RoomIdentityReview({
     { whileTyping: true, capture: true },
   )
 
-  const acknowledge = async (warning: IdentityChange) => {
+  useLayoutEffect(() => {
+    const index = nextActionIndex.current
+    if (busy || index === null) return
+    nextActionIndex.current = null
+    // Removing the row shifts its successor into its place. If the last
+    // row was removed, focus the preceding one or Close for an empty list.
+    const actions = actionList.current?.querySelectorAll('button')
+    const target =
+      actions?.[Math.min(index, actions.length - 1)] ?? closeButton.current
+    target?.focus()
+  }, [acknowledged, busy])
+
+  const acknowledge = async (warning: IdentityChange, index: number) => {
     if (inFlight.current) return
     const withdraw = warning.kind === 'verification_violation'
     inFlight.current = true
@@ -87,6 +101,7 @@ export function RoomIdentityReview({
         },
       )
       if (response.ok) {
+        nextActionIndex.current = index
         setAcknowledged((current) => [...current, warning])
         setFeedback({
           error: false,
@@ -94,7 +109,6 @@ export function RoomIdentityReview({
             ? 'Verification withdrawn.'
             : 'New identity accepted.',
         })
-        closeButton.current?.focus()
       } else {
         setFeedback({ error: true, message: apiErrorMessage(error) })
       }
@@ -154,9 +168,12 @@ export function RoomIdentityReview({
           {remaining.length === 0 ? (
             <p>No identity changes to review.</p>
           ) : (
-            <ul>
-              {remaining.map((warning) => {
+            <ul ref={actionList}>
+              {remaining.map((warning, index) => {
                 const withdraw = warning.kind === 'verification_violation'
+                const action = withdraw
+                  ? 'Withdraw verification'
+                  : 'Accept new identity'
                 return (
                   <li
                     key={JSON.stringify([
@@ -174,11 +191,10 @@ export function RoomIdentityReview({
                     <button
                       type="button"
                       disabled={busy}
-                      onClick={() => void acknowledge(warning)}
+                      aria-label={`${action} for ${warning.user_id}`}
+                      onClick={() => void acknowledge(warning, index)}
                     >
-                      {withdraw
-                        ? 'Withdraw verification'
-                        : 'Accept new identity'}
+                      {action}
                     </button>
                   </li>
                 )

@@ -1260,24 +1260,29 @@ describe('RoomPage', () => {
     const dialog = within(
       await findByRole('dialog', { name: 'Review identity changes' }),
     )
-    fireEvent.click(dialog.getByRole('button', { name: 'Accept new identity' }))
+    fireEvent.click(
+      dialog.getByRole('button', { name: 'Accept new identity for @alice:hs' }),
+    )
     expect(await dialog.findByText(/identity warning changed/)).toBeTruthy()
     await waitFor(() =>
       expect(
-        services.roomDetails.state.value.info.value?.identity_changes?.[0]
-          ?.fingerprint,
+        services.roomDetails.state.value.identityChanges[0]?.fingerprint,
       ).toBe(revision),
     )
     expect(requests).toEqual([
       [ACCOUNT, first.user_id, 'accept', { fingerprint: first.fingerprint }],
     ])
 
-    fireEvent.click(dialog.getByRole('button', { name: 'Accept new identity' }))
+    fireEvent.click(
+      dialog.getByRole('button', { name: 'Accept new identity for @alice:hs' }),
+    )
     expect(await dialog.findByText('New identity accepted.')).toBeTruthy()
     expect(dialog.queryByText(first.user_id)).toBeNull()
-    fireEvent.click(
-      dialog.getByRole('button', { name: 'Withdraw verification' }),
-    )
+    const next = dialog.getByRole('button', {
+      name: 'Withdraw verification for @bob:hs',
+    })
+    expect(document.activeElement).toBe(next)
+    fireEvent.click(next)
     await waitFor(() =>
       expect(
         queryByRole('button', { name: 'Review identity changes' }),
@@ -1292,7 +1297,9 @@ describe('RoomPage', () => {
         { fingerprint: second.fingerprint },
       ],
     ])
-    fireEvent.click(dialog.getByRole('button', { name: 'Close' }))
+    const close = dialog.getByRole('button', { name: 'Close' })
+    expect(document.activeElement).toBe(close)
+    fireEvent.click(close)
     expect(composer.value).toBe('Keep my draft')
 
     services.live.start()

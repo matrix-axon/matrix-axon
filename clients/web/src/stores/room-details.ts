@@ -64,6 +64,7 @@ type RoomMetadataDto = components['schemas']['RoomMetadataDto']
 type RoomHomeserverDetailsDto =
   components['schemas']['RoomHomeserverDetailsDto']
 type RoomInfoDto = components['schemas']['RoomInfoDto']
+type RoomIdentityChangeDto = components['schemas']['RoomIdentityChangeDto']
 type RoomDiscoveryDto = components['schemas']['RoomDiscoveryDto']
 
 /** The three reads this store owns. */
@@ -96,7 +97,10 @@ export interface RoomDetailsState {
   key: string | null
   metadata: RoomDetailsSlot<RoomMetadataDto>
   homeserverDetails: RoomDetailsSlot<RoomHomeserverDetailsDto>
+  /** Panel answers start fresh on open. */
   info: RoomDetailsSlot<RoomInfoDto>
+  /** The last successful room warning snapshot, also refreshed by the timeline. */
+  identityChanges: readonly RoomIdentityChangeDto[]
   /** The space's loaded children; never requested for a room that is not a space. */
   hierarchy: HierarchySlot
   /**
@@ -215,6 +219,7 @@ export function emptyRoomDetails(
     metadata: emptySlot(),
     homeserverDetails: emptySlot(),
     info: emptySlot(),
+    identityChanges: [],
     hierarchy: emptyHierarchy(),
     now,
   }
@@ -485,12 +490,26 @@ export function createRoomDetailsStore(
           owner.dirty.delete(which)
           return
         }
-        const slot = state.value[which]
+        const current = state.value
+        const identityChanges =
+          which === 'info' && result.ok
+            ? ((result.value as RoomInfoDto).identity_changes ?? [])
+            : current.identityChanges
+        // While the panel is closed, /info is read only for identity warnings.
+        // Publishing its member counts would make them visible on the panel's
+        // first render, before the open effect starts its own refresh.
+        const panelResult =
+          which !== 'info' || owner.panelOpen
+            ? {
+                [which]: result.ok
+                  ? { value: result.value, error: null, requested: true }
+                  : { ...current[which], error: result.message },
+              }
+            : {}
         state.value = {
-          ...state.value,
-          [which]: result.ok
-            ? { value: result.value, error: null, requested: true }
-            : { ...slot, error: result.message },
+          ...current,
+          ...panelResult,
+          identityChanges,
           now: Date.now(),
         }
         armClock()
@@ -793,13 +812,13 @@ export function createRoomDetailsStore(
       session.controller.abort()
       stopCrawlRetry(session)
     }
-    const previousInfo =
-      key !== null && key === session?.key ? state.value.info : null
+    const initial = emptyRoomDetails(key, Date.now())
+    if (key !== null && key === session?.key) {
+      initial.identityChanges = state.value.identityChanges
+    }
     session = null
     stopClock()
-    const initial = emptyRoomDetails(key, Date.now())
-    state.value =
-      previousInfo === null ? initial : { ...initial, info: previousInfo }
+    state.value = initial
     if (target === null || key === null) return
     const owner: Session = {
       key,

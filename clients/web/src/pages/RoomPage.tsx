@@ -1524,7 +1524,7 @@ export function RoomPage() {
   const details = roomDetails.state.value
   const identityChanges =
     watchIdentity && details.key === detailsKey
-      ? (details.info.value?.identity_changes ?? []).filter(
+      ? details.identityChanges.filter(
           (warning) =>
             warning.kind === 'pin_violation' ||
             warning.kind === 'verification_violation',

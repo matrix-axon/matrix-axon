@@ -159,8 +159,8 @@ function renderPanel(
   roomId: string,
   extra: Partial<RoomDto> = {},
   roomTitles: ReadonlyMap<string, string> = new Map(),
+  services = testServices(),
 ) {
-  const services = testServices()
   const members = createMembersStore(services.api, ACCOUNT, roomId)
   const view = render(
     <ServicesContext.Provider value={services}>
@@ -315,6 +315,73 @@ it('reports a failed room-state read instead of pending forever', async () => {
   await waitFor(() =>
     expect(document.querySelector('.room-info-details-error')).toBeNull(),
   )
+})
+
+it('loads fresh member counts when opening over the timeline and retries a failed read', async () => {
+  const services = testServices()
+  const warning = {
+    user_id: '@alice:hs',
+    kind: 'pin_violation',
+    fingerprint: 'a'.repeat(64),
+  }
+  let joined = 9
+  let response: Promise<Response> | undefined
+  server.use(
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/info`,
+      () =>
+        response ??
+        HttpResponse.json({
+          data: {
+            member_counts: { joined, invited: 0, observed_at: 0 },
+            identity_changes: [warning],
+          },
+        }),
+    ),
+    ...handlers(),
+  )
+  services.roomDetails.watchInfo({
+    accountId: ACCOUNT,
+    roomId: FIRST,
+    joined: true,
+  })
+  await waitFor(() =>
+    expect(services.roomDetails.state.value.identityChanges).toEqual([warning]),
+  )
+
+  let failRead: (response: Response) => void
+  response = new Promise<Response>((resolve) => {
+    failRead = resolve
+  })
+  const { container, getByRole, findByText, members } = renderPanel(
+    FIRST,
+    {},
+    new Map(),
+    services,
+  )
+  expect(detail('Members')).toBe('Loading…')
+  expect(services.roomDetails.state.value.identityChanges).toEqual([warning])
+  await members.refresh()
+  expect(container.querySelector('.room-info-member-coverage')).toBeNull()
+
+  failRead!(
+    HttpResponse.json(
+      { error: { code: 'unavailable', message: 'offline' } },
+      { status: 503 },
+    ),
+  )
+  expect(await findByText('Could not load member counts: offline')).toBeTruthy()
+  expect(detail('Members')).toBe('Unavailable')
+  expect(services.roomDetails.state.value.identityChanges).toEqual([warning])
+  expect(container.querySelector('.room-info-member-coverage')).toBeNull()
+
+  response = undefined
+  joined = 4
+  fireEvent.click(getByRole('button', { name: 'Retry' }))
+  await waitFor(() => expect(detail('Members')).toBe('4 joined · 0 invited'))
+  expect(
+    container.querySelector('.room-info-member-coverage')?.textContent,
+  ).toContain('Showing 0 of 4 joined members')
 })
 
 it('confirms before joining a relationship link, and reports a failed join', async () => {
