@@ -9,9 +9,11 @@
 //! cancellation token drives graceful shutdown.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use axon_core::PushMaterial;
 use axon_core::{
     AccountDataFrame, EphemeralFrame, InviteAddedFrame, InviteRemovedFrame, LiveEvent, LiveFrame,
@@ -20,8 +22,9 @@ use axon_core::{
 use axon_media::MediaCacheHandle;
 use axon_search::IndexHandle;
 use axon_store::{
-    Account, AccountAuthKind, AccountDataUpsert, EventCiphertext, NewEvent, RoomInviteSnapshot,
-    RoomStateRedaction, RoomStateUpsert, Store,
+    Account, AccountAuthKind, AccountDataUpsert, EventCiphertext, EventCrypto, NewEvent,
+    PendingUtd, RoomInviteSnapshot, RoomStateRedaction, RoomStateUpsert, Store, StoreError,
+    UpsertedEvent,
 };
 use matrix_sdk::config::RequestConfig;
 use matrix_sdk::deserialized_responses::EncryptionInfo;
@@ -834,15 +837,23 @@ pub(crate) async fn persist_timeline_event(
     .then(|| crate::meta::redacts(&raw_val).map(str::to_owned))
     .flatten();
     // The live sync path: persist and emit the fresh event to `/v1/ws`. A UTD
-    // gets one local decryption retry first (see `UtdCheck::Recheck`), which
-    // records its reason, so nothing comes back.
-    let _ = persist_event_core(
-        &ctx,
+    // gets one local decryption retry first (see [`persist_live_event`]), which
+    // records its reason, so nothing comes back. This handler passes
+    // [`LiveUtdRecheck`]. The unit tests call [`persist_live_event`] with their
+    // own counter, so they do not cover this call (#949, #1220).
+    let recheck = LiveUtdRecheck {
+        room: &room,
+        store: &ctx.store,
+        account_id: ctx.account_id,
+        index: ctx.index.as_ref(),
+    };
+    let _ = persist_live_event(
+        &ingest_from(&ctx),
         &ev,
         raw_val,
         room.room_id().as_str(),
         enc_info.as_ref(),
-        UtdCheck::Recheck(&room),
+        &recheck,
     )
     .await;
     if let Some(target) = redaction_target {
@@ -897,7 +908,7 @@ pub(crate) async fn persist_backfilled_event(
     };
     // The paged event already carries the SDK's failure reason.
     persist_event_core(
-        ctx,
+        &ingest_from(ctx),
         &ev,
         raw_val,
         room.room_id().as_str(),
@@ -911,8 +922,8 @@ pub(crate) async fn persist_backfilled_event(
 /// decision 2), which also selects the live or the backfill path.
 enum UtdCheck<'a> {
     /// The live path. The SDK's event handler passes no failure reason, so a
-    /// UTD gets one local decryption retry in `room` after its row is written,
-    /// and the retry's reason is recorded and carried on the live frame.
+    /// UTD gets one local decryption retry after its row is written, and the
+    /// retry's reason is recorded and carried on the live frame.
     ///
     /// The retry also closes a race: the SDK tried to decrypt this event before
     /// the row was written. If its megolm key landed in between (a backup
@@ -920,10 +931,131 @@ enum UtdCheck<'a> {
     /// `redecrypt::run` ran against a table that did not have the row yet and
     /// will not run again, so the row would stay a UTD until the next restart
     /// (#938).
-    Recheck(&'a Room),
+    ///
+    /// [`persist_live_event`] passes this variant, and its tests do too.
+    /// Those tests do not call [`persist_timeline_event`] (#1220).
+    Recheck(&'a dyn PersistedUtdRecheck),
     /// The backfill path: the SDK's reason for a paged UTD, handed back to the
     /// caller to record with its page. Nothing is emitted live.
     Known(Option<axon_core::UtdReason>),
+}
+
+/// One local decryption attempt for a UTD row that was just written.
+///
+/// [`persist_event_core`] calls this once for a live `m.room.encrypted` row
+/// and never for any other event. [`LiveUtdRecheck`] is the production
+/// implementation; it delegates to [`redecrypt::recheck_persisted_utd`].
+#[async_trait]
+trait PersistedUtdRecheck: Send + Sync {
+    async fn recheck(&self, row: &PendingUtd) -> redecrypt::Attempt;
+}
+
+/// The live path's re-check: one local decrypt of `row` in `room`.
+struct LiveUtdRecheck<'a> {
+    room: &'a Room,
+    store: &'a Store,
+    account_id: Uuid,
+    index: Option<&'a IndexHandle>,
+}
+
+#[async_trait]
+impl PersistedUtdRecheck for LiveUtdRecheck<'_> {
+    async fn recheck(&self, row: &PendingUtd) -> redecrypt::Attempt {
+        redecrypt::recheck_persisted_utd(self.room, self.store, self.account_id, row, self.index)
+            .await
+    }
+}
+
+/// The event-row writes [`persist_event_core`] makes.
+///
+/// [`Store`] is the production adapter. A test supplies its own so the re-check
+/// above can be counted without Postgres: an ignored database test would miss
+/// pull requests the same way the gap in #949 did.
+///
+/// Not object-safe on purpose. A generic bound keeps these calls from boxing a
+/// future on every event; only the `dyn` re-check above has to. The `Send`
+/// bound is what an `async fn` in a trait does not promise on its own.
+trait TimelineWrite: Send + Sync {
+    fn upsert_event_outcome<'a>(
+        &'a self,
+        ev: &'a NewEvent<'_>,
+    ) -> impl Future<Output = Result<UpsertedEvent, StoreError>> + Send + 'a;
+    fn insert_event_ciphertext<'a>(
+        &'a self,
+        row: &'a EventCiphertext<'_>,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send + 'a;
+    fn upsert_event_crypto<'a>(
+        &'a self,
+        row: &'a EventCrypto<'_>,
+    ) -> impl Future<Output = Result<Option<String>, StoreError>> + Send + 'a;
+}
+
+impl TimelineWrite for Store {
+    async fn upsert_event_outcome(&self, ev: &NewEvent<'_>) -> Result<UpsertedEvent, StoreError> {
+        Store::upsert_event_outcome(self, ev).await
+    }
+
+    async fn insert_event_ciphertext(&self, row: &EventCiphertext<'_>) -> Result<(), StoreError> {
+        Store::insert_event_ciphertext(self, row).await
+    }
+
+    async fn upsert_event_crypto(
+        &self,
+        row: &EventCrypto<'_>,
+    ) -> Result<Option<String>, StoreError> {
+        Store::upsert_event_crypto(self, row).await
+    }
+}
+
+/// What [`persist_event_core`] needs from the account run, apart from the event
+/// itself. Split out of [`PersistContext`] so a test can drive the ingest path
+/// without a connected [`Store`].
+struct Ingest<'a, S: TimelineWrite> {
+    account_id: Uuid,
+    rows: &'a S,
+    live_tx: &'a broadcast::Sender<LiveFrame>,
+    index: Option<&'a IndexHandle>,
+}
+
+fn ingest_from(ctx: &PersistContext) -> Ingest<'_, Store> {
+    Ingest {
+        account_id: ctx.account_id,
+        rows: &ctx.store,
+        live_tx: &ctx.live_tx,
+        index: ctx.index.as_ref(),
+    }
+}
+
+/// Persist one event from the live sync handler.
+///
+/// [`persist_timeline_event`] is that handler. It builds [`LiveUtdRecheck`]
+/// from the room and calls this with [`ingest_from`]. The re-check variant is
+/// fixed here: a UTD is attempted once after its row is written. Backfill does
+/// not call this. It passes the SDK's reason to [`persist_event_core`] as
+/// [`UtdCheck::Known`] and emits nothing.
+///
+/// The unit tests call this function with their own [`PersistedUtdRecheck`].
+/// Changing the variant here to [`UtdCheck::Known`], or dropping the attempt,
+/// fails `cargo test` (#949). That is the live re-check #938 added.
+/// The tests do not call [`persist_timeline_event`], so that handler can stop
+/// using this function without a test failing (#1220).
+async fn persist_live_event<S: TimelineWrite>(
+    ingest: &Ingest<'_, S>,
+    ev: &AnySyncTimelineEvent,
+    raw_val: serde_json::Value,
+    room_id: &str,
+    enc_info: Option<&EncryptionInfo>,
+    recheck: &dyn PersistedUtdRecheck,
+) -> Result<Persisted, EventWriteFailed> {
+    persist_event_core(
+        ingest,
+        ev,
+        raw_val,
+        room_id,
+        enc_info,
+        UtdCheck::Recheck(recheck),
+    )
+    .await
 }
 
 /// Persist one timeline event — live ([`UtdCheck::Recheck`]) or backfilled
@@ -940,8 +1072,8 @@ enum UtdCheck<'a> {
 /// for the caller to record. A failed event-row write is [`EventWriteFailed`],
 /// unless the database rejected the event's values: that one is logged at
 /// ERROR and skipped.
-async fn persist_event_core(
-    ctx: &PersistContext,
+async fn persist_event_core<S: TimelineWrite>(
+    ingest: &Ingest<'_, S>,
     ev: &AnySyncTimelineEvent,
     raw_val: serde_json::Value,
     room_id: &str,
@@ -1010,7 +1142,7 @@ async fn persist_event_core(
     let new_ev = NewEvent {
         event_id: &event_id,
         room_id: &room_id,
-        account_id: ctx.account_id,
+        account_id: ingest.account_id,
         sender: ev.sender().as_str(),
         origin_ts,
         event_type: &event_type,
@@ -1025,11 +1157,11 @@ async fn persist_event_core(
     // The returned id is the event's arrival order, which the live frame carries
     // so a `/v1/ws` subscriber and a later timeline read agree on it (ADR 0089).
     // Don't write sibling rows if the event row didn't land — they FK to it.
-    let (arrival_order, created) = match ctx.store.upsert_event_outcome(&new_ev).await {
+    let (arrival_order, created) = match ingest.rows.upsert_event_outcome(&new_ev).await {
         Ok(upserted) => (upserted.arrival_order, upserted.created),
         Err(err) if !err.is_value_rejection() => {
             tracing::warn!(
-                account_id = %ctx.account_id,
+                account_id = %ingest.account_id,
                 event_id = %event_id,
                 error = %err,
                 "failed to persist event"
@@ -1041,7 +1173,7 @@ async fn persist_event_core(
             // same way and a pager must not wait for it: the event is lost, as
             // one that does not parse is.
             tracing::error!(
-                account_id = %ctx.account_id,
+                account_id = %ingest.account_id,
                 event_id = %event_id,
                 room_id = %room_id,
                 error = %err,
@@ -1051,7 +1183,7 @@ async fn persist_event_core(
         }
     };
     tracing::debug!(
-        account_id = %ctx.account_id,
+        account_id = %ingest.account_id,
         event_id = %event_id,
         room_id = %room_id,
         event_type = event_type.as_str(),
@@ -1065,7 +1197,7 @@ async fn persist_event_core(
     // `upsert_event`, so this is only a best-effort wakeup hint: a dropped notify
     // costs nothing because the next drain (a later notify, the periodic tick, or a
     // restart) still applies the on-disk obligation.
-    if let Some(index) = ctx.index.as_ref() {
+    if let Some(index) = ingest.index {
         index.notify();
     }
 
@@ -1074,20 +1206,20 @@ async fn persist_event_core(
     // (the `COALESCE`d snapshot), not the freshly-derived one — they diverge on a
     // duplicate delivery whose trust changed, and a live subscriber must see the
     // same immutable snapshot a later timeline read returns (ADR 0031).
-    let stored_trust = persist_event_siblings(ctx, &event_id, &room_id, ciphertext, enc_info).await;
+    let stored_trust = persist_event_siblings(
+        ingest.rows,
+        ingest.account_id,
+        &event_id,
+        &room_id,
+        ciphertext,
+        enc_info,
+    )
+    .await;
 
     let emit_live = matches!(utd, UtdCheck::Recheck(_));
     let utd_reason = match (pending_utd, utd) {
-        (Some(row), UtdCheck::Recheck(room)) => {
-            match redecrypt::recheck_persisted_utd(
-                room,
-                &ctx.store,
-                ctx.account_id,
-                &row,
-                ctx.index.as_ref(),
-            )
-            .await
-            {
+        (Some(row), UtdCheck::Recheck(recheck)) => {
+            match recheck.recheck(&row).await {
                 redecrypt::Attempt::StillUtd(reason) => Some(reason),
                 // Back-filled: the frame below still describes the UTD that
                 // arrived, as it did before reasons were kept; a timeline read
@@ -1112,12 +1244,12 @@ async fn persist_event_core(
     // don't clone the content needlessly. `send` errors only when there are no
     // receivers — harmless to ignore (a receiver may have dropped between the
     // count check and the send), and never fatal to sync.
-    if emit_live && ctx.live_tx.receiver_count() > 0 {
+    if emit_live && ingest.live_tx.receiver_count() > 0 {
         // The effective stored verdict, so a live subscriber and a subsequent
         // timeline read agree. `None` for UTDs (no `enc_info` yet) and unencrypted
         // events.
-        let _ = ctx.live_tx.send(LiveFrame::Timeline(LiveEvent {
-            account_id: ctx.account_id,
+        let _ = ingest.live_tx.send(LiveFrame::Timeline(LiveEvent {
+            account_id: ingest.account_id,
             event_id: event_id.clone(),
             room_id: room_id.clone(),
             sender: ev.sender().as_str().to_owned(),
@@ -1145,8 +1277,9 @@ async fn persist_event_core(
 /// carrying the persisted snapshot rather than the freshly-derived verdict — they
 /// diverge on a duplicate delivery whose trust changed (ADR 0031). `None` for a
 /// UTD (no `enc_info`), an unencrypted event, or if the sibling write failed.
-async fn persist_event_siblings(
-    ctx: &PersistContext,
+async fn persist_event_siblings<S: TimelineWrite>(
+    rows: &S,
+    account_id: Uuid,
     event_id: &str,
     room_id: &str,
     ciphertext: Option<serde_json::Value>,
@@ -1167,7 +1300,7 @@ async fn persist_event_siblings(
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
         let row = EventCiphertext {
-            account_id: ctx.account_id,
+            account_id,
             event_id,
             room_id,
             algorithm: &algorithm,
@@ -1175,21 +1308,20 @@ async fn persist_event_siblings(
             session_id: session_id.as_deref(),
             ciphertext,
         };
-        if let Err(err) = ctx.store.insert_event_ciphertext(&row).await {
-            tracing::warn!(account_id = %ctx.account_id, event_id, error = %err, "failed to persist ciphertext sibling");
+        if let Err(err) = rows.insert_event_ciphertext(&row).await {
+            tracing::warn!(%account_id, event_id, error = %err, "failed to persist ciphertext sibling");
         }
     }
 
     if let Some(info) = enc_info {
         let meta = crate::meta::crypto_meta(info);
-        match ctx
-            .store
-            .upsert_event_crypto(&meta.as_event_crypto(ctx.account_id, event_id))
+        match rows
+            .upsert_event_crypto(&meta.as_event_crypto(account_id, event_id))
             .await
         {
             Ok(stored_trust) => return stored_trust,
             Err(err) => {
-                tracing::warn!(account_id = %ctx.account_id, event_id, error = %err, "failed to persist crypto sibling");
+                tracing::warn!(%account_id, event_id, error = %err, "failed to persist crypto sibling");
             }
         }
     }
@@ -5202,5 +5334,331 @@ mod purge_ingestion_tests {
                 server.abort();
             }
         }
+    }
+}
+
+/// #949: [`persist_live_event`] rechecks a stored UTD and skips every other event.
+/// Switching that function to [`UtdCheck::Known`], or dropping the attempt,
+/// fails here under `cargo test`, without Postgres or a megolm session.
+/// These tests do not call [`persist_timeline_event`] (#1220).
+#[cfg(test)]
+mod persisted_utd_recheck_tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use axon_core::{LiveFrame, UtdReason, UtdReasonKind};
+    use matrix_sdk::deserialized_responses::{AlgorithmInfo, EncryptionInfo, VerificationState};
+    use matrix_sdk::ruma::events::AnySyncTimelineEvent;
+    use matrix_sdk::ruma::user_id;
+    use serde_json::{json, Value};
+    use tokio::sync::broadcast;
+    use uuid::Uuid;
+
+    use super::{persist_live_event, Ingest, PersistedUtdRecheck, TimelineWrite};
+    use crate::redecrypt::Attempt;
+    use axon_store::{
+        EventCiphertext, EventCrypto, NewEvent, PendingUtd, StoreError, UpsertedEvent,
+    };
+
+    struct Log {
+        stored: Vec<String>,
+        /// Event id, and whether that row was already stored when the attempt ran.
+        attempts: Vec<(String, bool)>,
+        ciphertext: Vec<String>,
+        /// Event id and the `sender_trust` the crypto row carried in.
+        crypto_trust: Vec<(String, Option<String>)>,
+    }
+
+    struct FakeRows {
+        log: Arc<Mutex<Log>>,
+        fail: bool,
+        fail_crypto: bool,
+        /// What a successful crypto upsert reports as the stored verdict.
+        stored_trust: Option<String>,
+    }
+
+    impl TimelineWrite for FakeRows {
+        async fn upsert_event_outcome(
+            &self,
+            ev: &NewEvent<'_>,
+        ) -> Result<UpsertedEvent, StoreError> {
+            if self.fail {
+                return Err(StoreError::Sqlx(sqlx_core::Error::PoolClosed));
+            }
+            self.log
+                .lock()
+                .expect("log")
+                .stored
+                .push(ev.event_id.to_owned());
+            Ok(UpsertedEvent {
+                arrival_order: 7,
+                created: true,
+            })
+        }
+
+        async fn insert_event_ciphertext(
+            &self,
+            row: &EventCiphertext<'_>,
+        ) -> Result<(), StoreError> {
+            self.log
+                .lock()
+                .expect("log")
+                .ciphertext
+                .push(row.event_id.to_owned());
+            Ok(())
+        }
+
+        async fn upsert_event_crypto(
+            &self,
+            row: &EventCrypto<'_>,
+        ) -> Result<Option<String>, StoreError> {
+            if self.fail_crypto {
+                return Err(StoreError::Sqlx(sqlx_core::Error::PoolClosed));
+            }
+            self.log
+                .lock()
+                .expect("log")
+                .crypto_trust
+                .push((row.event_id.to_owned(), row.sender_trust.map(str::to_owned)));
+            Ok(self.stored_trust.clone())
+        }
+    }
+
+    struct CountingRecheck {
+        log: Arc<Mutex<Log>>,
+        outcome: Attempt,
+    }
+
+    #[async_trait]
+    impl PersistedUtdRecheck for CountingRecheck {
+        async fn recheck(&self, row: &PendingUtd) -> Attempt {
+            let mut log = self.log.lock().expect("log");
+            let stored = log.stored.iter().any(|id| id == &row.event_id);
+            log.attempts.push((row.event_id.clone(), stored));
+            self.outcome.clone()
+        }
+    }
+
+    fn message(id: &str) -> Value {
+        json!({
+            "type": "m.room.message",
+            "sender": "@alice:example.org",
+            "event_id": id,
+            "origin_server_ts": 1_700_000_000_000_u64,
+            "content": {"msgtype": "m.text", "body": "hello"}
+        })
+    }
+
+    fn encrypted(id: &str) -> Value {
+        json!({
+            "type": "m.room.encrypted",
+            "sender": "@alice:example.org",
+            "event_id": id,
+            "origin_server_ts": 1_700_000_000_000_u64,
+            "content": {
+                "algorithm": "m.megolm.v1.aes-sha2",
+                "ciphertext": "cipher",
+                "sender_key": "key",
+                "device_id": "DEV",
+                "session_id": "session-abc"
+            }
+        })
+    }
+
+    struct Drive {
+        fail_row: bool,
+        fail_crypto: bool,
+        stored_trust: Option<String>,
+        enc_info: Option<EncryptionInfo>,
+    }
+
+    fn plain(fail_row: bool) -> Drive {
+        Drive {
+            fail_row,
+            fail_crypto: false,
+            stored_trust: None,
+            enc_info: None,
+        }
+    }
+
+    /// A verified Olm decryption, so `crypto_meta` yields `sender_trust =
+    /// "verified"`. The frame must carry the store's return value instead.
+    fn verified_olm() -> EncryptionInfo {
+        EncryptionInfo {
+            sender: user_id!("@alice:example.org").to_owned(),
+            sender_device: None,
+            forwarder: None,
+            algorithm_info: AlgorithmInfo::OlmV1Curve25519AesSha2 {
+                curve25519_public_key_base64: "curve".to_owned(),
+            },
+            verification_state: VerificationState::Verified,
+        }
+    }
+
+    struct Observed {
+        log: Log,
+        frame: Option<axon_core::LiveEvent>,
+        failed: bool,
+    }
+
+    async fn observe(raw: Value, outcome: Attempt, drive: Drive) -> Observed {
+        let log = Arc::new(Mutex::new(Log {
+            stored: Vec::new(),
+            attempts: Vec::new(),
+            ciphertext: Vec::new(),
+            crypto_trust: Vec::new(),
+        }));
+        let rows = FakeRows {
+            log: Arc::clone(&log),
+            fail: drive.fail_row,
+            fail_crypto: drive.fail_crypto,
+            stored_trust: drive.stored_trust,
+        };
+        let recheck = CountingRecheck {
+            log: Arc::clone(&log),
+            outcome,
+        };
+        let (live_tx, mut rx) = broadcast::channel(4);
+        let ev: AnySyncTimelineEvent = serde_json::from_value(raw.clone()).expect("event");
+        let result = persist_live_event(
+            &Ingest {
+                account_id: Uuid::nil(),
+                rows: &rows,
+                live_tx: &live_tx,
+                index: None,
+            },
+            &ev,
+            raw,
+            "!room:example.org",
+            drive.enc_info.as_ref(),
+            &recheck,
+        )
+        .await;
+        let frame = match rx.try_recv() {
+            Ok(LiveFrame::Timeline(event)) => Some(event),
+            Ok(other) => panic!("unexpected live frame: {other:?}"),
+            Err(_) => None,
+        };
+        let log = log.lock().expect("log");
+        Observed {
+            log: Log {
+                stored: log.stored.clone(),
+                attempts: log.attempts.clone(),
+                ciphertext: log.ciphertext.clone(),
+                crypto_trust: log.crypto_trust.clone(),
+            },
+            frame,
+            failed: result.is_err(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_persisted_utd_is_rechecked_once() {
+        let observed = observe(
+            encrypted("$utd:example.org"),
+            Attempt::StillUtd(UtdReason::new(UtdReasonKind::MissingKey)),
+            plain(false),
+        )
+        .await;
+        assert!(!observed.failed);
+        assert_eq!(observed.log.stored, ["$utd:example.org"]);
+        assert_eq!(observed.log.ciphertext, ["$utd:example.org"]);
+        assert!(observed.log.crypto_trust.is_empty());
+        assert_eq!(
+            observed.log.attempts,
+            [("$utd:example.org".to_owned(), true)],
+            "the one attempt runs after the row is stored"
+        );
+        let frame = observed.frame.expect("live frame");
+        assert_eq!(frame.event_id, "$utd:example.org");
+        assert_eq!(frame.event_type, "m.room.encrypted");
+        assert!(frame.content.is_none());
+        assert_eq!(
+            frame.utd_reason,
+            Some(UtdReason::new(UtdReasonKind::MissingKey))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_persisted_message_is_not_rechecked() {
+        let observed = observe(
+            message("$msg:example.org"),
+            Attempt::StillUtd(UtdReason::new(UtdReasonKind::MissingKey)),
+            plain(false),
+        )
+        .await;
+        assert!(!observed.failed);
+        assert_eq!(observed.log.stored, ["$msg:example.org"]);
+        assert!(
+            observed.log.attempts.is_empty(),
+            "a decrypted event must not be rechecked"
+        );
+        let frame = observed.frame.expect("live frame");
+        assert_eq!(frame.event_type, "m.room.message");
+        assert!(frame.utd_reason.is_none());
+        assert!(frame.content.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_failed_persist_is_not_rechecked() {
+        let observed = observe(
+            encrypted("$utd:example.org"),
+            Attempt::StillUtd(UtdReason::new(UtdReasonKind::MissingKey)),
+            plain(true),
+        )
+        .await;
+        assert!(observed.failed);
+        assert!(observed.log.stored.is_empty());
+        assert!(observed.log.ciphertext.is_empty());
+        assert!(observed.log.attempts.is_empty());
+        assert!(observed.frame.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_decrypted_frame_carries_the_stored_trust() {
+        let observed = observe(
+            message("$msg:example.org"),
+            Attempt::Decrypted,
+            Drive {
+                fail_row: false,
+                fail_crypto: false,
+                stored_trust: Some("kept".to_owned()),
+                enc_info: Some(verified_olm()),
+            },
+        )
+        .await;
+        assert!(!observed.failed);
+        assert!(observed.log.attempts.is_empty());
+        assert!(observed.log.ciphertext.is_empty());
+        assert_eq!(
+            observed.log.crypto_trust,
+            [("$msg:example.org".to_owned(), Some("verified".to_owned()))],
+            "the crypto row carries the verdict derived from enc_info"
+        );
+        let frame = observed.frame.expect("live frame");
+        assert_eq!(frame.sender_trust.as_deref(), Some("kept"));
+        assert!(frame.utd_reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_failed_crypto_sibling_still_emits_the_frame() {
+        let observed = observe(
+            message("$msg:example.org"),
+            Attempt::Decrypted,
+            Drive {
+                fail_row: false,
+                fail_crypto: true,
+                stored_trust: Some("kept".to_owned()),
+                enc_info: Some(verified_olm()),
+            },
+        )
+        .await;
+        assert!(!observed.failed);
+        assert_eq!(observed.log.stored, ["$msg:example.org"]);
+        assert!(observed.log.crypto_trust.is_empty());
+        assert!(observed.log.attempts.is_empty());
+        let frame = observed.frame.expect("live frame");
+        assert!(frame.sender_trust.is_none());
+        assert!(frame.content.is_some());
     }
 }
