@@ -67,7 +67,7 @@ jobs:
     # macOS 26 for its Xcode 26 and iOS 26 SDK: App Store Connect rejects uploads
     # made with an older one, after the build and the upload have succeeded. The
     # Xcode step below checks it rather than trusting the image.
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 60
     env:
       BUILD_NUMBER: ${{ inputs.build_number }}
@@ -276,7 +276,7 @@ jobs:
   macos:
     name: Build for the Mac App Store
     if: ${{ inputs.platform == 'macos' || inputs.platform == 'both' }}
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 90
     env:
       BUILD_NUMBER: ${{ inputs.build_number }}
