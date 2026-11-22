@@ -1,3 +1,6 @@
+import { createMemberDirectory } from '../stores/member-directory'
+import { createMembersStoreCache } from '../stores/members'
+import { createThreadsStoreCache } from '../stores/threads'
 import { signal } from '@preact/signals'
 import { createServerCapabilities } from '../stores/capabilities'
 import { createApiClient } from '../api/client'
@@ -23,6 +26,9 @@ import {
   connectLinkPreviewCacheReset,
   connectLinkedEventCacheReset,
   connectThreadReadMarkers,
+  connectRoomCachesReset,
+  forgetAccountCaches,
+  connectTimelineCacheLive,
   connectTimelineCacheReset,
   connectUnreadCounts,
   connectUpdateChecks,
@@ -144,13 +150,23 @@ export function testServices(
   const api = createApiClient(auth, TEST_BASE_URL)
   const media = createMediaService({ auth, baseUrl: TEST_BASE_URL })
   const timelines = createTimelineStoreCache(api, media)
+  const memberDirectory = createMemberDirectory()
+  const memberStores = createMembersStoreCache(api, memberDirectory)
+  const threadStores = createThreadsStoreCache(api)
   const attachments = createAttachmentStaging()
   const settings = createSettingsStore(storage)
   // Mirrors `createServices`: instrumentation on before the stores that mark.
   if (settings.perfMarks.peek()) {
     setPerfEnabled(true)
   }
-  const accounts = createAccountsStore(api)
+  const accounts = createAccountsStore(api, async (accountId) => {
+    forgetAccountCaches(accountId, {
+      timelines,
+      memberStores,
+      memberDirectory,
+      threadStores,
+    })
+  })
   const matrixOAuthQr = createMatrixOAuthQrStore(api, accounts, {
     storage: options.pendingStorage ?? memoryStorage(),
     // Interaction tests finish inside Testing Library's 1s waitFor. The
@@ -184,6 +200,9 @@ export function testServices(
         ),
       enabled: () => settings.cacheRoomList.peek(),
     }),
+    {
+      memberDirectory,
+    },
   )
   const search = createSearchStore(api)
   const threadUnread = createThreadUnreadStore(
@@ -269,7 +288,9 @@ export function testServices(
   connectEphemeralPassthrough(live, ephemeral)
   connectReadMarkers(live, deviceState, rooms)
   connectThreadReadMarkers(live, threadUnread, deviceState)
+  connectTimelineCacheLive(live, timelines)
   connectTimelineCacheReset(auth, timelines)
+  connectRoomCachesReset(auth, { memberStores, memberDirectory, threadStores })
   connectCacheReset(auth, cache)
   connectRoomsSessionReset(auth, rooms)
   connectMatrixOAuthQrSessionReset(
@@ -299,6 +320,9 @@ export function testServices(
     }),
     updates,
     timelines,
+    memberStores,
+    memberDirectory,
+    threadStores,
     cache,
     telemetry,
     attachments,

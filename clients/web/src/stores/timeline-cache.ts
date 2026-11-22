@@ -1,6 +1,10 @@
 import type { ApiClient } from '../api/client'
 import type { MediaService } from '../media/media-service'
-import { createTimelineStore, type TimelineStore } from './timeline'
+import {
+  createTimelineStore,
+  type EventDto,
+  type TimelineStore,
+} from './timeline'
 
 /**
  * How many rooms keep a warm timeline store. The same cap ADR 0085 sets for
@@ -25,11 +29,17 @@ export const TIMELINE_STORE_LIMIT = 30
  * That is the room switch a desktop tab pays over and over. Holding the store
  * instead makes re-entry paint immediately and reconcile in place.
  *
- * A cached store is *stale by construction*: live frames only reach the
- * mounted room (`RoomPage`'s subscription), so anything cached here stopped
- * receiving them the moment the user left. Re-entry must therefore gap-fill —
- * `loadLatest()` over a populated slice is `refreshHead`'s merge (ADR 0061),
- * which is exactly the reconciliation a slice that sat idle needs.
+ * Every warm store, mounted or not, keeps taking live frames (`ingestLive`,
+ * fed by `connectTimelineCacheLive`). This matters on a slow link: the room
+ * list's preview already shows a new message, so a room that opens without it
+ * looks broken while the re-entry head fetch is still in flight.
+ *
+ * A cached store is still *possibly stale*, though. The socket is lossy and
+ * has no cursor, and a frame can arrive while the socket is down or while the
+ * slice is parked in history. Re-entry must therefore still gap-fill —
+ * `loadLatest()` over a populated slice is `refreshHead`'s merge (ADR 0061).
+ * Live ingest only means the newest messages are usually painted before that
+ * merge lands, not that the merge can be skipped.
  */
 export interface TimelineStoreCache {
   /**
@@ -37,6 +47,30 @@ export interface TimelineStoreCache {
    * the caller still owns the gap-fill (see the note above).
    */
   acquire(accountId: string, roomId: string): TimelineStore
+  /**
+   * Pin a room's store while a page shows it; returns the release. A held
+   * store is never evicted, and `acquire` hands it back as it is, rather than
+   * rebuilding a slice the page is still reading. Live frames reach the open
+   * room only through this cache (`ingestLive`), so an evicted store would
+   * leave the page frozen until the next gap-fill. Holds count, so two
+   * holders of one room each release their own.
+   *
+   * Frames routed to a held store are not "while away": the store's
+   * `takeLiveAppended` count covers only frames that arrived with no holder.
+   */
+  hold(accountId: string, roomId: string): () => void
+  /**
+   * Route a live timeline frame to its room's warm store, if one is cached.
+   * Builds no store for a room that has none, and leaves LRU order alone: a
+   * frame is not a visit. This is the *only* live path into a cached store,
+   * mounted room included, so no frame is ingested twice.
+   */
+  ingestLive(event: EventDto): void
+  /**
+   * Drop one account's stores, unsent echoes included: the account was logged
+   * out or deleted, so nothing it queued can be sent any more.
+   */
+  forgetAccount(accountId: string): void
   /** Drop every store, unsent echoes included. Sign-out only. */
   clear(): void
   /**
@@ -92,16 +126,19 @@ export function createTimelineStoreCache(
    * character), as `media-service.ts` does.
    */
   const stores = new Map<string, TimelineStore>()
+  /** Holders per key (`hold`). A key with none is absent, not zero. */
+  const holds = new Map<string, number>()
 
   function evict(exempt: string): void {
     for (const [key, store] of stores) {
       if (stores.size <= limit) {
         return
       }
-      // The store just handed out is never a victim, and unsent work pins its
-      // store. With everything pinned the cache runs over the cap rather than
-      // dropping a message — bounded by how many rooms have a send in flight.
-      if (key === exempt || holdsUnsentWork(store)) {
+      // The store just handed out is never a victim, nor one a page shows, and
+      // unsent work pins its store. With everything pinned the cache runs over
+      // the cap rather than dropping a message or freezing an open room —
+      // bounded by the rooms with a send in flight, plus the open ones.
+      if (key === exempt || holds.has(key) || holdsUnsentWork(store)) {
         continue
       }
       stores.delete(key)
@@ -125,6 +162,14 @@ export function createTimelineStoreCache(
     acquire(accountId, roomId) {
       const key = `${accountId}\0${roomId}`
       const warm = stores.get(key)
+      if (warm !== undefined && holds.has(key)) {
+        // A page is showing this store: hand it over untouched. Rebuilding it
+        // would dispose what the page is reading, and resuming at the head or
+        // clearing its banner would change the page under the reader.
+        stores.delete(key)
+        stores.set(key, warm)
+        return warm
+      }
       if (warm !== undefined && reusable(warm)) {
         stores.delete(key)
         stores.set(key, warm)
@@ -148,6 +193,47 @@ export function createTimelineStoreCache(
       stores.set(key, store)
       evict(key)
       return store
+    },
+
+    hold(accountId, roomId) {
+      const key = `${accountId}\0${roomId}`
+      holds.set(key, (holds.get(key) ?? 0) + 1)
+      let released = false
+      return () => {
+        if (released) {
+          return
+        }
+        released = true
+        const left = (holds.get(key) ?? 1) - 1
+        if (left > 0) {
+          holds.set(key, left)
+        } else {
+          holds.delete(key)
+        }
+      }
+    },
+
+    ingestLive(event) {
+      const key = `${event.account_id}\0${event.room_id}`
+      const store = stores.get(key)
+      if (store === undefined) {
+        return
+      }
+      store.ingestLive(event)
+      if (holds.has(key)) {
+        // Shown as it arrives, so not a row the next open was spared.
+        store.takeLiveAppended()
+      }
+    },
+
+    forgetAccount(accountId) {
+      const prefix = `${accountId}\0`
+      for (const [key, store] of [...stores]) {
+        if (key.startsWith(prefix)) {
+          stores.delete(key)
+          store.dispose()
+        }
+      }
     },
 
     clear() {

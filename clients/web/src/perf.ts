@@ -570,6 +570,20 @@ interface RoomOpen {
   loading: boolean | null
   /** Socket reconnects that landed during this open. */
   reconnects: number
+  /**
+   * Rows the live feed appended to this room's warm store while it was
+   * closed — what re-entry painted before the gap-fill answered. Null when the
+   * mark did not carry it.
+   */
+  liveAway: number | null
+  /**
+   * Rows the first applied gap-fill added that the warm store lacked: what
+   * the live feed missed. Zero means the live feed alone was complete. Null
+   * for a cold open, or one whose gap-fill did not apply.
+   */
+  gapAdded: number | null
+  /** The gap-fill shared nothing with the slice: the gap exceeded a page. */
+  gapReplaced: boolean
   /** When the head fetch settled — the request that alone gates first paint. */
   head: number | null
   /**
@@ -619,6 +633,13 @@ interface RoomOpen {
   membersStarted: boolean
   threadsStarted: boolean
   settled: boolean
+  /**
+   * Two frames have run since `settled`, so the render that paints the rows
+   * has had its turn. `readyToEmit` waits for it whichever request lands
+   * last: a competitor answering inside those frames used to write the line
+   * at once, with `rows` and `heads` taken before the page was applied.
+   */
+  painted: boolean
   emitted: boolean
   watchdog: ReturnType<typeof setTimeout> | null
   grace: ReturnType<typeof setTimeout> | null
@@ -730,6 +751,9 @@ function noteRoomOpen(
       heads: [],
       loading: null,
       reconnects: 0,
+      liveAway: typeof detail?.liveAway === 'number' ? detail.liveAway : null,
+      gapAdded: null,
+      gapReplaced: false,
       head: null,
       headAt: null,
       via: null,
@@ -743,6 +767,7 @@ function noteRoomOpen(
       membersStarted: inFlight.members,
       threadsStarted: inFlight.threads,
       settled: false,
+      painted: false,
       emitted: false,
       grace: null,
       watchdog: null,
@@ -793,6 +818,14 @@ function noteRoomOpen(
         !(typeof detail.startedAt === 'number' && detail.startedAt < open.start)
       ) {
         open.heads.push(`${detail.outcome}@${since()}`)
+        if (
+          open.gapAdded === null &&
+          detail.outcome === 'applied' &&
+          typeof detail.added === 'number'
+        ) {
+          open.gapAdded = detail.added
+          open.gapReplaced = detail.replaced === true
+        }
       }
       break
     case 'live:open':
@@ -809,9 +842,7 @@ function noteRoomOpen(
         // Two frames, for the reason `perfMarkBootRoomList` documents: the
         // render that paints the rows has not run when the fetch settles, so
         // summarising inline reports `rows: null` on every load that worked.
-        requestAnimationFrame(() =>
-          requestAnimationFrame(() => readyToEmit(open)),
-        )
+        afterPaint(open)
       }
       break
     case 'room-row:hydrate-preview':
@@ -832,9 +863,7 @@ function noteRoomOpen(
         if (!open.settled) {
           open.settled = true
           open.via = 'paint'
-          requestAnimationFrame(() =>
-            requestAnimationFrame(() => readyToEmit(open)),
-          )
+          afterPaint(open)
         }
       }
       break
@@ -868,6 +897,16 @@ function noteRoomOpen(
   }
 }
 
+/** Mark the open painted two frames from now, then see whether it can emit. */
+function afterPaint(open: RoomOpen): void {
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      open.painted = true
+      readyToEmit(open)
+    }),
+  )
+}
+
 /**
  * Emit once the timeline page has landed **and** the three requests beside it
  * have, or once the grace period says one of them is not going to.
@@ -879,7 +918,7 @@ function noteRoomOpen(
  * case as missing data.
  */
 function readyToEmit(open: RoomOpen): void {
-  if (roomOpen !== open || open.emitted || !open.settled) {
+  if (roomOpen !== open || open.emitted || !open.painted) {
     return
   }
   // A competitor that was never requested is not something to wait for —
@@ -974,6 +1013,12 @@ function emitRoomOpen(phase: 'settled' | 'waiting'): void {
     loading: open.loading,
     live: liveState,
     reconnects: open.reconnects,
+    // Warm opens only (ADR 0085 phase 1 plus live ingest): what the live feed
+    // delivered while the room was closed, and what the gap-fill still had to
+    // add. `gapAdded=0` with a long `net` means the wait was hidden from view.
+    liveAway: open.liveAway,
+    gapAdded: open.gapAdded,
+    gapReplaced: open.gapReplaced,
     // Wall clock, because the offset cannot be dated: iOS pauses
     // `performance.now()` while the phone sleeps, so offset + session start
     // drifts from real time by however long it slept.

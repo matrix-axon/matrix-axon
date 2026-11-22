@@ -453,6 +453,41 @@ describe('room-open summary', () => {
     expect(summary!.attempts).toBe(2)
   })
 
+  /**
+   * 2026-11-22 capture: `phase=settled heads=pending rows=null` on a cold open
+   * whose page had landed. `/members` and `/threads` answered within a
+   * millisecond of the timeline, inside the two frames the summary waits, and
+   * each of them wrote the line at once.
+   */
+  it('waits for the paint when a competitor lands just after the page', async () => {
+    openRoom()
+    const head = { kind: 'head', roomId: ROOM, thread: false }
+    perfMark('timeline:fetch:start', head)
+    startCompetitors()
+    perfMark('timeline:fetch:end', { ...head, ok: true })
+    perfMark('rooms:refresh:end', { ok: true, rooms: 2 })
+    perfMark('members:refresh:end', { roomId: ROOM, members: 4, ok: true })
+    perfMark('threads:refresh:end', { roomId: ROOM, threads: 3, ok: true })
+    // The page is applied and painted after the competitors have answered.
+    perfMark('timeline:head:settled', {
+      roomId: ROOM,
+      thread: false,
+      outcome: 'applied',
+    })
+    perfMark('room-page:timeline-render', {
+      roomId: ROOM,
+      loading: false,
+      visible: 30,
+      hasRows: true,
+    })
+    await frames()
+
+    const summary = roomOpenSummary()
+    expect(summary).not.toBeNull()
+    expect(summary!.rows).not.toBeNull()
+    expect(summary!.heads).toMatch(/^applied@\d+$/)
+  })
+
   it("writes the shell transport's counters once per room open", async () => {
     const source = vi.fn(() =>
       Promise.resolve({
@@ -1142,6 +1177,73 @@ describe('room-open summary', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('says what the live feed delivered to a warm room and what the gap-fill added', async () => {
+    perfMark('room-page:initial-load-effect', {
+      accountId: 'a',
+      roomId: ROOM,
+      highlighted: false,
+      warm: true,
+      liveAway: 3,
+    })
+    const head = { kind: 'head', roomId: ROOM, thread: false }
+    perfMark('timeline:fetch:start', head)
+    settleCompetitors()
+    perfMark('timeline:fetch:end', { ...head, ok: true })
+    // Only the first *applied* head of this open speaks for the gap.
+    perfMark('timeline:head:settled', {
+      roomId: ROOM,
+      thread: false,
+      outcome: 'superseded',
+      added: null,
+      replaced: false,
+    })
+    perfMark('timeline:head:settled', {
+      roomId: ROOM,
+      thread: false,
+      outcome: 'applied',
+      added: 0,
+      replaced: false,
+    })
+    perfMark('timeline:head:settled', {
+      roomId: ROOM,
+      thread: false,
+      outcome: 'applied',
+      added: 5,
+      replaced: true,
+    })
+    perfMark('room-page:timeline-render', { hasRows: true, visible: 30 })
+    await frames()
+
+    expect(roomOpenSummary()).toMatchObject({
+      warm: true,
+      liveAway: 3,
+      gapAdded: 0,
+      gapReplaced: false,
+    })
+  })
+
+  it('leaves the gap fields empty on a cold open', async () => {
+    openRoom()
+    perfMark('timeline:fetch:start', { kind: 'head', thread: false })
+    settleCompetitors()
+    perfMark('timeline:fetch:end', { kind: 'head', thread: false, ok: true })
+    perfMark('timeline:head:settled', {
+      roomId: ROOM,
+      thread: false,
+      outcome: 'applied',
+      added: null,
+      replaced: false,
+    })
+    perfMark('room-page:timeline-render', { hasRows: true, visible: 30 })
+    await frames()
+
+    expect(roomOpenSummary()).toMatchObject({
+      liveAway: null,
+      gapAdded: null,
+      gapReplaced: false,
+    })
   })
 
   it('names the three requests the timeline page competed with', async () => {

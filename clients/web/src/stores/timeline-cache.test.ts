@@ -12,6 +12,7 @@ import {
 } from 'vitest'
 import { createApiClient } from '../api/client'
 import { createMediaService } from '../media/media-service'
+import { setPerfEnabled, setTelemetrySink } from '../perf'
 import { createTimelineStoreCache } from './timeline-cache'
 import type { EventDto } from './timeline'
 
@@ -199,6 +200,68 @@ describe('createTimelineStoreCache', () => {
     expect(revoked).toEqual([])
   })
 
+  describe('hold', () => {
+    it('never evicts a store a page is showing, even over the cap', () => {
+      const cache = makeCache(1)
+      const shown = cache.acquire(ACCOUNT, ROOM)
+      const release = cache.hold(ACCOUNT, ROOM)
+
+      // An incoming share acquires rooms while the page stays mounted.
+      cache.acquire(ACCOUNT, '!b:hs')
+      cache.acquire(ACCOUNT, '!c:hs')
+
+      expect(cache.size).toBe(2)
+      expect(sameStore(cache.acquire(ACCOUNT, ROOM), shown)).toBe(true)
+
+      // Released, it is an ordinary warm store again.
+      release()
+      cache.acquire(ACCOUNT, '!d:hs')
+      expect(cache.size).toBe(1)
+      expect(sameStore(cache.acquire(ACCOUNT, ROOM), shown)).toBe(false)
+    })
+
+    it('keeps the store while any holder remains, and a release counts once', () => {
+      const cache = makeCache(1)
+      const shown = cache.acquire(ACCOUNT, ROOM)
+      const first = cache.hold(ACCOUNT, ROOM)
+      const second = cache.hold(ACCOUNT, ROOM)
+
+      first()
+      first()
+      cache.acquire(ACCOUNT, '!b:hs')
+
+      expect(sameStore(cache.acquire(ACCOUNT, ROOM), shown)).toBe(true)
+      second()
+    })
+
+    it('hands a shown store back as it is, even parked in history', async () => {
+      server.use(
+        http.get(timelinePath(ROOM), ({ request }) => {
+          const atTs = new URL(request.url).searchParams.get('at_ts')
+          return HttpResponse.json({
+            data:
+              atTs === null
+                ? { events: [event('$new', 900)], next_cursor: 'c1' }
+                : { events: [event('$old', 100)], next_cursor: null },
+          })
+        }),
+      )
+      const cache = makeCache()
+      const shown = cache.acquire(ACCOUNT, ROOM)
+      const release = cache.hold(ACCOUNT, ROOM)
+      await shown.loadLatest()
+      await shown.jumpTo(100)
+
+      // A share into the room the reader has open, jumped back in history:
+      // rebuilding would dispose the store under the page.
+      const again = cache.acquire(ACCOUNT, ROOM)
+
+      expect(sameStore(again, shown)).toBe(true)
+      expect(again.events.value.map((e) => e.event_id)).toEqual(['$old'])
+      release()
+    })
+  })
+
   it('refuses to reuse a slice parked in history, which cannot be gap-filled', async () => {
     server.use(
       http.get(timelinePath(ROOM), ({ request }) => {
@@ -344,6 +407,211 @@ describe('createTimelineStoreCache', () => {
     expect(store.events.value).toEqual([])
     expect(cache.size).toBe(0)
     expect(sameStore(cache.acquire(ACCOUNT, ROOM), store)).toBe(false)
+  })
+
+  it("drops one account's warm rooms and leaves the other account's", async () => {
+    server.use(
+      http.get(timelinePath(ROOM), () =>
+        HttpResponse.json({
+          data: { events: [event('$1', 100)], next_cursor: 'c1' },
+        }),
+      ),
+    )
+    const cache = makeCache()
+    const gone = cache.acquire(ACCOUNT, ROOM)
+    await gone.loadLatest()
+    const kept = cache.acquire(OTHER_ACCOUNT, ROOM)
+
+    cache.forgetAccount(ACCOUNT)
+
+    expect(cache.size).toBe(1)
+    expect(sameStore(cache.acquire(OTHER_ACCOUNT, ROOM), kept)).toBe(true)
+    // A frame for the forgotten account builds nothing back.
+    cache.ingestLive(event('$2', 200))
+    expect(cache.size).toBe(1)
+    expect(sameStore(cache.acquire(ACCOUNT, ROOM), gone)).toBe(false)
+  })
+
+  // A store the user has left keeps taking frames, so re-entry paints what
+  // the room-list preview already showed without waiting on the head fetch.
+  describe('ingestLive', () => {
+    it('appends a frame to a warm store the user has left', async () => {
+      server.use(
+        http.get(timelinePath(ROOM), () =>
+          HttpResponse.json({
+            data: { events: [event('$1', 100)], next_cursor: 'c1' },
+          }),
+        ),
+      )
+      const cache = makeCache()
+      const left = cache.acquire(ACCOUNT, ROOM)
+      await left.loadLatest()
+      // Opening another room is what "left" means to the cache.
+      cache.acquire(ACCOUNT, '!other:hs')
+
+      cache.ingestLive(event('$2', 200))
+
+      expect(left.events.value.map((e) => e.event_id)).toEqual(['$1', '$2'])
+      expect(
+        cache.acquire(ACCOUNT, ROOM).events.value.map((e) => e.event_id),
+      ).toEqual(['$1', '$2'])
+    })
+
+    it('builds no store for a room that has none, nor for another account', async () => {
+      server.use(
+        http.get(timelinePath(ROOM), () =>
+          HttpResponse.json({
+            data: { events: [event('$1', 100)], next_cursor: 'c1' },
+          }),
+        ),
+      )
+      const cache = makeCache()
+      const store = cache.acquire(ACCOUNT, ROOM)
+      await store.loadLatest()
+
+      cache.ingestLive(event('$x', 200, '!cold:hs'))
+      cache.ingestLive({ ...event('$y', 300), account_id: OTHER_ACCOUNT })
+
+      expect(cache.size).toBe(1)
+      expect(store.events.value.map((e) => e.event_id)).toEqual(['$1'])
+    })
+
+    it('leaves LRU order alone: a frame is not a visit', () => {
+      const cache = makeCache(2)
+      const a = cache.acquire(ACCOUNT, '!a:hs')
+      cache.acquire(ACCOUNT, '!b:hs')
+
+      cache.ingestLive(event('$1', 100, '!a:hs'))
+      cache.acquire(ACCOUNT, '!c:hs')
+
+      // Had the frame counted as a use, `b` would have been evicted instead.
+      expect(sameStore(cache.acquire(ACCOUNT, '!a:hs'), a)).toBe(false)
+    })
+
+    it('counts what the live feed appended while away, then drains', async () => {
+      server.use(
+        http.get(timelinePath(ROOM), () =>
+          HttpResponse.json({
+            data: { events: [event('$1', 100)], next_cursor: 'c1' },
+          }),
+        ),
+      )
+      const cache = makeCache()
+      const store = cache.acquire(ACCOUNT, ROOM)
+      await store.loadLatest()
+      expect(store.takeLiveAppended()).toBe(0)
+      cache.acquire(ACCOUNT, '!other:hs')
+
+      cache.ingestLive(event('$2', 200))
+      cache.ingestLive(event('$3', 300))
+      // A known id is an in-place update, not a new row.
+      cache.ingestLive({ ...event('$1', 100), body: 'edited', edited: true })
+
+      expect(store.takeLiveAppended()).toBe(2)
+      expect(store.takeLiveAppended()).toBe(0)
+    })
+
+    it('counts nothing for frames that land while a page shows the room', async () => {
+      server.use(
+        http.get(timelinePath(ROOM), () =>
+          HttpResponse.json({
+            data: { events: [event('$1', 100)], next_cursor: 'c1' },
+          }),
+        ),
+      )
+      const cache = makeCache()
+      const store = cache.acquire(ACCOUNT, ROOM)
+      await store.loadLatest()
+      const release = cache.hold(ACCOUNT, ROOM)
+
+      cache.ingestLive(event('$2', 200))
+      // Left: only what arrives from here on was "while away".
+      release()
+      cache.ingestLive(event('$3', 300))
+
+      expect(store.events.value.map((e) => e.event_id)).toEqual([
+        '$1',
+        '$2',
+        '$3',
+      ])
+      expect(store.takeLiveAppended()).toBe(1)
+    })
+
+    describe('gap-fill report on timeline:head:settled', () => {
+      let settled: Record<string, unknown>[]
+      beforeEach(() => {
+        settled = []
+        setPerfEnabled(true)
+        setTelemetrySink((name, _at, detail) => {
+          if (name === 'timeline:head:settled') settled.push(detail ?? {})
+        })
+      })
+      afterEach(() => {
+        setTelemetrySink(null)
+        setPerfEnabled(false)
+      })
+
+      /** A store at `$1`, fed `$2` live, whose re-entry head is `second`. */
+      async function reenter(second: EventDto[]) {
+        const heads = [[event('$1', 100)], second]
+        let served = 0
+        server.use(
+          http.get(timelinePath(ROOM), () =>
+            HttpResponse.json({
+              data: { events: heads[served++], next_cursor: 'c1' },
+            }),
+          ),
+        )
+        const cache = makeCache()
+        const store = cache.acquire(ACCOUNT, ROOM)
+        await store.loadLatest()
+        cache.ingestLive(event('$2', 200))
+        expect(await store.loadLatest()).toBe('applied')
+        await Promise.resolve()
+        return settled.at(-1)
+      }
+
+      it('counts only the head rows the live feed missed', async () => {
+        // Newest first, as the read API pages: `$3` was lost, `$2` was not.
+        const report = await reenter([
+          event('$3', 300),
+          event('$2', 200),
+          event('$1', 100),
+        ])
+        expect(report).toMatchObject({ added: 1, replaced: false })
+      })
+
+      it('reports zero when the live feed already had everything', async () => {
+        const report = await reenter([event('$2', 200), event('$1', 100)])
+        expect(report).toMatchObject({ added: 0, replaced: false })
+      })
+
+      it('flags a gap wider than a page', async () => {
+        const report = await reenter([event('$9', 900), event('$8', 800)])
+        expect(report).toMatchObject({ added: 2, replaced: true })
+      })
+    })
+
+    it('updates a parked slice in place but never appends to it', async () => {
+      server.use(
+        http.get(timelinePath(ROOM), () =>
+          HttpResponse.json({
+            data: { events: [event('$1', 100)], next_cursor: 'c1' },
+          }),
+        ),
+      )
+      const cache = makeCache()
+      const store = cache.acquire(ACCOUNT, ROOM)
+      await store.jumpTo(100)
+      expect(store.atEnd.value).toBe(false)
+
+      cache.ingestLive({ ...event('$1', 100), body: 'edited', edited: true })
+      cache.ingestLive(event('$2', 200))
+
+      // Appending "now" after a jump would fake contiguity; the parked slice
+      // is rebuilt on re-entry anyway.
+      expect(store.events.value.map((e) => e.body)).toEqual(['edited'])
+    })
   })
 
   // Read by the auto-refresh policy (ADR 0087): an unsent echo lives only in

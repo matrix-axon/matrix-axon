@@ -19,12 +19,14 @@ import {
   onTestFinished,
   vi,
 } from 'vitest'
+import { setPerfEnabled, setTelemetrySink } from '../perf'
 import { ServicesContext } from '../services'
 import { ShellActionsContext } from '../shell-actions'
 import type { MemberDto, RoomDto } from '../stores/room-list'
 import type { EventDto } from '../stores/timeline'
 import { RECEIPT_DEBOUNCE_MS } from '../stores/ephemeral-sender'
 import { LEAVE_PENDING_MESSAGE } from '../stores/rooms'
+import { TIMELINE_STORE_LIMIT } from '../stores/timeline-cache'
 import { memoryStorage } from '../test/memory-storage'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { RoomPage } from './RoomPage'
@@ -2352,6 +2354,30 @@ describe('RoomPage', () => {
     fireEvent.click(chip)
 
     await waitFor(() => expect(reactionPosts).toBe(1))
+  })
+
+  it('keeps taking live messages while 30 other rooms pass through the cache', async () => {
+    const { services, findByText } = renderRoom([event('$latest', T0)])
+    await findByText('body of $latest')
+
+    // An incoming share sending to many rooms while this one stays open: each
+    // acquire would otherwise push the open room's store out of the LRU, and
+    // live frames reach the page only through the cache.
+    for (let i = 0; i < TIMELINE_STORE_LIMIT; i += 1) {
+      services.timelines.acquire(ACCOUNT, `!share${i}:hs`)
+    }
+
+    services.live.start()
+    services.sockets[0].emitOpen()
+    services.sockets[0].emitMessage(
+      JSON.stringify({
+        type: 'timeline.event',
+        account_id: ACCOUNT,
+        payload: event('$live', T0 + 1),
+      }),
+    )
+
+    expect(await findByText('body of $live')).toBeTruthy()
   })
 
   it('keeps a live reaction on the newest message visible when pinned to bottom', async () => {
@@ -4922,6 +4948,8 @@ describe('RoomPage', () => {
        * otherwise consume entries and make this depend on test order.
        */
       jump?: () => Response,
+      /** Runs while room B is showing, before the return to A. */
+      whileAway?: (services: ReturnType<typeof testServices>) => void,
     ) {
       let head = 0
       server.use(
@@ -4968,10 +4996,12 @@ describe('RoomPage', () => {
         '',
         `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
       )
-      const utils = render(routedRoomPage(testServices()))
+      const services = testServices()
+      const utils = render(routedRoomPage(services))
       await utils.findByText('body of $1')
       go(OTHER_ROOM)
       await utils.findByText('body of $b')
+      whileAway?.(services)
       go(ROOM, backQuery)
       return { ...utils, heads: () => head }
     }
@@ -4998,8 +5028,8 @@ describe('RoomPage', () => {
       // The held request is in flight by now, so releasing it is not a race.
       await waitFor(() => expect(heads()).toBe(2))
 
-      // Live frames only reach the mounted room (ADR 0061), so the warm slice
-      // missed `$2`; the head fetch overlaps it and `refreshHead` merges.
+      // No frame carried `$2` (the socket is lossy, ADR 0061), so the warm
+      // slice missed it; the head fetch overlaps it and `refreshHead` merges.
       settle(
         HttpResponse.json({
           data: {
@@ -5012,6 +5042,221 @@ describe('RoomPage', () => {
       expect(await findByText('body of $2')).toBeTruthy()
       // Merged, not replaced: the row already loaded survives the reconcile.
       expect(await findByText('body of $1')).toBeTruthy()
+    })
+
+    it('shows a message that arrived while away before the head fetch answers', async () => {
+      const entries: Record<string, unknown>[] = []
+      setPerfEnabled(true)
+      setTelemetrySink((name, _at, detail) => {
+        if (name === 'room-page:initial-load-effect') entries.push(detail ?? {})
+      })
+      onTestFinished(() => {
+        setTelemetrySink(null)
+        setPerfEnabled(false)
+      })
+      // The slow-link complaint: the room-list preview showed `$2`, then the
+      // room opened without it until the re-entry head fetch came back. The
+      // frame reached the client either way; the warm store now takes it.
+      let settle: (response: Response) => void = () => {}
+      const { findByText, heads } = await roundTrip(
+        [
+          () =>
+            HttpResponse.json({
+              data: { events: [event('$1', T0)], next_cursor: 'c1' },
+            }),
+          () =>
+            new Promise<Response>((resolve) => {
+              settle = resolve
+            }),
+        ],
+        '',
+        undefined,
+        (services) => {
+          services.live.start()
+          services.sockets[0].emitOpen()
+          services.sockets[0].emitMessage(
+            JSON.stringify({
+              type: 'timeline.event',
+              account_id: ACCOUNT,
+              payload: event('$2', T0 + 1000),
+            }),
+          )
+        },
+      )
+
+      // Painted while the head fetch is still held open.
+      expect(await findByText('body of $2')).toBeTruthy()
+      // And the room-open readout says the live feed delivered it.
+      // The row paints before the mount effect marks, so wait for the
+      // return visit's mark (A, B, then A again).
+      await waitFor(() => expect(entries).toHaveLength(3))
+      expect(entries[2]).toMatchObject({ warm: true, liveAway: 1 })
+      expect(await findByText('body of $1')).toBeTruthy()
+      await waitFor(() => expect(heads()).toBe(2))
+
+      // The gap-fill still runs, and merging a head that already holds `$2`
+      // must not show it twice.
+      settle(
+        HttpResponse.json({
+          data: {
+            events: [event('$2', T0 + 1000), event('$1', T0)],
+            next_cursor: 'c1',
+          },
+        }) as Response,
+      )
+      await waitFor(() =>
+        expect(document.querySelectorAll('[data-event-id="$2"]')).toHaveLength(
+          1,
+        ),
+      )
+    })
+
+    it("labels senders from known names while a room's member list is in flight", async () => {
+      // The slow-link complaint: every room open showed raw ids until its own
+      // `/members` answered, even for people another room had already named.
+      let holdMembers = false
+      server.use(
+        http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+          HttpResponse.json({ data: [] }),
+        ),
+        http.get(
+          `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/timeline`,
+          ({ params }) =>
+            HttpResponse.json({
+              data: {
+                events:
+                  decodeURIComponent(String(params.roomId)) === OTHER_ROOM
+                    ? [event('$b', T0, { room_id: OTHER_ROOM })]
+                    : [event('$1', T0)],
+                next_cursor: null,
+              },
+            }),
+        ),
+        http.get(
+          `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/members`,
+          () =>
+            holdMembers
+              ? new Promise<Response>(() => {})
+              : HttpResponse.json({
+                  data: [member('@alice:hs', 'join', 'Alice')],
+                }),
+        ),
+      )
+      const go = (roomId: string) => {
+        window.history.pushState(
+          null,
+          '',
+          `/${ACCOUNT}/rooms/${encodeURIComponent(roomId)}`,
+        )
+        window.dispatchEvent(new PopStateEvent('popstate'))
+      }
+      window.history.replaceState(
+        null,
+        '',
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      )
+      const { findByText, findAllByText, queryByText } = render(
+        routedRoomPage(testServices()),
+      )
+      await findByText('body of $1')
+      expect((await findAllByText('Alice')).length).toBeGreaterThan(0)
+
+      // From here on no member list answers.
+      holdMembers = true
+      go(OTHER_ROOM)
+      await findByText('body of $b')
+      // A room never opened before borrows the name room A taught.
+      expect((await findAllByText('Alice')).length).toBeGreaterThan(0)
+      expect(queryByText('@alice:hs')).toBeNull()
+
+      go(ROOM)
+      await findByText('body of $1')
+      // And the warm store for A still has its own list.
+      expect((await findAllByText('Alice')).length).toBeGreaterThan(0)
+      expect(queryByText('@alice:hs')).toBeNull()
+    })
+
+    it('does not re-fetch a resolved thread root on the way back into a room', async () => {
+      // Each return visit used to re-request every thread root by id: the
+      // repeated `events/{id}` lines in the 2026-11-21 airplane capture.
+      const rootReads: string[] = []
+      const threadReads: string[] = []
+      server.use(
+        http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+          HttpResponse.json({ data: [] }),
+        ),
+        http.get(
+          `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/timeline`,
+          ({ params }) =>
+            HttpResponse.json({
+              data: {
+                events:
+                  decodeURIComponent(String(params.roomId)) === OTHER_ROOM
+                    ? [event('$b', T0, { room_id: OTHER_ROOM })]
+                    : [event('$1', T0)],
+                next_cursor: null,
+              },
+            }),
+        ),
+        http.get(
+          `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads`,
+          ({ params }) => {
+            const roomId = decodeURIComponent(String(params.roomId))
+            threadReads.push(roomId)
+            return HttpResponse.json({
+              data:
+                roomId === ROOM
+                  ? [{ root_event_id: '$root', reply_count: 1 }]
+                  : [],
+            })
+          },
+        ),
+        http.get(
+          `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+          ({ params }) => {
+            rootReads.push(String(params.eventId))
+            return HttpResponse.json({ data: event('$root', T0 - 1000) })
+          },
+        ),
+      )
+      const go = (roomId: string) => {
+        window.history.pushState(
+          null,
+          '',
+          `/${ACCOUNT}/rooms/${encodeURIComponent(roomId)}`,
+        )
+        window.dispatchEvent(new PopStateEvent('popstate'))
+      }
+      window.history.replaceState(
+        null,
+        '',
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      )
+      const services = testServices()
+      const { findByText } = render(routedRoomPage(services))
+      await findByText('body of $1')
+      // Resolved, not merely asked for: an in-flight root is aborted on leaving
+      // and rightly asked for again.
+      await waitFor(() =>
+        expect(
+          services.threadStores
+            .acquire(ACCOUNT, ROOM)
+            .roots.peek()
+            .has('$root'),
+        ).toBe(true),
+      )
+
+      go(OTHER_ROOM)
+      await findByText('body of $b')
+      go(ROOM)
+      await findByText('body of $1')
+
+      // The return visit refreshed the summaries, and did not re-read the root.
+      await waitFor(() =>
+        expect(threadReads.filter((id) => id === ROOM)).toHaveLength(2),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(rootReads).toEqual(['$root'])
     })
 
     it('gap-fills on re-entry through a ?event= link the slice already holds', async () => {

@@ -513,7 +513,7 @@ export function MessageEventRow({
         accountId={accountId}
         userId={event.sender}
         displayName={senderDisplay}
-        member={members.members.value.get(event.sender)}
+        member={members.profile(event.sender)}
         onOpenUser={onOpenUser}
       />
       <div class="event-content">
@@ -870,7 +870,7 @@ export function ReadReceiptsSummary({
                 accountId={accountId}
                 userId={receipt.userId}
                 displayName={members.displayName(receipt.userId)}
-                member={members.members.value.get(receipt.userId)}
+                member={members.profile(receipt.userId)}
               />
               <span class="read-receipts-name">
                 {members.displayName(receipt.userId)}
@@ -1290,7 +1290,7 @@ function ReplyContext({
         accountId={accountId}
         userId={target.sender}
         displayName={senderDisplay}
-        member={members.members.value.get(target.sender)}
+        member={members.profile(target.sender)}
         onOpenUser={onOpenUser}
       />
       <span class="reply-context-copy">

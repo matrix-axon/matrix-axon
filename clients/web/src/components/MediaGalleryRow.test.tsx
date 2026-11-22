@@ -124,6 +124,7 @@ function encryptedWithThumbnail(id: string, size: number): TimelineEvent {
 const members = {
   displayName: (id: string) => id.replace(/^@|:hs$/g, ''),
   members: { value: new Map() },
+  profile: () => undefined,
 } as unknown as MembersStore
 
 const timeline = {

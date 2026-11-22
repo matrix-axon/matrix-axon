@@ -87,7 +87,7 @@ import {
   slashCommandUsage,
   type SlashCommandName,
 } from '../slash-commands'
-import { createMembersStore, type MembersStore } from '../stores/members'
+import type { MembersStore } from '../stores/members'
 import { roomKey, roomTitle, type MemberDto } from '../stores/room-list'
 import { FORGET_PENDING_MESSAGE, LEAVE_PENDING_MESSAGE } from '../stores/rooms'
 import {
@@ -101,11 +101,7 @@ import {
 } from '../stores/settings'
 import type { MessageGesturePreferences } from '../stores/message-gestures'
 import type { EphemeralStore } from '../stores/ephemeral'
-import {
-  createThreadsStore,
-  threadRootId,
-  type ThreadsStore,
-} from '../stores/threads'
+import { threadRootId, type ThreadsStore } from '../stores/threads'
 import type { ThreadUnreadStore } from '../stores/thread-unread'
 import {
   READ_MARKERS_NAMESPACE,
@@ -243,17 +239,28 @@ export function RoomPage() {
     messageGestures,
     search,
     timelines,
+    memberStores,
+    threadStores,
     attachments: staging,
     linkPreviews: linkPreviewCache,
     capabilities,
     platform,
   } = useServices()
   // Warm across room switches rather than rebuilt per mount (ADR 0085 phase
-  // 1). The store may therefore arrive already populated — and stale, since
-  // live frames only reach the mounted room — so the load effect below
-  // gap-fills it instead of assuming a cold start.
+  // 1). The store may therefore arrive already populated. The cache kept
+  // feeding it live frames while the room was closed, but the socket is
+  // lossy, so the load effect below still gap-fills it instead of assuming a
+  // cold start.
   const timeline = useMemo(
     () => timelines.acquire(accountId, roomId),
+    [timelines, accountId, roomId],
+  )
+  // Pinned while shown. Live frames reach this store only through the cache,
+  // so an eviction while mounted (an incoming share acquiring 30 other rooms)
+  // would freeze the open room. A layout effect, so the hold is in place
+  // before the load effect below reads `takeLiveAppended`.
+  useLayoutEffect(
+    () => timelines.hold(accountId, roomId),
     [timelines, accountId, roomId],
   )
   const reactionLookups = useRef(new Map<TimelineStore, AbortController>())
@@ -273,16 +280,22 @@ export function RoomPage() {
   useEffect(() => {
     redecryptAttempted.current = false
   }, [accountId, roomId])
+  // Warm across room switches, so a return visit keeps the thread roots it
+  // resolved instead of re-fetching each one; the mount effect refreshes the
+  // summaries in place.
   const threads = useMemo(
-    () => createThreadsStore(api, accountId, roomId),
-    [api, accountId, roomId],
+    () => threadStores.acquire(accountId, roomId),
+    [threadStores, accountId, roomId],
   )
   // A long thread list is still fetching its roots when the reader moves on;
-  // the next room's requests should not queue behind this one's (#662).
+  // the next room's requests should not queue behind this one's (#662). The
+  // store stays warm: only the queued and in-flight roots are dropped.
   useEffect(() => () => threads.stop(), [threads])
+  // Warm across room switches, like the timeline: a return visit paints the
+  // names it had, and the mount effect's `refresh()` updates them in place.
   const members = useMemo(
-    () => createMembersStore(api, accountId, roomId),
-    [api, accountId, roomId],
+    () => memberStores.acquire(accountId, roomId),
+    [memberStores, accountId, roomId],
   )
   // A persisted preference, not per-room view state (Settings → Timeline).
   const stateEvents = settings.stateEvents.value
@@ -673,6 +686,10 @@ export function RoomPage() {
   }, [openJump, setJumpAction])
 
   useEffect(() => {
+    // Drained whether or not marks are on, so the count never accumulates
+    // across visits. The cache counts only frames that found the room
+    // unheld, so nothing from a visit leaks into the next one's figure.
+    const liveAway = timeline.takeLiveAppended()
     perfMark('room-page:initial-load-effect', {
       accountId,
       roomId,
@@ -682,6 +699,9 @@ export function RoomPage() {
       // input the ADR says differs sharply between phone and desktop, and it
       // rides on the mark that is already here rather than a new one.
       warm: timeline.events.peek().length > 0,
+      // Rows the warm-store cache fed in from live frames while the room was
+      // closed: what re-entry could paint before the gap-fill answered.
+      liveAway,
     })
     // The room list store also feeds this page's title; populate it on a
     // hard load straight into the room URL. `ensureLoaded` rather than a
@@ -697,8 +717,9 @@ export function RoomPage() {
     // with two exceptions. A thread jump is resolved by ThreadPanel and must
     // not leave the desktop room stream empty. And a warm store (ADR 0085
     // phase 1) has nobody else to refresh it: the jump effect fetches nothing
-    // when its target is already in the loaded slice, and a warm slice stopped
-    // receiving live frames when the user left the room. `loadLatest` over a
+    // when its target is already in the loaded slice, and a warm slice can
+    // have missed frames while the user was away (the socket is lossy, and a
+    // slice parked in history takes only in-place updates). `loadLatest` over a
     // populated slice *is* `refreshHead`'s gap-fill merge, and a jump racing
     // it wins by slice generation.
     if (
@@ -1390,7 +1411,9 @@ export function RoomPage() {
     }
   }, [activeThread, accountId, roomId, openThread])
 
-  // Live: fold incoming events for this room into the timeline as they arrive.
+  // Live: the timeline itself is fed by the warm-store cache
+  // (`connectTimelineCacheLive`), which reaches this room's store whether or
+  // not it is mounted. This page reacts only to what its own views need.
   // Membership state changes can update display names and avatar URLs; re-read
   // the roster so sender labels and avatar images stay current without a room
   // reload.
@@ -1404,7 +1427,6 @@ export function RoomPage() {
       ) {
         return
       }
-      timeline.ingestLive(event)
       if (event.type === 'm.room.member') {
         inBackground(members.refresh())
       }
@@ -1415,7 +1437,7 @@ export function RoomPage() {
         inBackground(threads.refresh())
       }
     })
-  }, [live, timeline, threads, members, accountId, roomId])
+  }, [live, threads, members, accountId, roomId])
 
   // Gap-fill: the bus is lossy and cursor-less, so on reconnect refetch the
   // room's head and reconcile by event id (ADR 0061). Compared against the

@@ -94,7 +94,7 @@ function ThreadRoot({
             accountId={accountId}
             userId={root.sender}
             displayName={senderDisplay}
-            member={members.members.value.get(root.sender)}
+            member={members.profile(root.sender)}
             onOpenUser={onOpenUser}
           />
           <span class="thread-root-copy">

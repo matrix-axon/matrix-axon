@@ -302,7 +302,7 @@ export function MediaGalleryRow({
         accountId={accountId}
         userId={sender}
         displayName={senderDisplay}
-        member={members.members.value.get(sender)}
+        member={members.profile(sender)}
       />
       <div class="event-content">
         <div class="event-head">

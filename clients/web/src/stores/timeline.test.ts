@@ -218,6 +218,9 @@ describe('createTimelineStore', () => {
             thread: false,
             outcome: 'applied',
             startedAt: expect.any(Number),
+            // A cold load replaces the slice; there was no gap to measure.
+            added: null,
+            replaced: false,
           },
         ])
       } finally {

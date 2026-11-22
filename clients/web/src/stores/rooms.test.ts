@@ -14,6 +14,7 @@ import { createApiClient } from '../api/client'
 import { memoryStorage } from '../test/memory-storage'
 import { isLikelyDm, roomKey, roomTitle } from './room-list'
 import type { EventDto } from './timeline'
+import { createMemberDirectory } from './member-directory'
 import {
   createRoomsStore,
   FORGET_PENDING_MESSAGE,
@@ -339,6 +340,64 @@ describe('createRoomsStore', () => {
     // An unguarded completion would show the previous reader's correspondent
     // in the next reader's list (#115).
     expect(store.dmAvatars.value.size).toBe(0)
+  })
+
+  it('teaches the name directory nothing from a members fetch that lands after sign-out', async () => {
+    let release: (() => void) | undefined
+    const inFlight = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let asked = 0
+    server.use(
+      http.get(`${BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [UNNAMED] }),
+      ),
+      http.get(
+        `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent('!dm:hs')}/members`,
+        async () => {
+          asked += 1
+          await inFlight
+          return HttpResponse.json({ data: DM_MEMBERS })
+        },
+      ),
+    )
+    const directory = createMemberDirectory()
+    const store = makeStore(memoryStorage(), { memberDirectory: directory })
+    await store.refresh()
+    // Both `/members` readers out at once: the DM avatar's, and the roster
+    // read behind "is there a DM with Bob already?".
+    const lookup = store.createDm(ACCOUNT, '@bob:example.org')
+    await vi.waitFor(() => expect(asked).toBe(2))
+
+    // Sign out with both in flight. `resetSession` alone, without the
+    // directory's own wipe, so the store's guard is what is under test.
+    store.resetSession()
+    release?.()
+    await lookup
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(directory.lookup(ACCOUNT, '@bob:example.org')).toBeUndefined()
+  })
+
+  it('teaches the name directory from the lists it reads', async () => {
+    server.use(
+      http.get(`${BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [UNNAMED] }),
+      ),
+      http.get(
+        `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent('!dm:hs')}/members`,
+        () => HttpResponse.json({ data: DM_MEMBERS }),
+      ),
+    )
+    const directory = createMemberDirectory()
+    const store = makeStore(memoryStorage(), { memberDirectory: directory })
+    await store.refresh()
+
+    await vi.waitFor(() =>
+      expect(directory.lookup(ACCOUNT, '@bob:example.org')?.display_name).toBe(
+        'Robert',
+      ),
+    )
   })
 
   it('drops the persisted title cache even before the first refresh lands', () => {

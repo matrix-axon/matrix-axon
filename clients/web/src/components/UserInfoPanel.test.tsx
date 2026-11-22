@@ -56,6 +56,7 @@ function membersStore(
     displayName: (userId: string) =>
       rows.find((row) => row.user_id === userId)?.display_name?.trim() ||
       userId,
+    profile: (userId: string) => rows.find((row) => row.user_id === userId),
     refresh: vi.fn(),
     inviteUsers: vi.fn(),
     cancelInvite: vi.fn(),

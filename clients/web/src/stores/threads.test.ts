@@ -12,6 +12,7 @@ import {
 import { createApiClient } from '../api/client'
 import {
   createThreadsStore,
+  createThreadsStoreCache,
   ROOT_FETCH_CONCURRENCY,
   threadRootId,
 } from './threads'
@@ -180,6 +181,96 @@ describe('createThreadsStore', () => {
       room.releaseOpen()
       await new Promise((resolve) => setTimeout(resolve, 5))
     }
+  })
+
+  /**
+   * A warm store (`createThreadsStoreCache`) outlives the visit. Leaving stops
+   * only what was still queued or in flight; a root already resolved must not
+   * be fetched again on the way back in, which every return visit used to do.
+   */
+  it('keeps resolved roots across leaving and coming back', async () => {
+    const room = manyThreads(3)
+    const store = makeStore()
+    await store.refresh()
+    while (store.roots.value.size < 3) {
+      room.releaseOpen()
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    expect(room.asked).toHaveLength(3)
+
+    store.stop()
+    await store.refresh()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(room.asked).toHaveLength(3)
+    expect(store.roots.value.size).toBe(3)
+  })
+
+  it('hands a room its warm store back, and stops the one it evicts', async () => {
+    const room = manyThreads(20)
+    const api = createApiClient(
+      {
+        getToken: () => 'tok-test',
+        onAuthFailure: () => {},
+        LoginBootstrap: () => null,
+      },
+      BASE_URL,
+    )
+    const cache = createThreadsStoreCache(api, 1)
+    const first = cache.acquire(ACCOUNT, ROOM)
+    expect(cache.acquire(ACCOUNT, ROOM) === first).toBe(true)
+    await first.refresh()
+    await vi.waitFor(() =>
+      expect(room.asked).toHaveLength(ROOT_FETCH_CONCURRENCY),
+    )
+
+    // Evicted with roots still queued: none of them may go out afterwards.
+    cache.acquire(ACCOUNT, '!other:hs')
+    room.releaseOpen()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(room.asked).toHaveLength(ROOT_FETCH_CONCURRENCY)
+  })
+
+  it("lets no root answered after leaving overwrite the next visit's", async () => {
+    // A fake client, because a real abort always wins: what is under test is
+    // a body already on its way when `stop()` ran, which abort cannot recall.
+    const answers: ((body: string) => void)[] = []
+    const api = {
+      GET: (path: string) =>
+        path.endsWith('/threads')
+          ? Promise.resolve({
+              data: {
+                data: [
+                  {
+                    root_event_id: '$root',
+                    reply_count: 1,
+                    latest_reply_ts: 1,
+                  },
+                ],
+              },
+            })
+          : new Promise((resolve) =>
+              answers.push((body) =>
+                resolve({
+                  data: { data: { event_id: '$root', room_id: ROOM, body } },
+                }),
+              ),
+            ),
+    } as unknown as Parameters<typeof createThreadsStore>[0]
+    const store = createThreadsStore(api, ACCOUNT, ROOM)
+
+    await store.refresh()
+    expect(answers).toHaveLength(1)
+    store.stop()
+    // Back in the room: `stop()` forgot the root, so it is asked again.
+    await store.refresh()
+    expect(answers).toHaveLength(2)
+
+    answers[1]('edited')
+    answers[0]('original')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(store.roots.value.get('$root')?.body).toBe('edited')
   })
 
   /**

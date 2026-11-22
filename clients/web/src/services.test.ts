@@ -22,6 +22,7 @@ import {
   NOTIFICATION_HANDLED_KEY,
   type NotificationResume,
   connectReadMarkers,
+  connectTimelineCacheLive,
   connectTimelineCacheReset,
   connectUnreadCounts,
   connectUpdateChecks,
@@ -31,6 +32,7 @@ import {
   createThreadUnreadStore,
   type ActiveThread,
 } from './stores/thread-unread'
+import type { LiveFrame } from './api/frames'
 import type { AccountsStore } from './stores/accounts'
 import { roomKey, userIdDisplay } from './stores/room-list'
 import type { RoomsStore } from './stores/rooms'
@@ -954,6 +956,15 @@ describe('connectTimelineCacheReset', () => {
         acquire: () => {
           throw new Error('unused')
         },
+        hold: () => {
+          throw new Error('unused')
+        },
+        ingestLive: () => {
+          throw new Error('unused')
+        },
+        forgetAccount: () => {
+          throw new Error('unused')
+        },
         clear: () => {
           clears += 1
         },
@@ -1021,6 +1032,48 @@ describe('connectTimelineCacheReset', () => {
       flag.value = false
     }).not.toThrow()
     expect(timelines.size).toBe(0)
+    dispose()
+  })
+})
+
+describe('connectTimelineCacheLive', () => {
+  it('routes timeline frames to the warm-store cache, and nothing else', () => {
+    let listener: (frame: LiveFrame) => void = () => {}
+    const ingested: string[] = []
+    const dispose = connectTimelineCacheLive(
+      {
+        subscribe: (l: (frame: LiveFrame) => void) => {
+          listener = l
+          return () => {}
+        },
+      } as unknown as Parameters<typeof connectTimelineCacheLive>[0],
+      {
+        acquire: () => {
+          throw new Error('unused')
+        },
+        hold: () => {
+          throw new Error('unused')
+        },
+        ingestLive: (event) => {
+          ingested.push(event.event_id)
+        },
+        forgetAccount: () => {
+          throw new Error('unused')
+        },
+        clear: () => {},
+        hasUnsentWork: false,
+        size: 0,
+      },
+    )
+
+    listener({
+      type: 'timeline.event',
+      accountId: ACCT,
+      payload: { event_id: '$1', account_id: ACCT, room_id: ROOM },
+    })
+    listener({ type: 'device_state.changed', accountId: ACCT, payload: {} })
+
+    expect(ingested).toEqual(['$1'])
     dispose()
   })
 })
@@ -1345,6 +1398,50 @@ describe('connectAttachmentReset', () => {
     }).not.toThrow()
     expect(staging.batch('scope').items).toHaveLength(0)
     dispose()
+  })
+})
+
+describe('removing one account', () => {
+  it("drops that account's warm rooms and borrowed names, and no other's", async () => {
+    const OTHER = '6b53f7f0-0000-4000-8000-000000000009'
+    const services = createServices(memoryStorage(), memoryStorage(), {
+      ...browserPlatform(),
+      defaultApiBaseUrl: 'https://axon.example.com',
+      // The logout answers, and the accounts refresh after it finds no one.
+      fetch: (() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ data: [] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        )) as unknown as typeof globalThis.fetch,
+    })
+    const { memberDirectory, memberStores, threadStores, timelines } = services
+    for (const account of [ACCT, OTHER]) {
+      memberDirectory.record(
+        account,
+        [
+          {
+            user_id: '@alice:server',
+            membership: 'join',
+            display_name: 'Alice',
+          } as Parameters<typeof memberDirectory.record>[1][number],
+        ],
+        memberDirectory.epoch(account),
+      )
+      memberStores.acquire(account, ROOM)
+      threadStores.acquire(account, ROOM)
+      timelines.acquire(account, ROOM)
+    }
+
+    // Accounts → Log out: the session itself stays signed in.
+    expect(await services.accounts.logout(ACCT)).toBe(true)
+
+    expect(memberDirectory.lookup(ACCT, '@alice:server')).toBeUndefined()
+    expect(memberDirectory.lookup(OTHER, '@alice:server')).toBeDefined()
+    expect(memberStores.size).toBe(1)
+    expect(threadStores.size).toBe(1)
+    expect(timelines.size).toBe(1)
   })
 })
 

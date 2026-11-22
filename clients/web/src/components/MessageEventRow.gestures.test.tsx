@@ -50,6 +50,7 @@ function event(overrides: Partial<TimelineEvent> = {}): TimelineEvent {
 const members = {
   displayName: (userId: string) => userId,
   members: signal(new Map()),
+  profile: () => undefined,
 } as unknown as MembersStore
 
 function renderRow({
