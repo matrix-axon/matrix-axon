@@ -36,6 +36,7 @@
 //! the chain on to device state.
 
 use std::future::Future;
+use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
@@ -46,6 +47,8 @@ use crate::api::{
 use super::drafts::DRAFTS_NAMESPACE;
 use super::read_markers::READ_MARKERS_NAMESPACE;
 use super::{App, RoomKey, Status};
+
+const ACCOUNT_REFRESH_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 /// One merged device-state read per account, for a single namespace.
 pub(crate) type DeviceStateReads = Vec<(Uuid, Result<DeviceStateDto, ApiError>)>;
@@ -130,6 +133,7 @@ pub(super) struct AccountRefresh {
     pub(super) generation: u64,
     inflight: bool,
     dirty: bool,
+    retry_at: Option<Instant>,
 }
 
 impl App {
@@ -143,6 +147,7 @@ impl App {
         }
         self.account_refresh.inflight = true;
         self.account_refresh.dirty = false;
+        self.account_refresh.retry_at = None;
         let generation = self.account_refresh.generation;
         let client = self.client.clone();
         self.spawn_bootstrap(async move {
@@ -151,6 +156,16 @@ impl App {
                 result: client.list_accounts().await,
             }
         });
+    }
+
+    pub(crate) fn poll_account_refresh(&mut self, now: Instant) {
+        if self
+            .account_refresh
+            .retry_at
+            .is_some_and(|retry_at| now >= retry_at)
+        {
+            self.request_account_refresh();
+        }
     }
 
     /// Spawn `work` and deliver its outcome to the main loop.
@@ -304,13 +319,16 @@ impl App {
                 } else {
                     match result {
                         Ok(accounts) => self.set_accounts(accounts),
-                        Err(err)
-                            if !self.is_mid_command()
-                                && matches!(self.status, Status::Debug(_)) =>
-                        {
-                            self.status = Status::Debug(format!("account refresh failed: {err}"));
+                        Err(err) => {
+                            if err.is_transient() {
+                                self.account_refresh.retry_at =
+                                    Some(Instant::now() + ACCOUNT_REFRESH_RETRY_DELAY);
+                            }
+                            if !self.is_mid_command() && matches!(self.status, Status::Debug(_)) {
+                                self.status =
+                                    Status::Debug(format!("account refresh failed: {err}"));
+                            }
                         }
-                        Err(_) => {}
                     }
                 }
             }
@@ -443,6 +461,32 @@ mod tests {
         .await;
         assert_eq!(app.accounts.selected, AccountSelection::All);
         assert!(app.accounts.accounts[0].own_identity_changed);
+    }
+
+    #[tokio::test]
+    async fn transient_background_account_refresh_retries_after_the_delay() {
+        let (mut app, _rx) = app();
+        app.bootstrap = BootstrapStage::Done;
+        app.request_account_refresh();
+        let generation = app.account_refresh.generation;
+        app.handle_bootstrap_outcome(BootstrapOutcome::AccountRefresh {
+            generation,
+            result: Err(ApiError::Request("request timed out".to_owned())),
+        })
+        .await;
+        let retry_at = app.account_refresh.retry_at.unwrap();
+        app.poll_account_refresh(retry_at - Duration::from_millis(1));
+        assert!(!app.account_refresh.inflight);
+        app.poll_account_refresh(retry_at);
+        assert!(app.account_refresh.inflight);
+        assert!(app.account_refresh.retry_at.is_none());
+        app.handle_bootstrap_outcome(BootstrapOutcome::AccountRefresh {
+            generation,
+            result: Ok(Vec::new()),
+        })
+        .await;
+        assert!(!app.account_refresh.inflight);
+        assert!(app.account_refresh.retry_at.is_none());
     }
 
     /// The stages advance in order, each one starting the next. The ordering is

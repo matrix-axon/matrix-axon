@@ -537,6 +537,7 @@ async fn run_app(
                 app.prune_typing(now);
                 // Room info follows the selected room and the open /whereami popup.
                 app.poll_room_info(now);
+                app.poll_account_refresh(now);
                 // Re-read the room list for a leave axon timed out on, until
                 // the room drops off it (ADR 0121 decision 5, #743).
                 app.poll_pending_memberships(now);

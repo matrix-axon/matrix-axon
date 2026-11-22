@@ -144,7 +144,7 @@ Use `/identity withdraw-verification @user:server` to accept the changed identit
 If a warning changes before you acknowledge it, review the latest warning before retrying.
 You can keep sending while a warning is present.
 
-If your own Matrix identity changes, the timeline title points to `/status`.
+If an account’s own Matrix identity changes, its rooms show an alert in the timeline title that points to `/status`.
 There, find the affected account and use `/verify` with another device or `/recover` with its recovery key.
 
 ## Spaces

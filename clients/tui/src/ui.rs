@@ -1074,11 +1074,12 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     } else {
         title
     };
+    let messages_account = app
+        .selected_room()
+        .map(|room| room.account_id)
+        .or_else(|| app.active_account_filter());
     if app.accounts.accounts.iter().any(|account| {
-        account.own_identity_changed
-            && app
-                .active_account_filter()
-                .is_none_or(|id| account.account_id == id)
+        account.own_identity_changed && messages_account.is_none_or(|id| account.account_id == id)
     }) {
         messages_title.push_str(" · Own identity changed /status");
     }

@@ -480,10 +480,9 @@ impl App {
                         .and_then(|names| names.get(&change.user_id))
                         .is_some_and(|name| name.to_lowercase().contains(&query))
             })
-            .map(|change| change.user_id.clone())
             .collect::<Vec<_>>();
-        candidates.sort_unstable();
-        candidates.dedup();
+        candidates.sort_unstable_by_key(|change| &change.user_id);
+        candidates.dedup_by(|left, right| left.user_id == right.user_id);
         if candidates.is_empty() {
             self.input.identity_user_completion = None;
             self.status = "No matching room identity warnings.".into();
@@ -494,7 +493,15 @@ impl App {
             || if reverse { candidates.len() - 1 } else { 0 },
             |(_, _, index)| cycle_index(*index, candidates.len(), reverse),
         );
-        self.input.buffer = format!("/identity {verb} {}", candidates[selected]);
+        let change = candidates[selected];
+        let completed = format!("/identity {verb} {}", change.user_id);
+        self.status = if self.room_identity_change_is_reviewed(change) {
+            "Press Enter to acknowledge the reviewed identity warning."
+        } else {
+            "Open /identity to review this warning before acknowledging it."
+        }
+        .into();
+        self.input.buffer = completed;
         self.move_cursor_to_end();
         self.input.identity_user_completion = Some((room, query, selected));
         true

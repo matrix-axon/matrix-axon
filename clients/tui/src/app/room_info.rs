@@ -282,7 +282,6 @@ impl App {
             self.room_info.abort_reads(false);
             self.clear_member_refresh();
             self.room_info.reviewed_identities.clear();
-            self.room_info.identity_action_result = None;
             self.room_info.state = Some(RoomInfoState {
                 key,
                 metadata: Part::default(),
@@ -401,7 +400,6 @@ impl App {
             self.cancel_room_info_refresh();
             self.room_info.state = None;
             self.room_info.reviewed_identities.clear();
-            self.room_info.identity_action_result = None;
             return;
         };
         if !self.room_info_popup_is_open() {
@@ -627,6 +625,11 @@ impl App {
         })
     }
 
+    pub(super) fn room_identity_change_is_reviewed(&self, change: &RoomIdentityChange) -> bool {
+        self.room_identity_snapshot_is_current()
+            && self.room_info.reviewed_identities.contains(change)
+    }
+
     pub(super) fn room_identity_command(
         &mut self,
         action: Option<(crate::api::IdentityChangeKind, String)>,
@@ -640,8 +643,10 @@ impl App {
             let result = self
                 .room_info
                 .identity_action_result
-                .take()
-                .filter(|(key, _)| key == &room)
+                .as_ref()
+                .is_some_and(|(key, _)| key == &room)
+                .then(|| self.room_info.identity_action_result.take())
+                .flatten()
                 .map(|(_, result)| result);
             self.room_info.reviewed_identities.clear();
             self.room_info.identity_popup = Some(IdentityPopup {
@@ -665,6 +670,10 @@ impl App {
 
     fn start_room_identity_action(&mut self, room: RoomKey, change: Option<RoomIdentityChange>) {
         if self.room_info.identity_action_inflight {
+            self.report_identity_action(
+                &room,
+                "An identity acknowledgement is already in progress.".to_owned(),
+            );
             return;
         }
         let Some(change) = change.filter(|change| {
@@ -685,13 +694,22 @@ impl App {
             return;
         }
         self.room_info.identity_action_inflight = true;
-        self.room_info.identity_action_result = None;
         self.report_identity_action(&room, "Acknowledging identity change…".to_owned());
         let client = self.client.clone();
+        let account_id = room.account_id;
         self.spawn_bootstrap(async move {
-            let result = client
-                .acknowledge_identity_change(room.account_id, &change)
-                .await;
+            // Deliver an outcome even if the request task exits unexpectedly.
+            let result = tokio::spawn(async move {
+                client
+                    .acknowledge_identity_change(account_id, &change)
+                    .await
+            })
+            .await
+            .unwrap_or_else(|_| {
+                Err(ApiError::Request(
+                    "identity request task stopped".to_owned(),
+                ))
+            });
             super::bootstrap::BootstrapOutcome::IdentityAcknowledged { room, result }
         });
     }
@@ -828,7 +846,10 @@ impl App {
                 popup.selected = None;
                 self.popup_scroll = 0;
             }
-        } else if matches!(self.mode, Mode::Compose) && !self.is_mid_command() {
+        } else if self.selected_room_key().as_ref() == Some(room)
+            && matches!(self.mode, Mode::Compose)
+            && !self.is_mid_command()
+        {
             self.status = message.into();
             self.pending_command_response = None;
         } else {
@@ -845,32 +866,31 @@ impl App {
         let selected = self.selected_room_key();
         if selected.as_ref() == Some(&room) {
             self.room_info.reviewed_identities.clear();
-            let message = match result {
-                Ok(()) => "Identity change acknowledged.".to_owned(),
-                Err(ApiError::Status {
-                    status: reqwest::StatusCode::CONFLICT,
-                    message,
-                }) => {
-                    // The server currently uses the same error code for both conflicts.
-                    match message.as_str() {
+        }
+        let message = match result {
+            Ok(()) => "Identity change acknowledged.".to_owned(),
+            Err(ApiError::Status {
+                status: reqwest::StatusCode::CONFLICT,
+                message,
+            }) => {
+                // The server currently uses the same error code for both conflicts.
+                match message.as_str() {
                         "conflict: the account is not active or its crypto store is not ready" =>
                             "The account is inactive or its encryption state is still loading. Review the warning again once the account is ready.",
                         "conflict: the identity warning changed; refresh room info and review it again" =>
                             "The warning changed. Review the latest warning before retrying.",
                         _ => "Axon could not acknowledge this warning. Review the latest warning before retrying.",
                     }.to_owned()
-                }
-                Err(err) if err.is_service_unavailable() => {
-                    "Identity service unavailable. Review the warning and try again later."
-                        .to_owned()
-                }
-                Err(_) => {
-                    "Could not confirm acknowledgement. Review the latest warning before retrying."
-                        .to_owned()
-                }
-            };
-            self.report_identity_action(&room, message);
-        }
+            }
+            Err(err) if err.is_service_unavailable() => {
+                "Identity service unavailable. Review the warning and try again later.".to_owned()
+            }
+            Err(_) => {
+                "Could not confirm acknowledgement. Review the latest warning before retrying."
+                    .to_owned()
+            }
+        };
+        self.report_identity_action(&room, message);
         // The acknowledgement is account-wide, so a different selected room
         // for the same account can also need its projection refreshed.
         if let Some(key) = selected.filter(|key| key.account_id == room.account_id) {
@@ -4949,6 +4969,7 @@ mod tests {
         app.insert_str("@al");
         app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
         assert_eq!(app.input.buffer, "/identity accept @albert:example.com");
+        assert!(app.status.text(false).contains("Open /identity to review"));
         app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
         assert_eq!(app.input.buffer, "/identity accept @alice:example.com");
         app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
@@ -5001,6 +5022,67 @@ mod tests {
             .map(|x| buffer.cell((x, messages.y)).unwrap().symbol())
             .collect::<String>();
         assert!(top.contains("Ops  [in thread]"), "{top:?}");
+    }
+
+    #[test]
+    fn own_identity_banner_only_labels_the_selected_rooms_account() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = app();
+        let mut other = room();
+        other.account_id = Uuid::new_v4();
+        app.rooms.rooms.push(other.clone());
+        app.set_accounts(serde_json::from_value(json!([
+            {"account_id": key().account_id, "user_id": "@me:example.com", "state": "active", "own_identity_changed": true},
+            {"account_id": other.account_id, "user_id": "@other:example.com", "state": "active"}
+        ])).unwrap());
+        app.rooms_panel_hidden = true;
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        for (index, expected) in [(0, true), (1, false)] {
+            app.rooms.selected = Some(index);
+            terminal
+                .draw(|frame| {
+                    crate::ui::prepare(&mut app, frame.area());
+                    crate::ui::draw(frame, &mut app);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let messages = app.frame.areas.messages;
+            let title = (messages.x..messages.right())
+                .map(|x| buffer.cell((x, messages.y)).unwrap().symbol())
+                .collect::<String>();
+            assert_eq!(
+                title.contains("Own identity changed /status"),
+                expected,
+                "{title:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn identity_action_result_waits_for_the_originating_room() {
+        let mut app = app();
+        let mut other = room();
+        other.room_id = "!other:example.com".to_owned();
+        app.rooms.rooms.push(other);
+        app.rooms.selected = Some(1);
+        app.status = "Room B status".into();
+        app.apply_room_identity_action(
+            key(),
+            Err(ApiError::Status {
+                status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                message: "identity service unavailable".to_owned(),
+            }),
+        );
+        assert_eq!(app.status.text(false), "Room B status");
+
+        app.room_identity_command(None);
+        assert!(!identity_popup_text(&mut app).contains("Identity service unavailable"));
+        app.rooms.selected = Some(0);
+        app.room_identity_command(None);
+        assert!(identity_popup_text(&mut app).contains("Identity service unavailable"));
+        app.room_identity_command(None);
+        assert!(!identity_popup_text(&mut app).contains("Identity service unavailable"));
     }
 
     #[tokio::test]

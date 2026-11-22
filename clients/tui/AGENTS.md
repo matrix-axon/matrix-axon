@@ -80,7 +80,8 @@
   Keep sending available while warnings are present.
 - Account reads and `account.own_identity_changed` update the own-identity alert.
   Reconnect and explicit refresh re-read accounts.
-  Keep the warning visible in the timeline title and show account-specific verification and recovery guidance in `/status`.
+  A transient background account refresh failure retries after 30 seconds.
+  Scope the warning in the timeline title to the selected room’s account and show account-specific verification and recovery guidance in `/status`.
 - `/status` uses the cached `GET /v1/accounts` response and lists every client-visible account as `logged in` (`active`) or `logged out` (`deactivated`). Each account block also shows the live megolm-backup snapshot (`exists_on_server`, this-device uploading, `backup_state`, `recovery_state`). `recovery_state` is 4S completeness, not "history keys imported." Keep the account panel and `/account` navigation active-only.
 - Room titles follow ADR 0118: nonblank `name`, then `canonical_alias`, then the server's `display_name`, then room ID.
   Never derive room titles from `/members`; those reads still hydrate timeline sender names.
