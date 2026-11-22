@@ -27,6 +27,7 @@ This page indexes everything else.
 | [CONTRIBUTING](https://github.com/matrix-axon/matrix-axon/blob/main/CONTRIBUTING.md) | The pre-push gate, conventions, releasing                 |
 | [AGENTS.md](../AGENTS.md)                                                            | Working conventions and current state                     |
 | [Integration testing](integration-testing.md)                                        | Running Axon against a local Synapse                      |
+| [Self-hosted CI runners](self-hosted-runners.md)                                     | Setting up, updating and switching off the CI runners     |
 | [Packaging](../packaging/README.md)                                                  | `.deb`, `.rpm`, Homebrew and winget                       |
 | [Client parity](client-parity.md)                                                    | Which API capabilities each client exposes                |
 | [Demo coverage](demo-coverage.md)                                                    | Which demo scene shows which capability                   |

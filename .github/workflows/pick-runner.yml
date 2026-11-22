@@ -1,0 +1,120 @@
+# Chooses between the self-hosted runners and GitHub's hosted runners for the
+# caller's long job (ADR 0141, decision 1). A caller adds a `pick` job that uses
+# this workflow, and reads one output per pool:
+#
+#   pick:
+#     uses: ./.github/workflows/pick-runner.yml
+#     secrets:
+#       RUNNER_PICKER_PRIVATE_KEY: ${{ secrets.RUNNER_PICKER_PRIVATE_KEY }}
+#   heavy:
+#     needs: pick
+#     if: ${{ !cancelled() }}
+#     runs-on: ${{ fromJSON(needs.pick.outputs.linux || '"ubuntu-latest"') }}
+#
+# Each output is JSON: ["self-hosted","axon-linux"] when that pool has a free
+# runner, otherwise the caller's hosted image as a JSON string. Pass the secret by
+# name: `secrets: inherit` would hand this workflow every repository secret.
+#
+# This workflow never fails its caller's run. Every step continues on error, and
+# the outputs fall back to the hosted image whenever the decision step did not
+# produce one. The `|| '"ubuntu-latest"'` and `!cancelled()` above cover the
+# case where the job itself never ran.
+#
+# Only one job (or one matrix lane) in a run may read a pool's output: several
+# readers would queue one after another on a single runner (decision 4).
+
+name: Pick runner
+
+on:
+  workflow_call:
+    inputs:
+      linux-fallback:
+        description: "Hosted image for the linux output when no self-hosted runner is free"
+        type: string
+        default: ubuntu-latest
+      macos-fallback:
+        description: "Hosted image for the macos output when no self-hosted runner is free"
+        type: string
+        default: macos-latest
+    secrets:
+      RUNNER_PICKER_PRIVATE_KEY:
+        description: "Private key of the runner picker GitHub App"
+        required: false
+    outputs:
+      linux:
+        description: "runs-on for the Linux pool, as JSON"
+        value: ${{ jobs.pick.outputs.linux }}
+      macos:
+        description: "runs-on for the macOS pool, as JSON"
+        value: ${{ jobs.pick.outputs.macos }}
+
+permissions:
+  contents: read
+
+jobs:
+  pick:
+    runs-on: ubuntu-latest
+    # No job-level timeout: a timed-out job fails, and a failed `needs` skips the
+    # caller's job. Each step has its own limit and continues on error instead.
+    outputs:
+      linux: ${{ steps.decide.outputs.linux || toJSON(inputs.linux-fallback) }}
+      macos: ${{ steps.decide.outputs.macos || toJSON(inputs.macos-fallback) }}
+    steps:
+      - name: Check out the picker script
+        uses: actions/checkout@v7
+        continue-on-error: true
+        timeout-minutes: 2
+        with:
+          sparse-checkout: scripts/ci/pick-runner.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      # Checks 1-3 of decision 1: kill switch, trusted event, App configured.
+      - name: Precheck
+        id: precheck
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        env:
+          KILL_SWITCH: ${{ vars.SELF_HOSTED_RUNNERS }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          HAS_KEY: ${{ secrets.RUNNER_PICKER_PRIVATE_KEY != '' }}
+          CLIENT_ID: ${{ vars.RUNNER_PICKER_CLIENT_ID }}
+        run: scripts/ci/pick-runner.sh precheck
+
+      - name: Mint the App token
+        id: token
+        if: steps.precheck.outputs.proceed == 'true'
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RUNNER_PICKER_CLIENT_ID }}
+          private-key: ${{ secrets.RUNNER_PICKER_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-organization-self-hosted-runners: read
+          permission-actions: read
+
+      # Check 4: more idle runners with the pool's label than jobs waiting for it.
+      - name: Decide
+        id: decide
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        env:
+          PROCEED: ${{ steps.precheck.outputs.proceed }}
+          PRECHECK_REASON: ${{ steps.precheck.outputs.reason || 'the precheck step did not run' }}
+          TOKEN_OUTCOME: ${{ steps.token.outcome }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          ORG: ${{ github.repository_owner }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          LINUX_FALLBACK: ${{ inputs.linux-fallback }}
+          MACOS_FALLBACK: ${{ inputs.macos-fallback }}
+        run: scripts/ci/pick-runner.sh decide
