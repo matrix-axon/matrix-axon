@@ -135,10 +135,29 @@ export interface TelemetryStore {
  * shapes, so they can be rejected on sight — the same "mechanism, not a
  * promise" reasoning behind `room-list-cache.ts`'s projection.
  */
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
 
-function identifierish(value: string): boolean {
-  return /^[!@#$+]/.test(value) || UUID.test(value)
+/**
+ * A sigil opening the value or any path segment of it, written or
+ * percent-encoded. A route is a path, and an id one segment into it is as much
+ * an id as one at the front: `accounts/{account}/events/%24abc…` reached disk
+ * under the start-only check this replaces.
+ */
+const SIGIL = /(?:^|\/)(?:[!@#$+]|%2[134b]|%40)/i
+
+/*
+ * Both checks run on every string field, not only routes, and that is the
+ * point: a backstop that trusted a field's name would miss the field nobody
+ * vetted. The cost is that a harmless value shaped like an id (an asset path
+ * through `@vite`, a note quoting a UUID) is dropped too. No mark writes one
+ * today; `route` fields arrive already collapsed by `shortRoute`, which
+ * collapses by this same predicate, so a route this drops is a `shortRoute`
+ * bug, and `perf.test.ts` is where that shows.
+ */
+
+/** True for a value `scrub` drops. `shortRoute` collapses path segments by it. */
+export function identifierish(value: string): boolean {
+  return SIGIL.test(value) || UUID.test(value)
 }
 
 /** Keep numbers, booleans and null; keep strings only if they name nothing. */

@@ -1,0 +1,152 @@
+/**
+ * Every route template in `openapi/openapi.json`, for code that must name a
+ * request without repeating anything the caller put in its path.
+ *
+ * `perf.ts`'s `shortRoute` matches request paths against these, so a path
+ * parameter collapses because of where it sits, not because of what it looks
+ * like: a room tagged `work` is a `{tag}` slot, though `work` is as plain a
+ * word as `timeline`. `satisfies` keeps each entry a real route;
+ * `routes.test.ts` keeps the list complete.
+ */
+import type { paths } from './schema'
+
+export const API_ROUTES = [
+  '/v1/accounts',
+  '/v1/accounts/import',
+  '/v1/accounts/login',
+  '/v1/accounts/login/browser',
+  '/v1/accounts/login/browser/{flow_id}',
+  '/v1/accounts/login/qr',
+  '/v1/accounts/login/qr/{flow_id}',
+  '/v1/accounts/login/qr/{flow_id}/check-code',
+  '/v1/accounts/login/qr/{flow_id}/scan',
+  '/v1/accounts/{account_id}',
+  '/v1/accounts/{account_id}/backup/enable',
+  '/v1/accounts/{account_id}/devices',
+  '/v1/accounts/{account_id}/directory/public_rooms',
+  '/v1/accounts/{account_id}/events/{event_id}',
+  '/v1/accounts/{account_id}/events/{event_id}/edits',
+  '/v1/accounts/{account_id}/events/{event_id}/reactions',
+  '/v1/accounts/{account_id}/events/{event_id}/replies',
+  '/v1/accounts/{account_id}/events/{event_id}/verification',
+  '/v1/accounts/{account_id}/link-previews/generate',
+  '/v1/accounts/{account_id}/login-grants/qr',
+  '/v1/accounts/{account_id}/login-grants/qr/{flow_id}',
+  '/v1/accounts/{account_id}/login-grants/qr/{flow_id}/check-code',
+  '/v1/accounts/{account_id}/login-grants/qr/{flow_id}/scan',
+  '/v1/accounts/{account_id}/logout',
+  '/v1/accounts/{account_id}/media/uploads',
+  '/v1/accounts/{account_id}/media/uploads/{upload_id}',
+  '/v1/accounts/{account_id}/media/uploads/{upload_id}/preview',
+  '/v1/accounts/{account_id}/profile/avatar',
+  '/v1/accounts/{account_id}/profile/display_name',
+  '/v1/accounts/{account_id}/recover',
+  '/v1/accounts/{account_id}/rooms',
+  '/v1/accounts/{account_id}/rooms/dm',
+  '/v1/accounts/{account_id}/rooms/join',
+  '/v1/accounts/{account_id}/rooms/knock',
+  '/v1/accounts/{account_id}/rooms/{room_id}/avatar',
+  '/v1/accounts/{account_id}/rooms/{room_id}/ban',
+  '/v1/accounts/{account_id}/rooms/{room_id}/discovery',
+  '/v1/accounts/{account_id}/rooms/{room_id}/emoji-packs',
+  '/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}',
+  '/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}/reactions',
+  '/v1/accounts/{account_id}/rooms/{room_id}/forget',
+  '/v1/accounts/{account_id}/rooms/{room_id}/homeserver_details',
+  '/v1/accounts/{account_id}/rooms/{room_id}/info',
+  '/v1/accounts/{account_id}/rooms/{room_id}/invite',
+  '/v1/accounts/{account_id}/rooms/{room_id}/kick',
+  '/v1/accounts/{account_id}/rooms/{room_id}/leave',
+  '/v1/accounts/{account_id}/rooms/{room_id}/members',
+  '/v1/accounts/{account_id}/rooms/{room_id}/metadata',
+  '/v1/accounts/{account_id}/rooms/{room_id}/name',
+  '/v1/accounts/{account_id}/rooms/{room_id}/pinned',
+  '/v1/accounts/{account_id}/rooms/{room_id}/power_levels',
+  '/v1/accounts/{account_id}/rooms/{room_id}/read',
+  '/v1/accounts/{account_id}/rooms/{room_id}/send',
+  '/v1/accounts/{account_id}/rooms/{room_id}/send-media',
+  '/v1/accounts/{account_id}/rooms/{room_id}/send-sticker',
+  '/v1/accounts/{account_id}/rooms/{room_id}/space/children',
+  '/v1/accounts/{account_id}/rooms/{room_id}/space/hierarchy',
+  '/v1/accounts/{account_id}/rooms/{room_id}/space/parents',
+  '/v1/accounts/{account_id}/rooms/{room_id}/tags/{tag}',
+  '/v1/accounts/{account_id}/rooms/{room_id}/threads',
+  '/v1/accounts/{account_id}/rooms/{room_id}/threads/{root_id}/timeline',
+  '/v1/accounts/{account_id}/rooms/{room_id}/timeline',
+  '/v1/accounts/{account_id}/rooms/{room_id}/topic',
+  '/v1/accounts/{account_id}/rooms/{room_id}/typing',
+  '/v1/accounts/{account_id}/rooms/{room_id}/unban',
+  '/v1/accounts/{account_id}/rooms/{room_id}/upgrade',
+  '/v1/accounts/{account_id}/users/{user_id}/identity/accept',
+  '/v1/accounts/{account_id}/users/{user_id}/identity/withdraw_verification',
+  '/v1/accounts/{account_id}/users/{user_id}/ignore',
+  '/v1/accounts/{account_id}/users/{user_id}/profile',
+  '/v1/accounts/{account_id}/utds/redecrypt',
+  '/v1/accounts/{account_id}/verify',
+  '/v1/accounts/{account_id}/verify/{flow_id}',
+  '/v1/accounts/{account_id}/verify/{flow_id}/cancel',
+  '/v1/accounts/{account_id}/verify/{flow_id}/confirm',
+  '/v1/capabilities',
+  '/v1/devices/{device_id}/state/{namespace}',
+  '/v1/invites',
+  '/v1/management/accounts/{account_id}/history-verify',
+  '/v1/management/oauth/binds',
+  '/v1/management/oauth/binds/{bind_id}',
+  '/v1/management/oauth/identities',
+  '/v1/management/oauth/identities/{identity_id}',
+  '/v1/management/tokens',
+  '/v1/management/tokens/{token_id}',
+  '/v1/media-stream/{ticket}',
+  '/v1/media/{account_id}/{server_name}/{media_id}',
+  '/v1/media/{account_id}/{server_name}/{media_id}/stream-ticket',
+  '/v1/media/{account_id}/{server_name}/{media_id}/thumbnail',
+  '/v1/oauth/apple/native/challenge',
+  '/v1/oauth/apple/native/token',
+  '/v1/oauth/providers',
+  '/v1/oauth/{provider}/callback',
+  '/v1/preferences/{key}',
+  '/v1/push/registrations',
+  '/v1/push/registrations/{id}',
+  '/v1/rooms',
+  '/v1/rooms/previews',
+  '/v1/search',
+  '/v1/status',
+] as const satisfies readonly (keyof paths)[]
+
+/*
+ * The client's own words for two parameter slots. Each value is a constant
+ * this client chose, never something a user typed, so telemetry can name it:
+ * `devices/{id}/state/read_markers` and `.../thread_read_markers` time out
+ * for different reasons, and both collapsing to `state/{id}` hid which one.
+ * The stores that use them import them from here, so a new namespace or key
+ * is added in the one place that also makes it readable.
+ */
+/** The device-state namespace drafts live under (TUI parity). */
+export const DRAFTS_NAMESPACE = 'drafts'
+/** The device-state namespace read markers live under (TUI parity). */
+export const READ_MARKERS_NAMESPACE = 'read_markers'
+/** The namespace for per-thread read positions (web unread-thread attention). */
+export const THREAD_READ_MARKERS_NAMESPACE = 'thread_read_markers'
+/** The instance preference holding the space order. */
+export const SPACE_ORDER_KEY = 'space_order'
+/** The instance preference holding the message gestures. */
+export const MESSAGE_GESTURES_KEY = 'message_gestures'
+
+/**
+ * Per route, the slots whose value is kept as written when it is one of the
+ * client's own words above. Any other value in the slot is still `{id}`.
+ */
+export const KNOWN_SLOT_VALUES = {
+  '/v1/devices/{device_id}/state/{namespace}': {
+    namespace: [
+      DRAFTS_NAMESPACE,
+      READ_MARKERS_NAMESPACE,
+      THREAD_READ_MARKERS_NAMESPACE,
+    ],
+  },
+  '/v1/preferences/{key}': {
+    key: [SPACE_ORDER_KEY, MESSAGE_GESTURES_KEY],
+  },
+} as const satisfies Partial<
+  Record<(typeof API_ROUTES)[number], Record<string, readonly string[]>>
+>

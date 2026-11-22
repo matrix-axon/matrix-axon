@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { API_ROUTES } from './api/routes'
+import { scrub } from './stores/telemetry'
 import {
   perfActive,
   perfMark,
@@ -674,6 +676,172 @@ describe('room-open summary', () => {
     }
     return marks
   }
+
+  it('collapses every path parameter in a route, encoded or not', () => {
+    const base = `https://axon.test/v1/accounts/${ACCOUNT}`
+    const urls = [
+      // The client percent-encodes `$` and `@`, which the old sigil check
+      // missed: these event and user ids reached persisted telemetry.
+      `${base}/events/%24liYxpRqhUAwbDyTJdIYUF`,
+      `${base}/rooms/${encodeURIComponent(ROOM)}/threads/%24root/timeline`,
+      `${base}/users/${encodeURIComponent('@alice:hs')}/profile`,
+      `${base}/rooms/${encodeURIComponent(ROOM)}/tags/m.favourite`,
+      `https://axon.test/v1/media/${ACCOUNT}/local.beeper.com/mackid1993_GgfaE/thumbnail?width=96`,
+      `${base}/rooms/${encodeURIComponent(ROOM)}/timeline?limit=50`,
+    ]
+    const marks = captured(() => {
+      for (const url of urls) {
+        const trace = perfTraceRequest(url)!
+        trace.sent()
+        trace.end('timeout')
+      }
+    })
+
+    expect(
+      marks
+        .filter((mark) => mark.name === 'api:deadline')
+        .map((mark) => mark.detail.route),
+    ).toEqual([
+      'accounts/{account}/events/{id}',
+      'accounts/{account}/rooms/{id}/threads/{id}/timeline',
+      'accounts/{account}/users/{id}/profile',
+      'accounts/{account}/rooms/{id}/tags/{id}',
+      'media/{account}/{id}/{id}/thumbnail',
+      'accounts/{account}/rooms/{id}/timeline',
+    ])
+  })
+
+  /** The `route` each URL's deadline mark carries, in order. */
+  function deadlineRoutes(urls: readonly string[]): unknown[] {
+    return captured(() => {
+      for (const url of urls) {
+        const trace = perfTraceRequest(url)!
+        trace.sent()
+        trace.end('timeout')
+      }
+    })
+      .filter((mark) => mark.name === 'api:deadline')
+      .map((mark) => mark.detail.route)
+  }
+
+  it('collapses a parameter by its slot, even when it reads as a plain word', () => {
+    const room = `https://axon.test/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`
+    expect(
+      deadlineRoutes([
+        // A user's own tag name: as lowercase as any route word.
+        `${room}/tags/divorce`,
+        // A tag that happens to spell a real route word is still a tag.
+        `${room}/tags/members`,
+        // A dotless server name and a letters-only media id.
+        `https://axon.test/v1/media/${ACCOUNT}/hs/abcdef/thumbnail`,
+        `https://axon.test/v1/media/${ACCOUNT}/localhost/abcdef`,
+      ]),
+    ).toEqual([
+      'accounts/{account}/rooms/{id}/tags/{id}',
+      'accounts/{account}/rooms/{id}/tags/{id}',
+      'media/{account}/{id}/{id}/thumbnail',
+      'media/{account}/{id}/{id}',
+    ])
+  })
+
+  it('keeps every route word openapi.json names, and nothing put in a slot', () => {
+    // Each route, with every slot filled by a word no route uses: whatever a
+    // caller puts in a parameter, only the route's own words come back.
+    const routes = API_ROUTES.map((route) =>
+      route.replace(/\{(\w+)\}/g, (_, name: string) =>
+        name === 'account_id' ? ACCOUNT : 'secret',
+      ),
+    )
+    const labels = API_ROUTES.map((route) =>
+      route
+        .slice('/v1/'.length)
+        .replace(/\{(\w+)\}/g, (_, name: string) =>
+          name === 'account_id' ? '{account}' : '{id}',
+        ),
+    )
+    expect(
+      deadlineRoutes(routes.map((path) => `https://axon.test${path}`)),
+    ).toEqual(labels)
+  })
+
+  it("names a slot's value only when it is one of the client's own words", () => {
+    const device =
+      'https://axon.test/v1/devices/3d3af5cb-f963-4063-9e3c-233c665a8adf'
+    expect(
+      deadlineRoutes([
+        `${device}/state/read_markers`,
+        `${device}/state/thread_read_markers`,
+        `${device}/state/drafts`,
+        'https://axon.test/v1/preferences/space_order',
+        // Not a namespace or key this client defines: still a parameter.
+        `${device}/state/divorce`,
+        'https://axon.test/v1/preferences/divorce',
+        // A known word in a slot that does not list it is still a parameter.
+        `https://axon.test/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}/tags/drafts`,
+      ]),
+    ).toEqual([
+      'devices/{id}/state/read_markers',
+      'devices/{id}/state/thread_read_markers',
+      'devices/{id}/state/drafts',
+      'preferences/space_order',
+      'devices/{id}/state/{id}',
+      'preferences/{id}',
+      'accounts/{account}/rooms/{id}/tags/{id}',
+    ])
+  })
+
+  it('keeps only route words in an API path no route matches', () => {
+    expect(
+      deadlineRoutes([
+        `https://axon.test/v1/accounts/${ACCOUNT}/rooms/work/novel/timeline`,
+        // A UUID that does not follow `accounts` is some other id.
+        `https://axon.test/v1/devices/${ACCOUNT}/novel`,
+      ]),
+    ).toEqual([
+      'accounts/{account}/rooms/{id}/{id}/timeline',
+      'devices/{id}/{id}',
+    ])
+  })
+
+  it("keeps the app's own asset names, minus anything scrub would refuse", () => {
+    expect(
+      deadlineRoutes([
+        'https://axon.test/@vite/client',
+        'https://axon.test/assets/+page.js',
+        `https://axon.test/assets/chunk-${ACCOUNT}.js`,
+        'https://axon.test/assets/index-abc.js',
+        `https://axon.test/room/${encodeURIComponent('@alice:hs')}`,
+        `https://axon.test/room/${encodeURIComponent('$event')}`,
+      ]),
+    ).toEqual([
+      '/{id}/client',
+      '/assets/{id}',
+      '/assets/{id}',
+      '/assets/index-abc.js',
+      '/room/{id}',
+      '/room/{id}',
+    ])
+  })
+
+  it('writes only routes that scrub lets through to disk', () => {
+    // A route scrub refused would drop the mark's whole `route` field.
+    const routes = deadlineRoutes([
+      'https://axon.test/@vite/client',
+      'https://axon.test/assets/+page.js',
+      `https://axon.test/assets/chunk-${ACCOUNT}.js`,
+      `https://axon.test/room/${encodeURIComponent('#room:hs')}`,
+      `https://axon.test/v1/devices/${ACCOUNT}/novel`,
+      `https://axon.test/v1/accounts/${ACCOUNT}/events/${encodeURIComponent('$event')}`,
+      ...API_ROUTES.map(
+        (route) =>
+          `https://axon.test${route.replace(/\{[^}]+\}/g, '%40secret')}`,
+      ),
+    ])
+    expect(routes.length).toBe(API_ROUTES.length + 6)
+    for (const route of routes) {
+      expect(scrub({ route })).toEqual({ route })
+    }
+  })
 
   const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
   const timelineUrl = (room: string) =>

@@ -175,6 +175,36 @@ describe('scrub', () => {
     ).toEqual({ n: 1, b: true, nul: null, ok: 'settled' })
   })
 
+  it('refuses an id anywhere in a path, written or percent-encoded', () => {
+    expect(
+      scrub({
+        event: 'accounts/{account}/events/%24liYxpRqhUAwbDy',
+        user: 'accounts/{account}/users/%40alice%3Ahs/profile',
+        room: 'accounts/{account}/rooms/!a:b/timeline',
+        uuid: 'devices/6b53f7f0-0000-4000-8000-000000000001/state',
+        route: 'accounts/{account}/rooms/{id}/timeline',
+        // A `+` inside a value is not a sigil; only one opening a segment is.
+        pending: 'members+threads',
+      }),
+    ).toEqual({
+      route: 'accounts/{account}/rooms/{id}/timeline',
+      pending: 'members+threads',
+    })
+  })
+
+  it('drops an id-shaped string whatever field it is in', () => {
+    // Fail closed: the backstop cannot tell a route from a note, so a
+    // harmless value shaped like an id goes too. Losing a field is the price
+    // of never writing an id through one nobody vetted.
+    expect(
+      scrub({
+        asset: 'node_modules/@vite/client',
+        note: 'build 6b53f7f0-0000-4000-8000-000000000001',
+        kept: 'node_modules/vite/client',
+      }),
+    ).toEqual({ kept: 'node_modules/vite/client' })
+  })
+
   it('tolerates a mark with no detail', () => {
     expect(scrub(undefined)).toEqual({})
     expect(scrub(null)).toEqual({})

@@ -1,4 +1,6 @@
 import { signal } from '@preact/signals'
+import { API_ROUTES, KNOWN_SLOT_VALUES } from './api/routes'
+import { identifierish } from './stores/telemetry'
 import type {
   TransportFailureKind,
   TransportVersion,
@@ -1554,7 +1556,105 @@ function roomTimelinePage(url: string): boolean {
   return timelinePage(url) && !url.includes('/threads/')
 }
 
-/** A route shape short enough to read on a phone: ids collapsed, query dropped. */
+/**
+ * One segment of a route template: a literal word, or a parameter slot with
+ * the label it logs as (`{account}` for `{account_id}`, `{id}` for every
+ * other) and the client's own words it may keep as written.
+ */
+type RouteSegment =
+  { literal: string } | { label: string; known: ReadonlySet<string> }
+
+type RouteTemplate = readonly RouteSegment[]
+
+const NO_KNOWN_VALUES: ReadonlySet<string> = new Set()
+
+/** `API_ROUTES` split into segments, with the leading `/v1/` dropped. */
+const ROUTE_TEMPLATES: readonly RouteTemplate[] = API_ROUTES.map((route) => {
+  const known: Readonly<Record<string, readonly string[]>> =
+    (
+      KNOWN_SLOT_VALUES as Partial<
+        Record<string, Record<string, readonly string[]>>
+      >
+    )[route] ?? {}
+  return route
+    .split('/')
+    .slice(2)
+    .map((segment): RouteSegment => {
+      if (!segment.startsWith('{')) {
+        return { literal: segment }
+      }
+      const name = segment.slice(1, -1)
+      return {
+        label: name === 'account_id' ? '{account}' : '{id}',
+        known: name in known ? new Set(known[name]) : NO_KNOWN_VALUES,
+      }
+    })
+})
+
+/** Every literal word any route uses, for paths no template matches. */
+const ROUTE_WORDS: ReadonlySet<string> = new Set(
+  ROUTE_TEMPLATES.flat().flatMap((segment) =>
+    'literal' in segment ? [segment.literal] : [],
+  ),
+)
+
+/**
+ * The template a request path was built from: same length, every literal
+ * equal. When two match (a literal where another route has a slot), the one
+ * with more literals wins, as a router would pick it.
+ */
+function matchRoute(segments: readonly string[]): RouteTemplate | null {
+  let best: RouteTemplate | null = null
+  let bestLiterals = -1
+  for (const template of ROUTE_TEMPLATES) {
+    if (template.length !== segments.length) {
+      continue
+    }
+    let literals = 0
+    const fits = template.every((segment, i) => {
+      if (!('literal' in segment)) {
+        return true
+      }
+      literals++
+      return segment.literal === segments[i]
+    })
+    if (fits && literals > bestLiterals) {
+      best = template
+      bestLiterals = literals
+    }
+  }
+  return best
+}
+
+/** A UUID, as an account id is. */
+const UUID_SEGMENT =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * A route shape short enough to read on a phone: ids collapsed, query dropped.
+ *
+ * Its output reaches disk (`stores/telemetry.ts` persists `route` fields), so
+ * under `/v1/` it keeps what the API itself names and nothing the caller put
+ * in. The path is matched against `openapi.json`'s templates (`API_ROUTES`):
+ * literal segments survive, and every parameter slot becomes `{id}`
+ * (`{account}` for the account) whatever it holds. A room tagged `work` logs as
+ * `tags/{id}`, though `work` is as plain a word as `timeline`. The one
+ * exception is a value from the client's own vocabulary for that slot
+ * (`KNOWN_SLOT_VALUES`: device-state namespaces, preference keys), kept as
+ * written. A path no template matches keeps only words some route uses, and
+ * calls a UUID `{account}` only where it follows `accounts`: device, upload
+ * and flow ids are UUIDs too.
+ *
+ * Shape rules alone kept failing: a sigil check let event ids through,
+ * because the client percent-encodes `$` as `%24`; a "lowercase words only"
+ * rule let tag names and dotless server names through.
+ *
+ * Other paths (the app's own assets) keep their names, minus any segment
+ * `scrub` would refuse (`identifierish`): a sigil at its start, written or
+ * percent-encoded, or a UUID in it. `/@vite/client` logs as `/{id}/client`.
+ * Collapsing by scrub's own rule is what keeps the route: a segment left
+ * as written there would drop the whole `route` field on its way to disk.
+ */
 function shortRoute(url: string): string {
   let path = url
   try {
@@ -1562,13 +1662,34 @@ function shortRoute(url: string): string {
   } catch {
     // A relative or malformed name: fall back to the raw string.
   }
+  if (path.startsWith('/v1/')) {
+    const segments = path.slice('/v1/'.length).split('/')
+    const template = matchRoute(segments)
+    if (template !== null) {
+      return template
+        .map((segment, i) =>
+          'literal' in segment
+            ? segment.literal
+            : segment.known.has(segments[i])
+              ? segments[i]
+              : segment.label,
+        )
+        .join('/')
+    }
+    return segments
+      .map((segment, i) =>
+        segment === '' || ROUTE_WORDS.has(segment)
+          ? segment
+          : segments[i - 1] === 'accounts' && UUID_SEGMENT.test(segment)
+            ? '{account}'
+            : '{id}',
+      )
+      .join('/')
+  }
   return path
-    .replace(
-      /\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi,
-      '/{account}',
-    )
-    .replace(/\/[!@$][^/]+/g, '/{id}')
-    .replace(/^\/v1\//, '')
+    .split('/')
+    .map((segment) => (identifierish(segment) ? '{id}' : segment))
+    .join('/')
 }
 
 /**
