@@ -56,7 +56,8 @@
       -> Outcome
     {
       try cancellation.check()
-      guard TextShare.links(input.text).contains(url) else {
+      // Before reuse, the injected lookup, and RestrictedPreview.fetch.
+      guard !TextShare.isMatrixLink(url), TextShare.links(input.text).contains(url) else {
         throw DevicePreviewFailure.unsupportedURL
       }
       guard

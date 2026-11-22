@@ -14,6 +14,96 @@ final class TextShareTests: XCTestCase {
     }
     XCTAssertTrue(TextShare.previewURL("https://example.org/%C3%A9?q=a%7Cb"))
   }
+  func testMatrixLinkStaysEligibleAndGetsNoSenderCard() {
+    for url in [
+      "https://matrix.to/#/!room:example.org/$event",
+      "https://matrix.to/#/#room:example.org",
+      "https://matrix.to/#/@alice:example.org",
+    ] {
+      XCTAssertTrue(TextShare.devicePreviewURL(url), url)
+      XCTAssertTrue(TextShare.isMatrixLink(url), url)
+      XCTAssertEqual(
+        TextShare.senderPreviewLinks("See \(url) and https://example.org/a"),
+        ["https://example.org/a"], url)
+    }
+  }
+
+  func testIsMatrixLinkMatchesTheSharedRule() throws {
+    struct Case: Decodable { let url: String; let matrix: Bool }
+    let path = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+      .appendingPathComponent("../../../../src/incoming-share/fixtures/matrix-link-urls.json")
+    for entry in try JSONDecoder().decode([Case].self, from: Data(contentsOf: path)) {
+      XCTAssertEqual(TextShare.isMatrixLink(entry.url), entry.matrix, entry.url)
+    }
+  }
+
+  func testWireDropsAMatrixLinkCardAndKeepsAnother() throws {
+    let matrix = "https://matrix.to/#/!room:example.org/$event"
+    var only = try draft(text: matrix)
+    only.previews = [SharePreview(matched_url: matrix, title: "matrix.to")]
+    XCTAssertNil(TextShare.wire(only)["url_previews"])
+    XCTAssertNil(TextShare.wire(try draft(text: matrix))["url_previews"])
+    var mixed = try draft(text: "See \(matrix) and \(link)")
+    mixed.previews = [
+      SharePreview(matched_url: matrix, title: "matrix.to"),
+      SharePreview(matched_url: link, title: "Kept"),
+    ]
+    let previews = try XCTUnwrap(TextShare.wire(mixed)["url_previews"] as? [[String: Any]])
+    XCTAssertEqual(previews.map { $0["matched_url"] as? String }, [link])
+    var stale = try draft(text: "See \(matrix) and \(link)")
+    stale.previews = [SharePreview(matched_url: matrix, title: "matrix.to")]
+    XCTAssertEqual((TextShare.wire(stale)["url_previews"] as? [Any])?.count, 0)
+    XCTAssertEqual((TextShare.wire(try draft())["url_previews"] as? [Any])?.count, 0)
+  }
+
+  func testMatrixLinkIsNotSentToTheHomeserver() throws {
+    let matrix = "https://matrix.to/#/!room:example.org/$event"
+    let value = try draft(text: "See \(matrix) and \(link)")
+    var requests = 0
+    let blocked = sender { _, _, _, _, _, _, _, _ in
+      requests += 1
+      return try self.response(200, ["data": [:]])
+    }
+    XCTAssertThrowsError(try blocked.generate(value, url: matrix)) {
+      XCTAssertEqual($0 as? ShareFailure, .invalid)
+    }
+    XCTAssertEqual(requests, 0)
+    XCTAssertNil(try store.list().first { $0.id == value.id }?.previews)
+  }
+
+  func testStaleMatrixCardIsNotUploaded() throws {
+    let matrix = "https://matrix.to/#/!room:example.org/$event"
+    let png = Data(
+      base64Encoded:
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH1sAAAAASUVORK5CYII="
+    )!
+    var withImage = try draft(text: matrix)
+    withImage = try store.importThumbnail(
+      withImage.id, owner: withImage.owner!, data: png, mime: "image/png",
+      preview: SharePreview(matched_url: matrix, title: "matrix.to"))
+    var withoutBytes = try draft(text: matrix)
+    withoutBytes.previews = [
+      SharePreview(matched_url: matrix, image_upload_id: UUID().uuidString)
+    ]
+    withoutBytes = try store.update(withoutBytes)
+    var uploads = 0
+    let sender = sender { _, _, path, _, body, file, _, _ in
+      if path.hasPrefix("/v1/rooms") { return try self.destinations() }
+      if file != nil || path.contains("/media/uploads") {
+        uploads += 1
+        return try self.response(200, ["data": ["upload_id": UUID().uuidString]])
+      }
+      let wire = try JSONSerialization.jsonObject(with: body!) as! [String: Any]
+      XCTAssertNil(wire["url_previews"])
+      return try self.response(200, ["data": ["event_id": "$sent"]])
+    }
+    for value in [withImage, withoutBytes] {
+      let sent = try sender.send(value)
+      XCTAssertEqual(sent.operation.state, .sent)
+    }
+    XCTAssertEqual(uploads, 0)
+  }
+
   func testPreviewCancellationBeforeWorkerStartAndSlotRecovery() throws {
     let requests = SharePreviewRequests()
     let first = UUID().uuidString
