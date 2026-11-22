@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { createApiClient } from '../api/client'
 import type { AuthProvider } from '../auth/provider'
 import { createStreamTickets } from './stream-ticket'
+import { StreamUnavailableError } from './stream-unavailable'
 
 const BASE = 'http://axon.test'
 const ACCOUNT = '11111111-1111-4111-8111-111111111111'
@@ -107,6 +108,15 @@ describe('createStreamTickets', () => {
       Promise.reject(new Error('refused')),
     ).issue(ACCOUNT, 'mxc://hs/clip')
     expect(outcome).toEqual({ ok: false, kind: 'failed' })
+  })
+
+  it('sends the caller to the blob path when the platform cannot stream after all', async () => {
+    // The Linux shell's loopback server failed to start.
+    issuePath('/v1/media-stream/abc')
+    const outcome = await tickets(() =>
+      Promise.reject(new StreamUnavailableError('not running')),
+    ).issue(ACCOUNT, 'mxc://hs/clip')
+    expect(outcome).toEqual({ ok: false, kind: 'refused' })
   })
 
   it('marks its probe, so the shell asks the server rather than its window', async () => {

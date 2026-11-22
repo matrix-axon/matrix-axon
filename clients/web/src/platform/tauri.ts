@@ -555,9 +555,9 @@ export function tauriPlatform(
     // A packaged build has no same-origin API to assume: it must be told.
     defaultApiBaseUrl: null,
     // The CSP cannot list the server's origin in `media-src`, so a ticket
-    // URL goes through the shell's `axon-media` scheme (ADR 0139 § 7),
-    // except on Linux, whose player cannot load it (`NO_STREAMING` in
-    // `media-stream.ts`; Android streams since wry 0.57.1).
+    // URL goes through the shell's `axon-media` scheme (ADR 0139 § 7), or
+    // on Linux, whose player cannot load a custom scheme, through the
+    // shell's loopback server (`media-stream.ts`).
     mediaStreamSrc: mediaStreamSrcFor(shellPlatform),
     // `dist` is compiled into this binary, so there is nothing for a reload to
     // fetch that is not already running. See the field's own note.

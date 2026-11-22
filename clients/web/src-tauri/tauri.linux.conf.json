@@ -1,0 +1,7 @@
+{
+  "app": {
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' blob: ipc: http://ipc.localhost axon-media: http://axon-media.localhost http://127.0.0.1:*; img-src 'self' asset: http://asset.localhost blob: data:; media-src 'self' asset: http://asset.localhost axon-media: http://axon-media.localhost http://127.0.0.1:* blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; font-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'none'"
+    }
+  }
+}

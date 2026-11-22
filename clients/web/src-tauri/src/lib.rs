@@ -1457,6 +1457,59 @@ mod tests {
             .is_none());
     }
 
+    /// The Linux shell's CSP (`tauri.linux.conf.json`, which Tauri merges
+    /// over `tauri.conf.json` for Linux builds) is the base CSP plus the
+    /// loopback media server's origin in `media-src` and `connect-src`
+    /// (ADR 0139 § 7, loopback amendment), and nothing else. The other
+    /// shells never listen on loopback, so their CSP does not name it. A
+    /// change to the base CSP that is not copied into the Linux file fails
+    /// here rather than quietly leaving the Linux shell on the old policy.
+    #[test]
+    fn the_linux_csp_is_the_base_csp_plus_the_loopback_server() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let csp = |file: &str| -> Vec<(String, Vec<String>)> {
+            let config: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(dir.join(file)).unwrap())
+                    .unwrap_or_else(|_| panic!("{file} parses"));
+            config["app"]["security"]["csp"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{file} sets app.security.csp"))
+                .split(';')
+                .map(str::trim)
+                .filter(|directive| !directive.is_empty())
+                .map(|directive| {
+                    let mut words = directive.split_whitespace().map(str::to_owned);
+                    let name = words.next().expect("a directive has a name");
+                    (name, words.collect())
+                })
+                .collect()
+        };
+        let loopback = "http://127.0.0.1:*".to_owned();
+
+        let mut expected = csp("tauri.conf.json");
+        for (name, sources) in &mut expected {
+            assert!(
+                !sources.contains(&loopback),
+                "the base CSP names the loopback server, which only Linux runs"
+            );
+            if name == "media-src" || name == "connect-src" {
+                sources.push(loopback.clone());
+            }
+        }
+        let sorted = |mut directives: Vec<(String, Vec<String>)>| {
+            for (_, sources) in &mut directives {
+                sources.sort();
+            }
+            directives
+        };
+        assert_eq!(
+            sorted(csp("tauri.linux.conf.json")),
+            sorted(expected),
+            "tauri.linux.conf.json's CSP must be tauri.conf.json's plus \
+             {loopback} in media-src and connect-src"
+        );
+    }
+
     /// Every file `tauri.conf.json` points at must actually be there.
     ///
     /// Nothing else checks. `generate_context!` embeds the config at compile
