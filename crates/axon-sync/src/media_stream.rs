@@ -708,7 +708,7 @@ mod tests {
         assert!(error.is_none());
         assert_eq!(bytes, b"hello media");
 
-        let seen = seen.lock().unwrap().last().cloned().unwrap();
+        let seen = download_request(&seen);
         assert_eq!(
             seen.path,
             "/_matrix/client/v1/media/download/example.org/plain"
@@ -723,7 +723,7 @@ mod tests {
         let client = sdk_client(address, MatrixVersion::V1_1, "good").await;
         let (bytes, _) = drain(open_plain(&client, "plain").await.unwrap().body).await;
         assert_eq!(bytes, b"hello media");
-        let seen = seen.lock().unwrap().last().cloned().unwrap();
+        let seen = download_request(&seen);
         assert_eq!(seen.path, "/_matrix/media/v3/download/example.org/plain");
         assert_eq!(seen.authorization, None);
     }
@@ -780,6 +780,19 @@ mod tests {
             open_plain(&client, "brotli").await,
             Err(GatewayError::Upstream(message)) if message.contains("Content-Encoding")
         ));
+    }
+
+    /// The download the mock saw. Not `last()`: a client with a restored session
+    /// also asks for its secret-storage key in the background, and whether that
+    /// lands before or after the download depends on the machine's speed.
+    fn download_request(seen: &Mutex<Vec<Seen>>) -> Seen {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|seen| seen.path.contains("/download/"))
+            .cloned()
+            .expect("the mock saw no download")
     }
 
     /// Media requests the mock saw for `media_id`.
