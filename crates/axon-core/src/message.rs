@@ -47,11 +47,14 @@ impl Relation<'_> {
     }
 }
 
-/// Supported Matrix media message shape for a staged upload.
+/// Supported Matrix media message shape for a staged upload: `m.image`,
+/// `m.file`, `m.video` or `m.audio` (ADR 0142 section 1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaSendKind {
     Image,
     File,
+    Video,
+    Audio,
 }
 
 /// Claimed media bytes and metadata passed from the API upload substrate to the

@@ -1310,6 +1310,11 @@ pub struct CapabilitiesDto {
     /// An edit accepts `url_previews` and carries a message's previews forward
     /// when it omits them (ADR 0132 section 8).
     pub edit_url_previews: bool,
+    /// The kinds `POST …/media/uploads` accepts (ADR 0142 section 1). A server
+    /// without this field accepts only `image` and `file`, and rejects any
+    /// other kind when staging, so a client stages a video or audio file as
+    /// `video` or `audio` only when it is listed here, and as `file` otherwise.
+    pub media_upload_kinds: Vec<MediaUploadKindDto>,
 }
 
 /// Request body for reacting to an event (`POST …/events/{event_id}/reactions`).
@@ -1795,19 +1800,43 @@ pub struct StageMediaUploadQuery {
     pub filename: String,
 }
 
-/// Supported outbound media kind for M15.
+/// The Matrix message a staged upload becomes (ADR 0059, ADR 0142 section 1).
+///
+/// - `image` sends `m.image` and needs an `image/*` type.
+/// - `video` sends `m.video` and needs a `video/*` type.
+/// - `audio` sends `m.audio` and needs an `audio/*` type.
+/// - `file` sends `m.file` with any type, but an `image/*`, `video/*` or
+///   `audio/*` type is sent as `application/octet-stream`.
+///
+/// A kind that does not match the upload's type fails the send with a `400`.
+/// `video` and `audio` are newer than `image` and `file`: use them only when
+/// `GET /v1/capabilities` lists them in `media_upload_kinds`, because an
+/// older server rejects them when staging.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum MediaUploadKindDto {
     Image,
     File,
+    Video,
+    Audio,
 }
 
 impl MediaUploadKindDto {
+    /// Every kind this server stages, in the order `GET /v1/capabilities`
+    /// lists them.
+    pub const ALL: [MediaUploadKindDto; 4] = [
+        MediaUploadKindDto::Image,
+        MediaUploadKindDto::File,
+        MediaUploadKindDto::Video,
+        MediaUploadKindDto::Audio,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             MediaUploadKindDto::Image => "image",
             MediaUploadKindDto::File => "file",
+            MediaUploadKindDto::Video => "video",
+            MediaUploadKindDto::Audio => "audio",
         }
     }
 }

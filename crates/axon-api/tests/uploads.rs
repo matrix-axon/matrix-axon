@@ -104,6 +104,56 @@ async fn stage_upload_streams_body_and_normalizes_metadata() {
     assert_eq!(calls[0].bytes, b"abc");
 }
 
+/// ADR 0142 section 1: staging accepts `video` and `audio`, passes the kind
+/// and declared type through unchanged, and still refuses an unknown kind.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn stage_upload_accepts_video_and_audio_kinds() {
+    let store = store().await;
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app(store, uploads.clone());
+    let account_id = Uuid::new_v4();
+
+    for (query, content_type, kind) in [
+        (
+            "kind=video&filename=IMG_9306.mov",
+            "video/quicktime",
+            axon_api::MediaUploadKindDto::Video,
+        ),
+        (
+            "kind=audio&filename=memo.ogg",
+            "audio/ogg",
+            axon_api::MediaUploadKindDto::Audio,
+        ),
+    ] {
+        let (status, body) = request(
+            &app,
+            "POST",
+            &format!("/v1/accounts/{account_id}/media/uploads?{query}"),
+            Some(content_type),
+            Body::from("abc"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["kind"], kind.as_str());
+        assert_eq!(body["data"]["content_type"], content_type);
+        let last = uploads.calls().pop().expect("a staging call");
+        assert_eq!(last.kind, kind);
+        assert_eq!(last.content_type.as_deref(), Some(content_type));
+    }
+
+    let (status, _) = request(
+        &app,
+        "POST",
+        &format!("/v1/accounts/{account_id}/media/uploads?kind=sticker&filename=x"),
+        Some("image/png"),
+        Body::from("abc"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(uploads.calls().len(), 2);
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn delete_upload_routes_to_service() {

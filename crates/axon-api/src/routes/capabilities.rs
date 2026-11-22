@@ -4,7 +4,7 @@
 //! server that has it. An older server has no such route, and its `404` means
 //! none of them. Authenticated like the rest of `/v1`.
 
-use crate::dto::CapabilitiesDto;
+use crate::dto::{CapabilitiesDto, MediaUploadKindDto};
 use crate::response::ApiResponse;
 
 /// Get server capabilities
@@ -22,5 +22,6 @@ use crate::response::ApiResponse;
 pub async fn get_capabilities() -> ApiResponse<CapabilitiesDto> {
     ApiResponse::new(CapabilitiesDto {
         edit_url_previews: true,
+        media_upload_kinds: MediaUploadKindDto::ALL.to_vec(),
     })
 }

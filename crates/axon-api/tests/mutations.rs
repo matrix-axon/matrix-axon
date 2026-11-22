@@ -472,15 +472,22 @@ async fn previews_changed_is_a_409_that_releases_the_uploads() {
     assert!(uploads.completes().is_empty());
 }
 
-/// `GET /v1/capabilities` tells a client that edits keep previews; an older
-/// server's 404 means they do not.
+/// `GET /v1/capabilities` tells a client that edits keep previews (ADR 0132)
+/// and which upload kinds staging accepts (ADR 0142 section 1); an older
+/// server's 404, or a missing field, means it does not.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn capabilities_report_edit_url_previews() {
+async fn capabilities_report_edit_url_previews_and_media_upload_kinds() {
     let app = app(store().await, Arc::new(StubSender::ok("$unused")));
     let (status, body) = send(&app, "GET", "/v1/capabilities", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, json!({"data": {"edit_url_previews": true}}));
+    assert_eq!(
+        body,
+        json!({"data": {
+            "edit_url_previews": true,
+            "media_upload_kinds": ["image", "file", "video", "audio"],
+        }})
+    );
 }
 
 #[tokio::test]

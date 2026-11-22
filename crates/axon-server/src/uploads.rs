@@ -249,6 +249,8 @@ impl FilesystemStagedUploads {
             kind: match request.kind {
                 axon_api::MediaUploadKindDto::Image => MediaUploadKind::Image,
                 axon_api::MediaUploadKindDto::File => MediaUploadKind::File,
+                axon_api::MediaUploadKindDto::Video => MediaUploadKind::Video,
+                axon_api::MediaUploadKindDto::Audio => MediaUploadKind::Audio,
             },
             filename: &request.filename,
             content_type: request.content_type.as_deref(),
@@ -300,6 +302,8 @@ impl FilesystemStagedUploads {
         match kind {
             MediaUploadKind::Image => axon_api::MediaUploadKindDto::Image,
             MediaUploadKind::File => axon_api::MediaUploadKindDto::File,
+            MediaUploadKind::Video => axon_api::MediaUploadKindDto::Video,
+            MediaUploadKind::Audio => axon_api::MediaUploadKindDto::Audio,
         }
     }
 
