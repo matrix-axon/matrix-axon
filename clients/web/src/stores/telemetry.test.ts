@@ -192,6 +192,19 @@ describe('scrub', () => {
     })
   })
 
+  it('drops an id-shaped string whatever field it is in', () => {
+    // Fail closed: the backstop cannot tell a route from a note, so a
+    // harmless value shaped like an id goes too. Losing a field is the price
+    // of never writing an id through one nobody vetted.
+    expect(
+      scrub({
+        asset: 'node_modules/@vite/client',
+        note: 'build 6b53f7f0-0000-4000-8000-000000000001',
+        kept: 'node_modules/vite/client',
+      }),
+    ).toEqual({ kept: 'node_modules/vite/client' })
+  })
+
   it('tolerates a mark with no detail', () => {
     expect(scrub(undefined)).toEqual({})
     expect(scrub(null)).toEqual({})

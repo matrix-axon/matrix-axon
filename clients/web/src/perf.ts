@@ -1,4 +1,5 @@
 import { signal } from '@preact/signals'
+import { API_ROUTES } from './api/routes'
 import type {
   TransportFailureKind,
   TransportVersion,
@@ -1555,24 +1556,85 @@ function roomTimelinePage(url: string): boolean {
 }
 
 /**
- * A fixed word of an API route. Every literal segment under `/v1/` in
- * `openapi.json` has this shape; ids, server names, media ids and tag names
- * do not (mixed case, digits, dots, a sigil).
+ * One route template, split: a literal word, or the label its parameter slot
+ * logs as (`{account}` for `{account_id}`, `{id}` for every other).
  */
-const ROUTE_WORD = /^[a-z]+(?:[_-][a-z]+)*$/
+type RouteTemplate = readonly string[]
 
-/** A Matrix id's sigil, as written or as `encodeURIComponent` leaves it. */
-const ID_SIGIL = /^[!@$#+]/
+const isSlot = (segment: string) => segment.startsWith('{')
+
+/** `API_ROUTES` split into segments, with the leading `/v1/` dropped. */
+const ROUTE_TEMPLATES: readonly RouteTemplate[] = API_ROUTES.map((route) =>
+  route
+    .split('/')
+    .slice(2)
+    .map((segment) =>
+      !isSlot(segment)
+        ? segment
+        : segment === '{account_id}'
+          ? '{account}'
+          : '{id}',
+    ),
+)
+
+/** Every literal word any route uses, for paths no template matches. */
+const ROUTE_WORDS: ReadonlySet<string> = new Set(
+  ROUTE_TEMPLATES.flat().filter((segment) => !isSlot(segment)),
+)
+
+/**
+ * The template a request path was built from: same length, every literal
+ * equal. When two match (a literal where another route has a slot), the one
+ * with more literals wins, as a router would pick it.
+ */
+function matchRoute(segments: readonly string[]): RouteTemplate | null {
+  let best: RouteTemplate | null = null
+  let bestLiterals = -1
+  for (const template of ROUTE_TEMPLATES) {
+    if (template.length !== segments.length) {
+      continue
+    }
+    let literals = 0
+    const fits = template.every((slot, i) => {
+      if (isSlot(slot)) {
+        return true
+      }
+      literals++
+      return slot === segments[i]
+    })
+    if (fits && literals > bestLiterals) {
+      best = template
+      bestLiterals = literals
+    }
+  }
+  return best
+}
+
+/** An account id, in a path no template matches. */
+const UUID_SEGMENT =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * A Matrix id, decoded. Event ids and v12 room ids carry no server part, so a
+ * bare `$` or `!` is enough; a user, alias or group needs its `:server`, so an
+ * asset named `@vite` or `+page.js` keeps its name.
+ */
+const MATRIX_ID = /^(?:[$!]|[@#+][^/]*:)/
 
 /**
  * A route shape short enough to read on a phone: ids collapsed, query dropped.
  *
  * Its output reaches disk (`stores/telemetry.ts` persists `route` fields), so
- * it keeps what is known safe rather than removing what is known bad. Under
- * `/v1/`, a segment survives only if it is a route word; anything else is a
- * path parameter and becomes `{id}`. A sigil check alone was the old rule, and
- * it let event ids through: the client percent-encodes `$` as `%24`, so
- * `events/%24abc…` never started with `$`.
+ * under `/v1/` it keeps what the API itself names and nothing the caller put
+ * in. The path is matched against `openapi.json`'s templates (`API_ROUTES`):
+ * literal segments survive, and every parameter slot becomes `{id}`
+ * (`{account}` for the account) whatever it holds. A room tagged `work` logs as
+ * `tags/{id}`, though `work` is as plain a word as `timeline`. A path no
+ * template matches keeps only words some route uses.
+ *
+ * Shape rules alone kept failing: a sigil check let event ids through,
+ * because the client percent-encodes `$` as `%24`; a "lowercase words only"
+ * rule let tag names and dotless server names through.
  *
  * Other paths (the app's own assets) keep their names, minus any segment that
  * decodes to a Matrix id.
@@ -1584,24 +1646,32 @@ function shortRoute(url: string): string {
   } catch {
     // A relative or malformed name: fall back to the raw string.
   }
-  const api = path.startsWith('/v1/')
+  if (path.startsWith('/v1/')) {
+    const segments = path.slice('/v1/'.length).split('/')
+    const template = matchRoute(segments)
+    if (template !== null) {
+      return template.join('/')
+    }
+    return segments
+      .map((segment) =>
+        segment === '' || ROUTE_WORDS.has(segment)
+          ? segment
+          : UUID_SEGMENT.test(segment)
+            ? '{account}'
+            : '{id}',
+      )
+      .join('/')
+  }
   return path
-    .replace(
-      /\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi,
-      '/{account}',
-    )
     .split('/')
-    .map((segment, index) => {
-      if (segment === '' || segment === '{account}' || (api && index === 1)) {
-        return segment
-      }
-      if (ID_SIGIL.test(decodeSegment(segment))) {
-        return '{id}'
-      }
-      return api && !ROUTE_WORD.test(segment) ? '{id}' : segment
-    })
+    .map((segment) =>
+      UUID_SEGMENT.test(segment)
+        ? '{account}'
+        : MATRIX_ID.test(decodeSegment(segment))
+          ? '{id}'
+          : segment,
+    )
     .join('/')
-    .replace(/^\/v1\//, '')
 }
 
 /** `decodeURIComponent`, or the raw segment when it is not valid encoding. */
