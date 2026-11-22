@@ -62,6 +62,45 @@ NAME=<runner name>
 LIB=/usr/local/libexec/axon-runner
 ```
 
+### 0. The machine
+
+- **An Ubuntu LTS release: 22.04, 24.04 or 26.04.**
+  `actions/setup-python` installs Python from GitHub's prebuilt builds, which exist only for LTS releases.
+  On an interim release such as 25.10 it fails with "The version '3.x' ... was not found".
+  Interim releases also lose security support after nine months.
+- **The packages the jobs take from the machine.**
+  GitHub's hosted images ship these, so the workflows never install them:
+
+  ```sh
+  sudo apt install git curl jq shellcheck nodejs build-essential cmake pkg-config
+  ```
+
+  `lint-and-test`'s `check-environment` step fails within seconds, naming what is missing, if any of them is absent.
+  `shellcheck` matters even though nothing fails without it: actionlint silently skips its checks of `run:` blocks when it is missing.
+
+#### On WSL
+
+Give the runner a WSL distro of its own, not the one used for development.
+By default WSL mounts the Windows drives with the Windows user's access, and lets any Linux account start Windows programs, which then run as the Windows user.
+Either would let a job reach past the runner account.
+In the runner's distro, `/etc/wsl.conf` turns both off and enables systemd for the service:
+
+```ini
+[boot]
+systemd = true
+
+[automount]
+enabled = false
+
+[interop]
+enabled = false
+appendWindowsPath = false
+```
+
+Run `wsl --shutdown` from Windows for it to take effect.
+WSL distros share one network, so services listening on localhost in other distros stay reachable; ADR 0141 accepts that for machines that are not dedicated to CI.
+The distro stops when WSL shuts it down after it goes idle. The runner then shows as offline, and the picker uses hosted runners.
+
 ### 1. Retire an earlier registration
 
 If the account already runs a runner from somewhere else, stop it, then remove that registration from its directory:

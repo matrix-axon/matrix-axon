@@ -50,6 +50,13 @@ jobs:
 
       - name: check-environment
         uses: ./.github/actions/check-environment
+        with:
+          # What this job takes from the machine. node: bundle-version.sh.
+          # shellcheck: actionlint silently skips its run: checks without it.
+          # jq: the runner script tests. cc, c++, make, cmake, pkg-config: the
+          # native crates (aws-lc-sys, zstd-sys). git and curl: checkout and the
+          # Rust toolchain install.
+          require-commands: git curl jq shellcheck node cc c++ make cmake pkg-config
 
       # CI runs the *hooks*, not second copies of the same checks: the commands
       # and pinned versions are whatever .pre-commit-config.yaml says, so the
