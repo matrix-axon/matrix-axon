@@ -18,14 +18,26 @@ if ! id nobody >/dev/null 2>&1; then
 fi
 me=$(id -un)
 
-# A fresh runner tree: install dir, writable _work and _diag, a hook in its own dir.
+# A fresh runner tree: install dir, writable _work and _diag, a hook in its own
+# dir, the programs the service starts, and registration files.
+# `nobody` shares no group with the files here, so the programs are executable
+# through the "others" bits; on a real runner they are executable through the
+# runner account's group.
 setup() {
   work=$(mktemp -d)
   chmod 755 "$work"
   # mktemp's parent must itself pass, or every case fails for the same reason.
   r="$work/runner"
   mkdir -p "$r/bin" "$r/_work/repo" "$r/_diag" "$work/hooks"
-  printf 'x\n' >"$r/bin/Runner.Worker"
+  chmod 755 "$r" "$r/bin" "$work/hooks"
+  for f in runsvc.sh bin/Runner.Listener bin/Runner.Worker; do
+    printf '#!/bin/bash\n' >"$r/$f"
+    chmod 755 "$r/$f"
+  done
+  for f in .runner .credentials .credentials_rsaparams; do
+    printf '{}\n' >"$r/$f"
+    chmod 640 "$r/$f"
+  done
   printf '#!/bin/bash\n' >"$work/hooks/job-started.sh"
   printf 'LANG=C.UTF-8\nACTIONS_RUNNER_HOOK_JOB_STARTED=%s\n' "$work/hooks/job-started.sh" >"$r/.env"
   chmod -R go-w "$work"
@@ -44,6 +56,7 @@ check() { # pass|fail name user
     echo "FAIL: $2: passed" >&2
     failures=$((failures + 1))
   fi
+  chmod -R u+rwx "$work" 2>/dev/null
   rm -rf "$work"
 }
 
@@ -110,6 +123,46 @@ check fail "no .env" nobody
 setup
 ln -s /etc "$r/bin/link"
 check pass "symlink inside the tree" nobody
+
+setup
+chmod o+r "$r/.credentials_rsaparams"
+check fail "world-readable registration key" nobody
+
+setup
+chmod o+r "$r/.runner"
+check fail "world-readable .runner" nobody
+
+# The 2026-11-22 trial: group/others lost execute on the runner's programs while
+# the listener ran, so the next job could not start its worker.
+setup
+chmod 744 "$r/bin/Runner.Worker"
+check fail "worker not executable by the runner account" nobody
+
+setup
+chmod 744 "$r/runsvc.sh"
+check fail "runsvc.sh not executable by the runner account" nobody
+
+setup
+chmod 744 "$r/bin"
+check fail "bin not searchable by the runner account" nobody
+
+setup
+rm "$r/bin/Runner.Listener"
+check fail "missing listener" nobody
+
+# A tree the checking account cannot read must be refused, not passed: find
+# reports nothing for a directory it cannot open.
+setup
+if [[ $(id -u) == 0 ]]; then
+  echo "note: running as root, which reads any directory; skipping the unreadable-tree case"
+else
+  mkdir "$r/hidden"
+  printf 'x\n' >"$r/hidden/f"
+  chmod 777 "$r/hidden/f"
+  chmod 000 "$r/hidden"
+  check fail "unreadable subdirectory hides a world-writable file" nobody
+fi
+rm -rf "$work"
 
 setup
 if bash "$preflight" "$r" no-such-user-here >/dev/null 2>&1; then

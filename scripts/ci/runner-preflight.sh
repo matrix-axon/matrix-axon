@@ -19,6 +19,17 @@
 #     must be set to an absolute path;
 #   - every directory above either of them, because whoever can write a parent
 #     can rename the child and put their own copy in its place.
+#
+# It also fails, because these break the runner or leak its registration, when:
+#   - a registration file (`.runner*`, `.credentials*`) is readable by others:
+#     its private key lets whoever reads it act as this runner;
+#   - the runner account cannot execute `runsvc.sh`, `bin/Runner.Listener` or
+#     `bin/Runner.Worker`, or search the directories that hold them. A runner
+#     already running when that changes keeps polling and accepts a job, then
+#     cannot start the worker, so the job hangs with no steps and no error.
+# These are checked only at start: after changing permissions under <runner-dir>,
+# restart the service so the check runs again.
+#
 # A parent directory may be writable by others if it is sticky (like /tmp) and
 # not owned by <runner-user>: in a sticky directory only an entry's owner can
 # rename it. Symbolic links are not checked themselves (their mode is always 777); what
@@ -48,11 +59,31 @@ id "$user" >/dev/null 2>&1 || {
   exit 1
 }
 
+# Every scan fails closed: a path that find cannot read counts as a problem, so
+# running this as an account that cannot see the tree refuses instead of passing.
+# Run it as <runner-user> (the systemd unit's User=) or as root.
+# scan leaves its matches in $found, not on stdout: a $(scan ...) would run in a
+# subshell, and the problem it counts would be lost.
+found=""
+scan() { # what, find arguments...
+  local what=$1
+  shift
+  if ! found=$(find "$@" 2>/dev/null); then
+    problem "cannot read all of $what as $(id -un); run this check as $user or root"
+  fi
+}
+
 # Prints the path if it fails the rule. -maxdepth 0 checks only the path itself.
-bad() { find "$1" -maxdepth 0 ! -type l \( -user "$user" -o -perm -0020 -o -perm -0002 \) -print; }
+bad() {
+  find "$1" -maxdepth 0 ! -type l \( -user "$user" -o -perm -0020 -o -perm -0002 \) -print 2>/dev/null ||
+    echo "$1"
+}
 
 # The same for a parent directory, which may be shared if it is sticky.
-bad_parent() { find "$1" -maxdepth 0 \( -user "$user" -o \( ! -perm -1000 \( -perm -0020 -o -perm -0002 \) \) \) -print; }
+bad_parent() {
+  find "$1" -maxdepth 0 \( -user "$user" -o \( ! -perm -1000 \( -perm -0020 -o -perm -0002 \) \) \) -print 2>/dev/null ||
+    echo "$1"
+}
 
 check_ancestors() {
   local p=$1
@@ -62,11 +93,48 @@ check_ancestors() {
   done
 }
 
+scan "$dir" "$dir" \( -path "$dir/_work" -o -path "$dir/_diag" \) -prune -o \
+  ! -type l \( -user "$user" -o -perm -0020 -o -perm -0002 \) -print
 while IFS= read -r p; do
-  problem "$p is owned by $user or writable by group or others"
-done < <(find "$dir" \( -path "$dir/_work" -o -path "$dir/_diag" \) -prune -o \
-  ! -type l \( -user "$user" -o -perm -0020 -o -perm -0002 \) -print)
+  [[ -n "$p" ]] && problem "$p is owned by $user or writable by group or others"
+done <<<"$found"
 check_ancestors "$dir"
+
+# Whether <runner-user> has the r or x permission on a path, through "others" or
+# one of its groups. Owning the path is refused above, so the owner bits are not
+# its to use.
+user_groups=$(id -G "$user")
+has_access() { # r|x path
+  local gbit obit g
+  case $1 in
+    r) gbit=0040 obit=0004 ;;
+    x) gbit=0010 obit=0001 ;;
+  esac
+  [[ -n "$(find "$2" -maxdepth 0 -perm -$obit -print 2>/dev/null)" ]] && return 0
+  for g in $user_groups; do
+    [[ -n "$(find "$2" -maxdepth 0 -gid "$g" -perm -$gbit -print 2>/dev/null)" ]] && return 0
+  done
+  return 1
+}
+
+scan "$dir" "$dir" -maxdepth 1 -type f \( -name '.runner*' -o -name '.credentials*' \) -perm -0004 -print
+while IFS= read -r p; do
+  [[ -n "$p" ]] && problem "$p is readable by every account; it holds the runner's registration"
+done <<<"$found"
+
+for p in runsvc.sh bin/Runner.Listener bin/Runner.Worker; do
+  if [[ ! -f "$dir/$p" ]]; then
+    problem "$dir/$p is missing, or this account cannot see it"
+    continue
+  fi
+  has_access x "$dir/$p" || problem "$user cannot execute $dir/$p"
+  d=$(dirname "$dir/$p")
+  while :; do
+    has_access x "$d" || problem "$user cannot enter $d, which holds $p"
+    [[ "$d" == "$dir" ]] && break
+    d=$(dirname "$d")
+  done
+done
 
 hook=""
 if [[ -f "$dir/.env" ]]; then
@@ -85,4 +153,4 @@ if ((problems > 0)); then
   echo "runner-preflight: refusing to start the runner ($problems problem(s)); see ADR 0141, decision 7" >&2
   exit 1
 fi
-echo "runner-preflight: $dir and its hook are not writable by $user"
+echo "runner-preflight: $dir and its hook are not writable by $user, and $user can run it"

@@ -118,7 +118,13 @@ sudo chown -R "$RUNNER": "$DIR/_work" "$DIR/_diag"
 ```
 
 Then make the service run the start check before every start.
-The check fails, and the runner does not start, if the runner account can write the install, the hook, or any directory above them:
+The check fails, and the runner does not start, if any of these holds:
+
+- the runner account can write the install, the hook, or any directory above them;
+- a registration file (`.runner`, `.credentials*`) is readable by every account;
+- the runner account cannot execute `runsvc.sh`, `bin/Runner.Listener` or `bin/Runner.Worker`.
+
+It runs as the runner account, through the unit's `User=`, and refuses anything it cannot read.
 
 ```sh
 UNIT=$(cat "$DIR/.service")
@@ -133,7 +139,7 @@ sudo ./svc.sh start
 
 ```sh
 sudo systemctl status "$UNIT"                 # active, and the preflight line says "not writable by ..."
-"$LIB/preflight.sh" "$DIR" "$RUNNER"           # the same check, by hand
+sudo -u "$RUNNER" "$LIB/preflight.sh" "$DIR" "$RUNNER"   # the same check, by hand
 sudo grep -rilE 'access to the path|permission denied' "$DIR/_diag" | head
 ```
 
@@ -141,6 +147,19 @@ The last command should print nothing.
 If the runner logs a permission error for a file outside `_work` and `_diag`, give it the narrowest access that works, and note it on this page.
 
 In any job that ran on the runner, the **Set up runner** step shows the hook's line: "Self-hosted runner: allowed push job from matrix-axon/matrix-axon."
+
+### After changing permissions
+
+The start check runs only when the service starts.
+After any `chmod` or `chown` under the install, restart the service so it runs again:
+
+```sh
+sudo ./svc.sh stop && sudo ./svc.sh start
+```
+
+A runner that loses execute permission on its own programs while running keeps polling and accepts the next job, but cannot start the process that runs it.
+The job then shows as in progress with no steps, and the runner's `_diag/Runner_*.log` shows it launching `Runner.Worker` with no "Process started" line after it.
+Cancel the run, fix the permissions with step 4's commands, and restart.
 
 ### Updating the runner
 
