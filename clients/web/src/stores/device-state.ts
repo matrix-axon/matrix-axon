@@ -1,5 +1,10 @@
 import { effect, signal } from '@preact/signals'
 import type { ApiClient } from '../api/client'
+import {
+  DRAFTS_NAMESPACE,
+  READ_MARKERS_NAMESPACE,
+  THREAD_READ_MARKERS_NAMESPACE,
+} from '../api/routes'
 import { isTransientStatus } from '../api/client'
 import { deviceStateChange } from '../api/frames'
 import { randomId } from '../random-id'
@@ -10,12 +15,12 @@ import { parseInlineEmoji, type InlineEmojiReference } from '../inline-emoji'
 
 /** localStorage key for this install's stable device id (ADR 0048). */
 const DEVICE_ID_KEY = 'axon.device_id'
-/** The device-state namespace drafts live under (TUI parity). */
-export const DRAFTS_NAMESPACE = 'drafts'
-/** The device-state namespace read markers live under (TUI parity). */
-export const READ_MARKERS_NAMESPACE = 'read_markers'
-/** The namespace for per-thread read positions (web unread-thread attention). */
-export const THREAD_READ_MARKERS_NAMESPACE = 'thread_read_markers'
+// Defined beside the routes so telemetry can name them (`api/routes.ts`).
+export {
+  DRAFTS_NAMESPACE,
+  READ_MARKERS_NAMESPACE,
+  THREAD_READ_MARKERS_NAMESPACE,
+}
 /** How long a settled edit waits before its `PUT` (one write per pause). */
 const PUT_DEBOUNCE_MS = 800
 /**

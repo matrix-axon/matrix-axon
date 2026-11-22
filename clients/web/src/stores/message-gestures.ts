@@ -1,10 +1,12 @@
 import { computed, effect, signal, type ReadonlySignal } from '@preact/signals'
 import { apiErrorMessage, type ApiClient } from '../api/client'
 import { preferenceChange } from '../api/frames'
+import { MESSAGE_GESTURES_KEY } from '../api/routes'
 import { hasEmojiCandidate } from '../emoji'
 import type { LiveConnection } from './live-connection'
 
-export const MESSAGE_GESTURES_KEY = 'message_gestures'
+// Defined beside the routes so telemetry can name it (`api/routes.ts`).
+export { MESSAGE_GESTURES_KEY }
 
 export const MESSAGE_GESTURE_ACTIONS = [
   'reply',

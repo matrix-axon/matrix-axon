@@ -1,9 +1,11 @@
 import { effect, signal, type Signal } from '@preact/signals'
 import type { ApiClient } from '../api/client'
 import { preferenceChange } from '../api/frames'
+import { SPACE_ORDER_KEY } from '../api/routes'
 import type { LiveConnection } from './live-connection'
 
-export const SPACE_ORDER_KEY = 'space_order'
+// Defined beside the routes so telemetry can name it (`api/routes.ts`).
+export { SPACE_ORDER_KEY }
 
 /** A failed save waits this long, then twice as long, up to the cap. */
 const SAVE_RETRY_BASE_MS = 1000

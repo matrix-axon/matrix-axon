@@ -112,3 +112,41 @@ export const API_ROUTES = [
   '/v1/search',
   '/v1/status',
 ] as const satisfies readonly (keyof paths)[]
+
+/*
+ * The client's own words for two parameter slots. Each value is a constant
+ * this client chose, never something a user typed, so telemetry can name it:
+ * `devices/{id}/state/read_markers` and `.../thread_read_markers` time out
+ * for different reasons, and both collapsing to `state/{id}` hid which one.
+ * The stores that use them import them from here, so a new namespace or key
+ * is added in the one place that also makes it readable.
+ */
+/** The device-state namespace drafts live under (TUI parity). */
+export const DRAFTS_NAMESPACE = 'drafts'
+/** The device-state namespace read markers live under (TUI parity). */
+export const READ_MARKERS_NAMESPACE = 'read_markers'
+/** The namespace for per-thread read positions (web unread-thread attention). */
+export const THREAD_READ_MARKERS_NAMESPACE = 'thread_read_markers'
+/** The instance preference holding the space order. */
+export const SPACE_ORDER_KEY = 'space_order'
+/** The instance preference holding the message gestures. */
+export const MESSAGE_GESTURES_KEY = 'message_gestures'
+
+/**
+ * Per route, the slots whose value is kept as written when it is one of the
+ * client's own words above. Any other value in the slot is still `{id}`.
+ */
+export const KNOWN_SLOT_VALUES = {
+  '/v1/devices/{device_id}/state/{namespace}': {
+    namespace: [
+      DRAFTS_NAMESPACE,
+      READ_MARKERS_NAMESPACE,
+      THREAD_READ_MARKERS_NAMESPACE,
+    ],
+  },
+  '/v1/preferences/{key}': {
+    key: [SPACE_ORDER_KEY, MESSAGE_GESTURES_KEY],
+  },
+} as const satisfies Partial<
+  Record<(typeof API_ROUTES)[number], Record<string, readonly string[]>>
+>

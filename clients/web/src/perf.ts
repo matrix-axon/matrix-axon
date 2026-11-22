@@ -1,5 +1,5 @@
 import { signal } from '@preact/signals'
-import { API_ROUTES } from './api/routes'
+import { API_ROUTES, KNOWN_SLOT_VALUES } from './api/routes'
 import type {
   TransportFailureKind,
   TransportVersion,
@@ -1556,30 +1556,45 @@ function roomTimelinePage(url: string): boolean {
 }
 
 /**
- * One route template, split: a literal word, or the label its parameter slot
- * logs as (`{account}` for `{account_id}`, `{id}` for every other).
+ * One segment of a route template: a literal word, or a parameter slot with
+ * the label it logs as (`{account}` for `{account_id}`, `{id}` for every
+ * other) and the client's own words it may keep as written.
  */
-type RouteTemplate = readonly string[]
+type RouteSegment =
+  { literal: string } | { label: string; known: ReadonlySet<string> }
 
-const isSlot = (segment: string) => segment.startsWith('{')
+type RouteTemplate = readonly RouteSegment[]
+
+const NO_KNOWN_VALUES: ReadonlySet<string> = new Set()
 
 /** `API_ROUTES` split into segments, with the leading `/v1/` dropped. */
-const ROUTE_TEMPLATES: readonly RouteTemplate[] = API_ROUTES.map((route) =>
-  route
+const ROUTE_TEMPLATES: readonly RouteTemplate[] = API_ROUTES.map((route) => {
+  const known: Readonly<Record<string, readonly string[]>> =
+    (
+      KNOWN_SLOT_VALUES as Partial<
+        Record<string, Record<string, readonly string[]>>
+      >
+    )[route] ?? {}
+  return route
     .split('/')
     .slice(2)
-    .map((segment) =>
-      !isSlot(segment)
-        ? segment
-        : segment === '{account_id}'
-          ? '{account}'
-          : '{id}',
-    ),
-)
+    .map((segment): RouteSegment => {
+      if (!segment.startsWith('{')) {
+        return { literal: segment }
+      }
+      const name = segment.slice(1, -1)
+      return {
+        label: name === 'account_id' ? '{account}' : '{id}',
+        known: name in known ? new Set(known[name]) : NO_KNOWN_VALUES,
+      }
+    })
+})
 
 /** Every literal word any route uses, for paths no template matches. */
 const ROUTE_WORDS: ReadonlySet<string> = new Set(
-  ROUTE_TEMPLATES.flat().filter((segment) => !isSlot(segment)),
+  ROUTE_TEMPLATES.flat().flatMap((segment) =>
+    'literal' in segment ? [segment.literal] : [],
+  ),
 )
 
 /**
@@ -1595,12 +1610,12 @@ function matchRoute(segments: readonly string[]): RouteTemplate | null {
       continue
     }
     let literals = 0
-    const fits = template.every((slot, i) => {
-      if (isSlot(slot)) {
+    const fits = template.every((segment, i) => {
+      if (!('literal' in segment)) {
         return true
       }
       literals++
-      return slot === segments[i]
+      return segment.literal === segments[i]
     })
     if (fits && literals > bestLiterals) {
       best = template
@@ -1629,8 +1644,10 @@ const MATRIX_ID = /^(?:[$!]|[@#+][^/]*:)/
  * in. The path is matched against `openapi.json`'s templates (`API_ROUTES`):
  * literal segments survive, and every parameter slot becomes `{id}`
  * (`{account}` for the account) whatever it holds. A room tagged `work` logs as
- * `tags/{id}`, though `work` is as plain a word as `timeline`. A path no
- * template matches keeps only words some route uses.
+ * `tags/{id}`, though `work` is as plain a word as `timeline`. The one
+ * exception is a value from the client's own vocabulary for that slot
+ * (`KNOWN_SLOT_VALUES`: device-state namespaces, preference keys), kept as
+ * written. A path no template matches keeps only words some route uses.
  *
  * Shape rules alone kept failing: a sigil check let event ids through,
  * because the client percent-encodes `$` as `%24`; a "lowercase words only"
@@ -1650,7 +1667,15 @@ function shortRoute(url: string): string {
     const segments = path.slice('/v1/'.length).split('/')
     const template = matchRoute(segments)
     if (template !== null) {
-      return template.join('/')
+      return template
+        .map((segment, i) =>
+          'literal' in segment
+            ? segment.literal
+            : segment.known.has(segments[i])
+              ? segments[i]
+              : segment.label,
+        )
+        .join('/')
     }
     return segments
       .map((segment) =>

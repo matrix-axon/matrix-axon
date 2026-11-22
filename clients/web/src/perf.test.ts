@@ -763,6 +763,32 @@ describe('room-open summary', () => {
     ).toEqual(labels)
   })
 
+  it("names a slot's value only when it is one of the client's own words", () => {
+    const device =
+      'https://axon.test/v1/devices/3d3af5cb-f963-4063-9e3c-233c665a8adf'
+    expect(
+      deadlineRoutes([
+        `${device}/state/read_markers`,
+        `${device}/state/thread_read_markers`,
+        `${device}/state/drafts`,
+        'https://axon.test/v1/preferences/space_order',
+        // Not a namespace or key this client defines: still a parameter.
+        `${device}/state/divorce`,
+        'https://axon.test/v1/preferences/divorce',
+        // A known word in a slot that does not list it is still a parameter.
+        `https://axon.test/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}/tags/drafts`,
+      ]),
+    ).toEqual([
+      'devices/{id}/state/read_markers',
+      'devices/{id}/state/thread_read_markers',
+      'devices/{id}/state/drafts',
+      'preferences/space_order',
+      'devices/{id}/state/{id}',
+      'preferences/{id}',
+      'accounts/{account}/rooms/{id}/tags/{id}',
+    ])
+  })
+
   it('keeps only route words in an API path no route matches', () => {
     expect(
       deadlineRoutes([
