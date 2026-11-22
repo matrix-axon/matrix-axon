@@ -4,12 +4,34 @@ import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { collectDiagnostics } from './sharing-diagnostics.mjs'
+
 // Run the real shared-module XCTest suite under iOS, without installing or
 // changing Axon itself. Signing and physical Keychain acceptance stay separate.
 const source = fileURLToPath(
   new URL('../src-tauri/incoming-share/', import.meta.url),
 )
 const output = mkdtempSync(join(tmpdir(), 'axon-sharing-simulator-'))
+const startedAt = Date.now()
+// Where to keep the result bundles and crash reports of a failed run. CI sets it
+// and uploads what is there; locally it is unset and nothing is copied.
+const diagnostics = process.env.AXON_SHARING_DIAGNOSTICS
+const keepDiagnostics = () => {
+  if (!diagnostics) return
+  try {
+    const kept = collectDiagnostics({
+      output,
+      destination: diagnostics,
+      since: startedAt,
+    })
+    console.log(`Kept ${kept.length} diagnostic file(s) in ${diagnostics}.`)
+  } catch (error) {
+    // The failure being reported is the test's, not this.
+    console.warn(
+      `::warning::could not keep the simulator diagnostics: ${error.message}`,
+    )
+  }
+}
 // Unique identities also prevent an installed XCTest runner from reusing an
 // older test bundle when its version has not changed between local runs.
 const hostId = `org.matrixaxon.sharingtest.x${basename(output).replaceAll('-', '').toLowerCase()}`
@@ -208,21 +230,21 @@ try {
 console.log(
   `Testing on ${device.name}. Results: ${join(output, 'results.xcresult')}`,
 )
-run('xcodebuild', [
-  'test',
-  '-project',
-  join(output, 'SharingFoundationTests.xcodeproj'),
-  '-scheme',
-  'FoundationTests',
-  '-destination',
-  `platform=iOS Simulator,id=${device.udid}`,
-  '-derivedDataPath',
-  join(output, 'DerivedData'),
-  '-resultBundlePath',
-  join(output, 'results.xcresult'),
-  'CODE_SIGNING_ALLOWED=NO',
-])
 try {
+  run('xcodebuild', [
+    'test',
+    '-project',
+    join(output, 'SharingFoundationTests.xcodeproj'),
+    '-scheme',
+    'FoundationTests',
+    '-destination',
+    `platform=iOS Simulator,id=${device.udid}`,
+    '-derivedDataPath',
+    join(output, 'DerivedData'),
+    '-resultBundlePath',
+    join(output, 'results.xcresult'),
+    'CODE_SIGNING_ALLOWED=NO',
+  ])
   // Eight UI scenarios plus their build, simulator launches, and result-bundle
   // finalization exceeded ten minutes on CI even though every test passed.
   run(
@@ -243,6 +265,9 @@ try {
     ],
     900_000,
   )
+} catch (error) {
+  keepDiagnostics()
+  throw error
 } finally {
   for (const identifier of [hostId, `${hostId}.Tests.xctrunner`]) {
     try {
