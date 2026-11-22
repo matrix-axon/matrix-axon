@@ -2834,8 +2834,10 @@ export interface components {
                  *     without this field accepts only `image` and `file`, and rejects any
                  *     other kind when staging, so a client stages a video or audio file as
                  *     `video` or `audio` only when it is listed here, and as `file` otherwise.
+                 *     This server always sends it; the schema marks it optional because a
+                 *     server that predates it answers without it.
                  */
-                media_upload_kinds: components["schemas"]["MediaUploadKindDto"][];
+                media_upload_kinds?: components["schemas"]["MediaUploadKindDto"][];
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -4619,8 +4621,10 @@ export interface components {
              *     without this field accepts only `image` and `file`, and rejects any
              *     other kind when staging, so a client stages a video or audio file as
              *     `video` or `audio` only when it is listed here, and as `file` otherwise.
+             *     This server always sends it; the schema marks it optional because a
+             *     server that predates it answers without it.
              */
-            media_upload_kinds: components["schemas"]["MediaUploadKindDto"][];
+            media_upload_kinds?: components["schemas"]["MediaUploadKindDto"][];
         };
         /**
          * @description Why a crawl failed or stopped early. Allowlisted; never upstream text.

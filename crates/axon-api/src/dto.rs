@@ -1314,6 +1314,9 @@ pub struct CapabilitiesDto {
     /// without this field accepts only `image` and `file`, and rejects any
     /// other kind when staging, so a client stages a video or audio file as
     /// `video` or `audio` only when it is listed here, and as `file` otherwise.
+    /// This server always sends it; the schema marks it optional because a
+    /// server that predates it answers without it.
+    #[schema(required = false)]
     pub media_upload_kinds: Vec<MediaUploadKindDto>,
 }
 

@@ -957,6 +957,103 @@ async fn send_thread_member_attachment(
     Ok(resp.response.event_id.to_string())
 }
 
+/// [`SdkGateway::send_with_previews`] once the room is resolved. Everything a
+/// request can get wrong, the attachment's kind and type included, is checked
+/// before the first upload.
+async fn send_with_previews_in_room(
+    room: &Room,
+    account_id: Uuid,
+    message: axon_core::link_preview::PreviewSend<'_>,
+    attachment: Option<MediaAttachment>,
+) -> Result<String, GatewayError> {
+    use axon_core::link_preview;
+    link_preview::preflight(
+        message.body,
+        message.formatted,
+        message.relation,
+        &message
+            .previews
+            .iter()
+            .map(|p| (p.metadata.clone(), p.image.is_some()))
+            .collect::<Vec<_>>(),
+        attachment.is_some(),
+    )
+    .map_err(preview_validation_error)?;
+    message_relates_to(message.relation)?; // Validate before any upload.
+                                           // The attachment too: a kind that does not match its type must fail
+                                           // before a preview image is uploaded, or each retry would upload
+                                           // another orphaned copy of it.
+    let attachment = attachment
+        .map(|attachment| {
+            if attachment.filename.len() > 1024
+                || attachment
+                    .content_type
+                    .as_ref()
+                    .is_some_and(|s| s.len() > 256)
+            {
+                return Err(GatewayError::Invalid(
+                    "media filename/type exceeds preview-aware send limits".into(),
+                ));
+            }
+            let mime = effective_mime(attachment.kind, attachment.content_type.as_deref())?;
+            let info = attachment_info(attachment.kind, attachment.size_bytes)?;
+            Ok((attachment, mime, info))
+        })
+        .transpose()?;
+    ensure_joined(room)?;
+    // A cached false state can also expose the message itself. Keep one
+    // fresh lookup even for metadata-only sends, including explicit opt-out.
+    let encrypted = fresh_preview_encryption(room, account_id).await?;
+    let has_uploads = attachment.is_some() || message.previews.iter().any(|p| p.image.is_some());
+    use futures_util::{FutureExt, StreamExt, TryStreamExt};
+    // At most two uploads per send run at once. Consume the owned bytes;
+    // avoid cloning up to 16 MiB while preserving input card order.
+    let entries = futures_util::stream::iter(message.previews)
+        .map(|preview| preview_entry(room, preview, encrypted).boxed())
+        .buffered(2)
+        .try_collect::<Vec<_>>()
+        .await?;
+    let mut content = if let Some((attachment, mime, info)) = attachment {
+        let source =
+            upload_media_source_with_encryption(room, &mime, attachment.bytes, encrypted).await?;
+        validate_preview_media_source(&source)?;
+        let caption = (!message.body.is_empty()).then(|| match message.formatted {
+            Some(f) => TextMessageEventContent::html(message.body, f.body),
+            None => TextMessageEventContent::plain(message.body),
+        });
+        let media = RoomMessageEventContent::new(media_message_type(
+            attachment.kind,
+            attachment.filename,
+            &mime,
+            source,
+            info,
+            caption,
+        ));
+        serde_json::to_value(media_content_with_relation(room, media, message.relation).await?)
+            .map_err(|_| GatewayError::Invalid("invalid media metadata".into()))?
+    } else {
+        link_preview::text_content(message.body, message.formatted, message.relation)
+    };
+    link_preview::install_previews(&mut content, entries);
+    // Preflight reserves are conservative, but validate actual SDK fields
+    // too. If they exceed the reserve, reject the parent event and accept
+    // that already-uploaded Matrix objects can remain orphaned; staged
+    // originals are released for explicit correction/retry by the caller.
+    link_preview::check_content(&content).map_err(preview_validation_error)?;
+    // Do not send plaintext thumbnail references after a concurrent room
+    // encryption upgrade. The next explicit attempt will reupload them.
+    if has_uploads && !encrypted && fresh_preview_encryption(room, account_id).await? {
+        return Err(GatewayError::Invalid(
+            "room encryption changed; review and retry the send".into(),
+        ));
+    }
+    let response = room
+        .send_raw("m.room.message", content)
+        .await
+        .map_err(map_preview_send_error)?;
+    Ok(response.response.event_id.to_string())
+}
+
 /// [`SdkGateway::send_media`] once the room is resolved: the relation decides
 /// between the SDK's `send_attachment` and [`send_thread_member_attachment`],
 /// and both send the event type `attachment.kind` names.
@@ -1309,87 +1406,14 @@ impl SdkGateway {
         message: axon_core::link_preview::PreviewSend<'_>,
         attachment: Option<MediaAttachment>,
     ) -> Result<String, GatewayError> {
-        use axon_core::link_preview;
-        link_preview::preflight(
-            message.body,
-            message.formatted,
-            message.relation,
-            &message
-                .previews
-                .iter()
-                .map(|p| (p.metadata.clone(), p.image.is_some()))
-                .collect::<Vec<_>>(),
-            attachment.is_some(),
-        )
-        .map_err(preview_validation_error)?;
-        message_relates_to(message.relation)?; // Validate before any upload.
+        use futures_util::FutureExt;
         let room = self.room(account_id, room_id).await?;
-        ensure_joined(&room)?;
-        // A cached false state can also expose the message itself. Keep one
-        // fresh lookup even for metadata-only sends, including explicit opt-out.
-        let encrypted = fresh_preview_encryption(&room, account_id).await?;
-        let has_uploads =
-            attachment.is_some() || message.previews.iter().any(|p| p.image.is_some());
-        use futures_util::{FutureExt, StreamExt, TryStreamExt};
-        // At most two uploads per send run at once. Consume the owned bytes;
-        // avoid cloning up to 16 MiB while preserving input card order.
-        let entries = futures_util::stream::iter(message.previews)
-            .map(|preview| preview_entry(&room, preview, encrypted).boxed())
-            .buffered(2)
-            .try_collect::<Vec<_>>()
-            .await?;
-        let mut content = if let Some(attachment) = attachment {
-            if attachment.filename.len() > 1024
-                || attachment
-                    .content_type
-                    .as_ref()
-                    .is_some_and(|s| s.len() > 256)
-            {
-                return Err(GatewayError::Invalid(
-                    "media filename/type exceeds preview-aware send limits".into(),
-                ));
-            }
-            let mime = effective_mime(attachment.kind, attachment.content_type.as_deref())?;
-            let info = attachment_info(attachment.kind, attachment.size_bytes)?;
-            let source =
-                upload_media_source_with_encryption(&room, &mime, attachment.bytes, encrypted)
-                    .await?;
-            validate_preview_media_source(&source)?;
-            let caption = (!message.body.is_empty()).then(|| match message.formatted {
-                Some(f) => TextMessageEventContent::html(message.body, f.body),
-                None => TextMessageEventContent::plain(message.body),
-            });
-            let media = RoomMessageEventContent::new(media_message_type(
-                attachment.kind,
-                attachment.filename,
-                &mime,
-                source,
-                info,
-                caption,
-            ));
-            serde_json::to_value(media_content_with_relation(&room, media, message.relation).await?)
-                .map_err(|_| GatewayError::Invalid("invalid media metadata".into()))?
-        } else {
-            link_preview::text_content(message.body, message.formatted, message.relation)
-        };
-        link_preview::install_previews(&mut content, entries);
-        // Preflight reserves are conservative, but validate actual SDK fields
-        // too. If they exceed the reserve, reject the parent event and accept
-        // that already-uploaded Matrix objects can remain orphaned; staged
-        // originals are released for explicit correction/retry by the caller.
-        link_preview::check_content(&content).map_err(preview_validation_error)?;
-        // Do not send plaintext thumbnail references after a concurrent room
-        // encryption upgrade. The next explicit attempt will reupload them.
-        if has_uploads && !encrypted && fresh_preview_encryption(&room, account_id).await? {
-            return Err(GatewayError::Invalid(
-                "room encryption changed; review and retry the send".into(),
-            ));
-        }
-        let response = room
-            .send_raw("m.room.message", content)
+        // Boxed as a trait object: the send future is deep enough that,
+        // nested once more inside the server's adapter, proving it `Send`
+        // overflows the compiler's recursion limit.
+        send_with_previews_in_room(&room, account_id, message, attachment)
+            .boxed()
             .await
-            .map_err(map_preview_send_error)?;
-        Ok(response.response.event_id.to_string())
     }
 
     pub async fn send_message(
@@ -3440,6 +3464,133 @@ mod tests {
         }
         let seen = seen.lock().unwrap();
         assert!(seen.uploads.is_empty() && seen.sent.is_empty());
+        drop(seen);
+        server.abort();
+    }
+
+    /// A caption with a bundled preview image: an attachment whose kind does
+    /// not match its type fails before the preview image is uploaded, so a
+    /// retry never leaves another orphaned copy on the homeserver. The valid
+    /// send first proves the probe sees both uploads when they happen.
+    #[tokio::test]
+    async fn preview_send_validates_the_attachment_before_any_upload() {
+        use axon_core::link_preview::{LinkPreview, PreviewImage, PreviewMetadata, PreviewSend};
+        use axum::{
+            body::Bytes, extract::State, http::Method, http::StatusCode, response::IntoResponse,
+            Json, Router,
+        };
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct Seen {
+            uploads: Vec<String>,
+            sent: Vec<serde_json::Value>,
+        }
+        async fn handler(
+            State(seen): State<Arc<Mutex<Seen>>>,
+            method: Method,
+            uri: axum::http::Uri,
+            headers: axum::http::HeaderMap,
+            body: Bytes,
+        ) -> axum::response::Response {
+            let path = uri.path();
+            if path.contains("/join") {
+                return Json(json!({"room_id":"!preview:localhost"})).into_response();
+            }
+            if path.ends_with("/media/config") {
+                return Json(json!({"m.upload.size": 1024})).into_response();
+            }
+            if path.contains("/media/") && path.ends_with("/upload") {
+                let content_type = headers
+                    .get(axum::http::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned();
+                seen.lock().unwrap().uploads.push(content_type);
+                return Json(json!({"content_uri":"mxc://localhost/uploaded"})).into_response();
+            }
+            if method == Method::PUT && path.contains("/send/m.room.message/") {
+                let content: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                seen.lock().unwrap().sent.push(content);
+                return Json(json!({"event_id":"$sent:localhost"})).into_response();
+            }
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"errcode":"M_NOT_FOUND","error":"absent"})),
+            )
+                .into_response()
+        }
+
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let (room, server) =
+            preview_test_room(Router::new().fallback(handler).with_state(seen.clone())).await;
+        let message = || PreviewSend {
+            body: "clip https://example.org/clip",
+            formatted: None,
+            relation: Relation::default(),
+            previews: vec![LinkPreview {
+                metadata: PreviewMetadata {
+                    matched_url: "https://example.org/clip".into(),
+                    title: Some("Clip".into()),
+                    ..Default::default()
+                },
+                image: Some(PreviewImage {
+                    bytes: vec![1, 2, 3],
+                    mimetype: "image/png".into(),
+                    width: 1,
+                    height: 1,
+                }),
+            }],
+        };
+        let attachment = |kind, content_type: Option<&str>| axon_core::MediaAttachment {
+            kind,
+            filename: "clip.mp4".into(),
+            content_type: content_type.map(Into::into),
+            size_bytes: 3,
+            bytes: vec![4, 5, 6],
+        };
+
+        let event_id = super::send_with_previews_in_room(
+            &room,
+            uuid::Uuid::nil(),
+            message(),
+            Some(attachment(MediaSendKind::Video, Some("video/mp4"))),
+        )
+        .await
+        .expect("a valid send");
+        assert_eq!(event_id, "$sent:localhost");
+        {
+            let mut seen = seen.lock().unwrap();
+            assert_eq!(seen.uploads.len(), 2, "{:?}", seen.uploads);
+            assert!(seen.uploads.contains(&"image/png".to_owned()));
+            assert!(seen.uploads.contains(&"video/mp4".to_owned()));
+            let sent = seen.sent.pop().expect("one event");
+            assert_eq!(sent["msgtype"], "m.video");
+            assert_eq!(sent["info"]["mimetype"], "video/mp4");
+            seen.uploads.clear();
+        }
+
+        for (kind, content_type) in [
+            (MediaSendKind::Video, Some("audio/ogg")),
+            (MediaSendKind::Audio, None),
+            (MediaSendKind::Image, Some("video/mp4")),
+        ] {
+            let err = super::send_with_previews_in_room(
+                &room,
+                uuid::Uuid::nil(),
+                message(),
+                Some(attachment(kind, content_type)),
+            )
+            .await
+            .expect_err("a mismatched kind fails");
+            assert!(
+                matches!(err, GatewayError::Invalid(_)),
+                "{kind:?} {content_type:?}: {err:?}"
+            );
+        }
+        let seen = seen.lock().unwrap();
+        assert!(seen.uploads.is_empty(), "{:?}", seen.uploads);
+        assert!(seen.sent.is_empty());
         drop(seen);
         server.abort();
     }

@@ -151,15 +151,26 @@ fn is_inline_safe(mime: &str) -> bool {
     mime.starts_with("image/") || mime.starts_with("audio/") || mime.starts_with("video/")
 }
 
-/// Accept only a well-formed `type/subtype` MIME token (no parameters), guarding
-/// against header injection from hostile event content. Returns `None` for
-/// anything unusable so the caller falls back to `application/octet-stream`.
+/// The MIME essence of a declared type, lowercased: its `type/subtype`, with
+/// any parameters dropped. Only a well-formed `type/subtype` token is
+/// accepted, guarding against header injection from hostile event content,
+/// and parameters are never served. Returns `None` for anything unusable so
+/// the caller falls back to `application/octet-stream`.
+///
+/// A parameterized type is an ordinary declaration: Axon itself sends
+/// `audio/ogg; codecs=opus` as declared (ADR 0142 section 1), and so do
+/// bridges. Rejecting it would serve that audio as a download and refuse it a
+/// stream ticket. MIME types are case-insensitive, so `Video/MP4` is
+/// `video/mp4`, and the inline-safe and streaming checks see one spelling.
 fn sanitize_mime(raw: &str) -> Option<String> {
-    let raw = raw.trim();
-    if raw.is_empty() || raw.len() > 255 {
+    if raw.len() > 255 {
         return None;
     }
-    let (ty, subtype) = raw.split_once('/')?;
+    let essence = raw.split(';').next()?.trim();
+    if essence.is_empty() {
+        return None;
+    }
+    let (ty, subtype) = essence.split_once('/')?;
     let is_token = |part: &str| {
         !part.is_empty()
             && part.bytes().all(|b| {
@@ -170,7 +181,7 @@ fn sanitize_mime(raw: &str) -> Option<String> {
                     )
             })
     };
-    (is_token(ty) && is_token(subtype)).then(|| format!("{ty}/{subtype}"))
+    (is_token(ty) && is_token(subtype)).then(|| format!("{ty}/{subtype}").to_ascii_lowercase())
 }
 
 /// The outcome of interpreting a `Range` header against a known content length.
@@ -1377,8 +1388,38 @@ mod tests {
         // Header-injection attempt and control characters are refused.
         assert_eq!(sanitize_mime("image/png\r\nSet-Cookie: x"), None);
         assert_eq!(sanitize_mime("not-a-mime"), None);
-        assert_eq!(sanitize_mime("image/png; charset=x"), None);
         assert_eq!(sanitize_mime("image/png"), Some("image/png".to_owned()));
+        // Parameters are dropped, never served, whatever they contain.
+        assert_eq!(
+            sanitize_mime("image/png;\r\nSet-Cookie: x"),
+            Some("image/png".to_owned())
+        );
+        assert_eq!(sanitize_mime("; codecs=opus"), None);
+    }
+
+    /// A declared type with parameters, or in another case, is served as its
+    /// lowercased essence, so parameterized audio and video stay playable and
+    /// stream (ADR 0142 section 1). An unsafe type stays a download however
+    /// it is spelled.
+    #[test]
+    fn content_type_serves_the_essence_of_a_parameterized_or_mixed_case_type() {
+        for (declared, served) in [
+            ("audio/ogg; codecs=opus", "audio/ogg"),
+            ("video/webm; codecs=vp9", "video/webm"),
+            ("video/mp4 ; codecs=\"avc1.42E01E\"", "video/mp4"),
+            ("Video/MP4", "video/mp4"),
+            ("image/png; charset=x", "image/png"),
+            ("text/html; charset=utf-8", "application/octet-stream"),
+            ("IMAGE/SVG+XML", "application/octet-stream"),
+            ("Image/Svg+Xml; charset=utf-8", "application/octet-stream"),
+        ] {
+            let content = json!({ "url": "mxc://example.org/x", "info": { "mimetype": declared } });
+            assert_eq!(
+                content_type_for_mxc(&content, "mxc://example.org/x"),
+                served,
+                "{declared}"
+            );
+        }
     }
 
     #[test]

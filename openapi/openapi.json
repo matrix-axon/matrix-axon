@@ -11301,8 +11301,7 @@
             "type": "object",
             "description": "Optional features this server supports (`GET /v1/capabilities`). An older\nserver has no such route, and its `404` means none of them.",
             "required": [
-              "edit_url_previews",
-              "media_upload_kinds"
+              "edit_url_previews"
             ],
             "properties": {
               "edit_url_previews": {
@@ -11314,7 +11313,7 @@
                 "items": {
                   "$ref": "#/components/schemas/MediaUploadKindDto"
                 },
-                "description": "The kinds `POST …/media/uploads` accepts (ADR 0142 section 1). A server\nwithout this field accepts only `image` and `file`, and rejects any\nother kind when staging, so a client stages a video or audio file as\n`video` or `audio` only when it is listed here, and as `file` otherwise."
+                "description": "The kinds `POST …/media/uploads` accepts (ADR 0142 section 1). A server\nwithout this field accepts only `image` and `file`, and rejects any\nother kind when staging, so a client stages a video or audio file as\n`video` or `audio` only when it is listed here, and as `file` otherwise.\nThis server always sends it; the schema marks it optional because a\nserver that predates it answers without it."
               }
             }
           }
@@ -14982,8 +14981,7 @@
         "type": "object",
         "description": "Optional features this server supports (`GET /v1/capabilities`). An older\nserver has no such route, and its `404` means none of them.",
         "required": [
-          "edit_url_previews",
-          "media_upload_kinds"
+          "edit_url_previews"
         ],
         "properties": {
           "edit_url_previews": {
@@ -14995,7 +14993,7 @@
             "items": {
               "$ref": "#/components/schemas/MediaUploadKindDto"
             },
-            "description": "The kinds `POST …/media/uploads` accepts (ADR 0142 section 1). A server\nwithout this field accepts only `image` and `file`, and rejects any\nother kind when staging, so a client stages a video or audio file as\n`video` or `audio` only when it is listed here, and as `file` otherwise."
+            "description": "The kinds `POST …/media/uploads` accepts (ADR 0142 section 1). A server\nwithout this field accepts only `image` and `file`, and rejects any\nother kind when staging, so a client stages a video or audio file as\n`video` or `audio` only when it is listed here, and as `file` otherwise.\nThis server always sends it; the schema marks it optional because a\nserver that predates it answers without it."
           }
         }
       },
