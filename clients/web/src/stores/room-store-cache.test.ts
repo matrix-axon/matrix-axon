@@ -39,6 +39,20 @@ describe('createRoomStoreCache', () => {
     expect(released).toEqual([`${ACCOUNT}/!b:hs`])
   })
 
+  it("drops one account's stores, releasing each, and keeps the rest", () => {
+    const { cache, released, built } = harness(5)
+    cache.acquire(ACCOUNT, '!a:hs')
+    const kept = cache.acquire(OTHER_ACCOUNT, '!a:hs')
+    cache.acquire(ACCOUNT, '!b:hs')
+
+    cache.forgetAccount(ACCOUNT)
+
+    expect(released).toEqual([`${ACCOUNT}/!a:hs`, `${ACCOUNT}/!b:hs`])
+    expect(cache.size).toBe(1)
+    expect(cache.acquire(OTHER_ACCOUNT, '!a:hs') === kept).toBe(true)
+    expect(built()).toBe(3)
+  })
+
   it('releases every store on clear', () => {
     const { cache, released } = harness(5)
     cache.acquire(ACCOUNT, '!a:hs')

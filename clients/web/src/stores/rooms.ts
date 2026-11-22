@@ -24,6 +24,7 @@ import {
 import type { RoomListCache, RoomListServerView } from './room-list-cache'
 import { mergeRoomListDelta } from './room-list-delta'
 import type { EventDto } from './timeline'
+import type { MemberDirectory } from './member-directory'
 
 export interface RoomPreview {
   /**
@@ -351,10 +352,12 @@ export interface RoomsStoreOptions {
   /** Overrides `PREVIEW_RETRY_DELAYS_MS`. */
   previewRetryDelaysMs?: readonly number[]
   /**
-   * Every member list this store reads (DM avatars, preview names), handed on
-   * so the account-wide name directory learns from them too.
+   * The account-wide name directory, taught every member list this store
+   * reads (DM avatars, preview names). Each read takes the directory's epoch
+   * before it goes out, so a list that lands after a sign-out or an account's
+   * removal is dropped there.
    */
-  onMembers?: (accountId: string, members: readonly MemberDto[]) => void
+  memberDirectory?: MemberDirectory | null
 }
 
 /**
@@ -529,6 +532,7 @@ export function createRoomsStore(
     room: RoomDto,
     generation: number,
   ): Promise<void> {
+    const epoch = options.memberDirectory?.epoch(room.account_id) ?? 0
     let data
     try {
       ;({ data } = await api.GET(
@@ -557,7 +561,7 @@ export function createRoomsStore(
     if (generation !== sessionGeneration) {
       return
     }
-    options.onMembers?.(room.account_id, data.data)
+    options.memberDirectory?.record(room.account_id, data.data, epoch)
     setCachedDmAvatar(
       roomKey(room),
       dmPeerAvatarFromMembers(room.account_user_id, data.data),
@@ -705,21 +709,34 @@ export function createRoomsStore(
     if (cached !== undefined) {
       return cached
     }
+    const generation = sessionGeneration
+    const epoch = options.memberDirectory?.epoch(room.account_id) ?? 0
     const pending = api
       .GET('/v1/accounts/{account_id}/rooms/{room_id}/members', {
         params: {
           path: { account_id: room.account_id, room_id: room.room_id },
         },
       })
-      .then((result) => {
-        const list = result.data?.data ?? []
-        resolvedMembers.set(key, list)
-        options.onMembers?.(room.account_id, list)
+      .then((result): MemberDto[] => {
+        // An error envelope is no roster. It stays cached as empty, so a
+        // failing room is not re-asked on every preview, but teaches nothing.
+        if (result.data === undefined) {
+          return []
+        }
+        const list = result.data.data
+        // Same identity guard as `fetchDmAvatar`: the previous reader's room,
+        // answered after `resetSession`.
+        if (generation === sessionGeneration) {
+          resolvedMembers.set(key, list)
+          options.memberDirectory?.record(room.account_id, list, epoch)
+        }
         return list
       })
       .catch(() => {
         // Don't cache a failure: the next preview may as well try again.
-        members.delete(key)
+        if (generation === sessionGeneration) {
+          members.delete(key)
+        }
         return []
       })
     members.set(key, pending)
@@ -1625,6 +1642,8 @@ export function createRoomsStore(
     // would skip the walk and strand the app-icon badge (ADR 0080) non-zero.
     unreadSlots.clear()
     members.clear()
+    // The labels previews drew from those lists: the previous reader's names.
+    resolvedMembers.clear()
     locallyHiddenRooms.clear()
     locallyCreatedRoomMetadata.clear()
     metadataPatchedAt.clear()

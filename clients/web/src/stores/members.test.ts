@@ -182,4 +182,76 @@ describe('createMembersStore', () => {
     )
     expect(store.error.value).toBe('invalid user id')
   })
+
+  /**
+   * A `/members` handler that holds each request until the test releases it,
+   * answering with whatever list it is released with.
+   */
+  function heldMembers(roomId: string): {
+    arrived: () => Promise<void>
+    release: (index: number, list: MemberDto[]) => void
+  } {
+    const held: ((list: MemberDto[]) => void)[] = []
+    let waiters: (() => void)[] = []
+    server.use(
+      http.get(
+        membersPath(roomId),
+        () =>
+          new Promise<Response>((resolve) => {
+            held.push((list) => resolve(HttpResponse.json({ data: list })))
+            for (const wake of waiters.splice(0)) {
+              wake()
+            }
+          }),
+      ),
+    )
+    return {
+      arrived: () =>
+        new Promise<void>((resolve) => {
+          waiters = [...waiters, resolve]
+        }),
+      release: (index, list) => held[index](list),
+    }
+  }
+
+  it('lets no older list overwrite a newer one', async () => {
+    const members = heldMembers(ROOM)
+    const directory = createMemberDirectory()
+    const store = createMembersStore(makeApi(), ACCOUNT, ROOM, directory)
+
+    let arrived = members.arrived()
+    const older = store.refresh()
+    await arrived
+    arrived = members.arrived()
+    const newer = store.refresh()
+    await arrived
+
+    members.release(1, [named('@alice:example.org', 'Alice B.')])
+    await newer
+    // The previous visit's list, answering last on a slow link.
+    members.release(0, [named('@alice:example.org', 'Alice')])
+    await older
+
+    expect(store.displayName('@alice:example.org')).toBe('Alice B.')
+    expect(directory.lookup(ACCOUNT, '@alice:example.org')?.display_name).toBe(
+      'Alice B.',
+    )
+  })
+
+  it('puts no names back from a list that lands after sign-out', async () => {
+    const members = heldMembers(ROOM)
+    const directory = createMemberDirectory()
+    const cache = createMembersStoreCache(makeApi(), directory)
+    const arrived = members.arrived()
+    const refreshing = cache.acquire(ACCOUNT, ROOM).refresh()
+    await arrived
+
+    // What `connectRoomCachesReset` does on sign-out.
+    cache.clear()
+    directory.clear()
+    members.release(0, [named('@alice:example.org', 'Alice')])
+    await refreshing
+
+    expect(directory.size).toBe(0)
+  })
 })

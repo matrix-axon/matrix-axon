@@ -959,6 +959,9 @@ describe('connectTimelineCacheReset', () => {
         ingestLive: () => {
           throw new Error('unused')
         },
+        forgetAccount: () => {
+          throw new Error('unused')
+        },
         clear: () => {
           clears += 1
         },
@@ -1047,6 +1050,9 @@ describe('connectTimelineCacheLive', () => {
         },
         ingestLive: (event) => {
           ingested.push(event.event_id)
+        },
+        forgetAccount: () => {
+          throw new Error('unused')
         },
         clear: () => {},
         hasUnsentWork: false,
@@ -1386,6 +1392,50 @@ describe('connectAttachmentReset', () => {
     }).not.toThrow()
     expect(staging.batch('scope').items).toHaveLength(0)
     dispose()
+  })
+})
+
+describe('removing one account', () => {
+  it("drops that account's warm rooms and borrowed names, and no other's", async () => {
+    const OTHER = '6b53f7f0-0000-4000-8000-000000000009'
+    const services = createServices(memoryStorage(), memoryStorage(), {
+      ...browserPlatform(),
+      defaultApiBaseUrl: 'https://axon.example.com',
+      // The logout answers, and the accounts refresh after it finds no one.
+      fetch: (() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ data: [] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        )) as unknown as typeof globalThis.fetch,
+    })
+    const { memberDirectory, memberStores, threadStores, timelines } = services
+    for (const account of [ACCT, OTHER]) {
+      memberDirectory.record(
+        account,
+        [
+          {
+            user_id: '@alice:server',
+            membership: 'join',
+            display_name: 'Alice',
+          } as Parameters<typeof memberDirectory.record>[1][number],
+        ],
+        memberDirectory.epoch(account),
+      )
+      memberStores.acquire(account, ROOM)
+      threadStores.acquire(account, ROOM)
+      timelines.acquire(account, ROOM)
+    }
+
+    // Accounts → Log out: the session itself stays signed in.
+    expect(await services.accounts.logout(ACCT)).toBe(true)
+
+    expect(memberDirectory.lookup(ACCT, '@alice:server')).toBeUndefined()
+    expect(memberDirectory.lookup(OTHER, '@alice:server')).toBeDefined()
+    expect(memberStores.size).toBe(1)
+    expect(threadStores.size).toBe(1)
+    expect(timelines.size).toBe(1)
   })
 })
 

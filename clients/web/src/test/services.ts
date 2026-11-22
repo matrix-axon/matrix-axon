@@ -27,6 +27,7 @@ import {
   connectLinkedEventCacheReset,
   connectThreadReadMarkers,
   connectRoomCachesReset,
+  forgetAccountCaches,
   connectTimelineCacheLive,
   connectTimelineCacheReset,
   connectUnreadCounts,
@@ -158,7 +159,14 @@ export function testServices(
   if (settings.perfMarks.peek()) {
     setPerfEnabled(true)
   }
-  const accounts = createAccountsStore(api)
+  const accounts = createAccountsStore(api, async (accountId) => {
+    forgetAccountCaches(accountId, {
+      timelines,
+      memberStores,
+      memberDirectory,
+      threadStores,
+    })
+  })
   const matrixOAuthQr = createMatrixOAuthQrStore(api, accounts, {
     storage: options.pendingStorage ?? memoryStorage(),
     // Interaction tests finish inside Testing Library's 1s waitFor. The
@@ -193,7 +201,7 @@ export function testServices(
       enabled: () => settings.cacheRoomList.peek(),
     }),
     {
-      onMembers: (accountId, list) => memberDirectory.record(accountId, list),
+      memberDirectory,
     },
   )
   const search = createSearchStore(api)

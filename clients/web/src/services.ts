@@ -1327,18 +1327,18 @@ export function connectUpdateChecks(
 }
 
 /**
- * Keep every warm timeline store live, not only the mounted room's.
+ * Keep every warm timeline store live, not only the mounted room's, so a room
+ * opens with the messages its room-list row already showed.
  *
- * Before this, only `RoomPage`'s subscription ingested frames, so a room the
- * user had left stopped at the moment they left. The room list kept updating
- * its preview from the same frames, and on a slow link the room then opened
- * without the message its row had just shown, until the re-entry head fetch
- * came back. The frame has the whole event, so the store can take it the
- * moment it arrives.
+ * Two rules the next edit must keep:
  *
- * Rooms with no warm store are skipped (`TimelineStoreCache.ingestLive`
- * builds none): a slice of a few live frames with no page under it is not a
- * timeline, and its first open still needs the head fetch.
+ * - **Rooms with no warm store are skipped** (`TimelineStoreCache.ingestLive`
+ *   builds none, and a frame is not an LRU visit). A few live frames with no
+ *   page under them are not a timeline; a first open still needs the head
+ *   fetch.
+ * - **A warm store is still gap-filled on re-entry.** The socket is lossy and
+ *   has no cursor, so a frame dropped while the room was closed is only
+ *   recovered by `refreshHead`'s merge.
  *
  * Returns the unsubscribe; the app graph keeps the subscription for its life.
  */
@@ -1411,6 +1411,28 @@ export function connectRoomCachesReset(
     caches.memberDirectory.clear()
     caches.threadStores.clear()
   })
+}
+
+/**
+ * Drop one account's warm rooms and borrowed names when that account is
+ * logged out or deleted while the session carries on (Accounts → Log out or
+ * Delete). The keys carry the account id, so no other account would read
+ * them; this is about plaintext outliving the account in memory. A deleted
+ * account comes back under a new id, so nothing else would ever evict it.
+ */
+export function forgetAccountCaches(
+  accountId: string,
+  caches: {
+    timelines: TimelineStoreCache
+    memberStores: MembersStoreCache
+    memberDirectory: MemberDirectory
+    threadStores: ThreadsStoreCache
+  },
+): void {
+  caches.timelines.forgetAccount(accountId)
+  caches.memberStores.forgetAccount(accountId)
+  caches.memberDirectory.forgetAccount(accountId)
+  caches.threadStores.forgetAccount(accountId)
 }
 
 /**
@@ -1877,6 +1899,13 @@ export function createServices(
     setPerfEnabled(true)
   }
   const accounts = createAccountsStore(api, async (accountId) => {
+    // First, and synchronous: share cleanup below can throw.
+    forgetAccountCaches(accountId, {
+      timelines,
+      memberStores,
+      memberDirectory,
+      threadStores,
+    })
     await incomingShares?.invalidateAccount(accountId)
   })
   const matrixOAuthQr = createMatrixOAuthQrStore(api, accounts, {
@@ -1926,7 +1955,7 @@ export function createServices(
     }),
     {
       holdPreviewsAtStart: isRoomRoute(window.location.pathname),
-      onMembers: (accountId, list) => memberDirectory.record(accountId, list),
+      memberDirectory,
     },
   )
   const search = createSearchStore(api)

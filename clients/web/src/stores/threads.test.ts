@@ -231,6 +231,48 @@ describe('createThreadsStore', () => {
     expect(room.asked).toHaveLength(ROOT_FETCH_CONCURRENCY)
   })
 
+  it("lets no root answered after leaving overwrite the next visit's", async () => {
+    // A fake client, because a real abort always wins: what is under test is
+    // a body already on its way when `stop()` ran, which abort cannot recall.
+    const answers: ((body: string) => void)[] = []
+    const api = {
+      GET: (path: string) =>
+        path.endsWith('/threads')
+          ? Promise.resolve({
+              data: {
+                data: [
+                  {
+                    root_event_id: '$root',
+                    reply_count: 1,
+                    latest_reply_ts: 1,
+                  },
+                ],
+              },
+            })
+          : new Promise((resolve) =>
+              answers.push((body) =>
+                resolve({
+                  data: { data: { event_id: '$root', room_id: ROOM, body } },
+                }),
+              ),
+            ),
+    } as unknown as Parameters<typeof createThreadsStore>[0]
+    const store = createThreadsStore(api, ACCOUNT, ROOM)
+
+    await store.refresh()
+    expect(answers).toHaveLength(1)
+    store.stop()
+    // Back in the room: `stop()` forgot the root, so it is asked again.
+    await store.refresh()
+    expect(answers).toHaveLength(2)
+
+    answers[1]('edited')
+    answers[0]('original')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(store.roots.value.get('$root')?.body).toBe('edited')
+  })
+
   /**
    * `stop()` used to empty only the queue that existed. A summaries response
    * still on its way refilled it, and all 20 roots were then fetched for a

@@ -54,6 +54,11 @@ export interface TimelineStoreCache {
    * mounted room included, so no frame is ingested twice.
    */
   ingestLive(event: EventDto): void
+  /**
+   * Drop one account's stores, unsent echoes included: the account was logged
+   * out or deleted, so nothing it queued can be sent any more.
+   */
+  forgetAccount(accountId: string): void
   /** Drop every store, unsent echoes included. Sign-out only. */
   clear(): void
   /**
@@ -169,6 +174,16 @@ export function createTimelineStoreCache(
 
     ingestLive(event) {
       stores.get(`${event.account_id}\0${event.room_id}`)?.ingestLive(event)
+    },
+
+    forgetAccount(accountId) {
+      const prefix = `${accountId}\0`
+      for (const [key, store] of [...stores]) {
+        if (key.startsWith(prefix)) {
+          stores.delete(key)
+          store.dispose()
+        }
+      }
     },
 
     clear() {

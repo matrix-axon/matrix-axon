@@ -63,16 +63,30 @@ export function createMembersStore(
     return members.value.get(userId) ?? directory?.lookup(accountId, userId)
   }
 
+  /**
+   * Bumped by each `refresh`. A warm store outlives the visit that started a
+   * refresh, so an older list can come back after a newer one; only the
+   * latest may write the roster, the error or `loading`.
+   */
+  let refreshes = 0
+
   async function refresh() {
     // The member list is unpaginated, so on a weak link it is one of the two
     // large bodies a room open puts on the wire alongside the timeline page
     // that actually gates first paint. `members` is the size that matters.
     perfMark('members:refresh:start', { roomId })
+    const issued = ++refreshes
+    const epoch = directory?.epoch(accountId) ?? 0
     try {
       const { data, error: apiError } = await api.GET(
         '/v1/accounts/{account_id}/rooms/{room_id}/members',
         { params: { path: { account_id: accountId, room_id: roomId } } },
       )
+      // Overtaken by a newer refresh: this list is older than the one that
+      // will land, here and in the directory alike.
+      if (issued !== refreshes) {
+        return
+      }
       if (apiError !== undefined) {
         error.value = apiErrorMessage(apiError)
         return
@@ -81,16 +95,22 @@ export function createMembersStore(
       members.value = new Map(
         data.data.map((member) => [member.user_id, member]),
       )
-      directory?.record(accountId, data.data)
+      // Dropped by the directory itself if the reader signed out, or this
+      // account was removed, while the list was in flight.
+      directory?.record(accountId, data.data, epoch)
     } catch (cause) {
-      error.value = cause instanceof Error ? cause.message : String(cause)
+      if (issued === refreshes) {
+        error.value = cause instanceof Error ? cause.message : String(cause)
+      }
     } finally {
-      loading.value = false
-      perfMark('members:refresh:end', {
-        roomId,
-        members: members.value.size,
-        ok: error.value === null,
-      })
+      if (issued === refreshes) {
+        loading.value = false
+        perfMark('members:refresh:end', {
+          roomId,
+          members: members.value.size,
+          ok: error.value === null,
+        })
+      }
     }
   }
 

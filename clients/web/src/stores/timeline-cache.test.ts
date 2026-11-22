@@ -347,6 +347,29 @@ describe('createTimelineStoreCache', () => {
     expect(sameStore(cache.acquire(ACCOUNT, ROOM), store)).toBe(false)
   })
 
+  it("drops one account's warm rooms and leaves the other account's", async () => {
+    server.use(
+      http.get(timelinePath(ROOM), () =>
+        HttpResponse.json({
+          data: { events: [event('$1', 100)], next_cursor: 'c1' },
+        }),
+      ),
+    )
+    const cache = makeCache()
+    const gone = cache.acquire(ACCOUNT, ROOM)
+    await gone.loadLatest()
+    const kept = cache.acquire(OTHER_ACCOUNT, ROOM)
+
+    cache.forgetAccount(ACCOUNT)
+
+    expect(cache.size).toBe(1)
+    expect(sameStore(cache.acquire(OTHER_ACCOUNT, ROOM), kept)).toBe(true)
+    // A frame for the forgotten account builds nothing back.
+    cache.ingestLive(event('$2', 200))
+    expect(cache.size).toBe(1)
+    expect(sameStore(cache.acquire(ACCOUNT, ROOM), gone)).toBe(false)
+  })
+
   // A store the user has left keeps taking frames, so re-entry paints what
   // the room-list preview already showed without waiting on the head fetch.
   describe('ingestLive', () => {

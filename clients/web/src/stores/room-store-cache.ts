@@ -19,6 +19,8 @@ export const ROOM_STORE_LIMIT = 30
 export interface RoomStoreCache<T> {
   /** The warm store for a room, or a fresh one. Marks it most recently used. */
   acquire(accountId: string, roomId: string): T
+  /** Drop one account's stores, releasing each: logged out or deleted. */
+  forgetAccount(accountId: string): void
   /** Drop every store, releasing each. Sign-out only. */
   clear(): void
   /** Warm room count, for tests and diagnostics. */
@@ -56,6 +58,16 @@ export function createRoomStoreCache<T>(
         options.release?.(evicted)
       }
       return store
+    },
+
+    forgetAccount(accountId) {
+      const prefix = `${accountId}\0`
+      for (const [key, store] of [...stores]) {
+        if (key.startsWith(prefix)) {
+          stores.delete(key)
+          options.release?.(store)
+        }
+      }
     },
 
     clear() {
