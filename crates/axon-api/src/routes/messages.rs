@@ -208,7 +208,9 @@ pub async fn send_media(
 
     let send_started_at = std::time::Instant::now();
     let send_result = sender
-        .send_media(account_id, &room_id, attachment, caption, fmt, relation)
+        .send_media(
+            account_id, &room_id, attachment, caption, fmt, relation, None,
+        )
         .await;
     match send_result {
         Ok(event_id) => {

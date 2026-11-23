@@ -2332,6 +2332,7 @@ impl MessageSender for StubSender {
         room_id: &str,
         message: axon_core::link_preview::PreviewSend<'_>,
         attachment: Option<MediaAttachment>,
+        _txn_id: Option<&str>,
     ) -> Result<String, SendError> {
         if let Some(gate) = &self.preview_gate {
             gate.0.notify_one();
@@ -2428,6 +2429,7 @@ impl MessageSender for StubSender {
         caption: Option<&str>,
         formatted: Option<Formatted<'_>>,
         relation: Relation<'_>,
+        _txn_id: Option<&str>,
     ) -> Result<String, SendError> {
         self.calls.lock().unwrap().push(Call::SendMedia {
             account_id,

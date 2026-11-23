@@ -158,7 +158,7 @@ pub(super) async fn send(
                 previews,
             };
             sender
-                .send_with_previews(account_id, &room_id, message, attachment)
+                .send_with_previews(account_id, &room_id, message, attachment, None)
                 .await
                 .map_err(ApiError::from)
         }

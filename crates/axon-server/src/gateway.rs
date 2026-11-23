@@ -22,7 +22,7 @@ use axon_core::{
     CreateRoomRequest, MatrixProfile, PowerLevelChanges, PublicRoomsPage, PublicRoomsQuery,
     ResolvedPowerLevels,
 };
-use axon_sync::{GatewayError, GatewayLeaveOutcome, InteractiveCall, SdkGateway};
+use axon_sync::{GatewayError, GatewayLeaveOutcome, InteractiveCall, MediaSendBounds, SdkGateway};
 use uuid::Uuid;
 
 /// Wraps the sync engine's gateway so it satisfies the API's `MessageSender`
@@ -113,14 +113,38 @@ impl GatewayAdapter {
         verb: &'a str,
         fut: impl Future<Output = Result<T, GatewayError>> + 'a,
     ) -> impl Future<Output = Result<T, SendError>> + 'a {
+        self.with_upload_ceiling(account_id, self.upstream_upload_timeout, verb, fut)
+    }
+
+    /// [`with_upload_timeout`](Self::with_upload_timeout) with an explicit
+    /// ceiling: a media send bounds each of its steps itself
+    /// ([`media_bounds`](Self::media_bounds)), so its ceiling is their sum.
+    fn with_upload_ceiling<'a, T: 'a>(
+        &self,
+        account_id: Uuid,
+        ceiling: Duration,
+        verb: &'a str,
+        fut: impl Future<Output = Result<T, GatewayError>> + 'a,
+    ) -> impl Future<Output = Result<T, SendError>> + 'a {
         run_bounded(
             self.gateway
                 .interactive_call(account_id)
                 .ignoring_timeouts(),
-            self.upstream_upload_timeout,
+            ceiling,
             verb,
             fut,
         )
+    }
+
+    /// The bound on each step of a media send (ADR 0142 sections 6 and 8):
+    /// the original under the upload timeout, the thumbnail under its own
+    /// 10 s, and the event, with any reply lookup, under the send timeout.
+    fn media_bounds(&self) -> MediaSendBounds {
+        MediaSendBounds {
+            original: self.upstream_upload_timeout,
+            thumbnail: MediaSendBounds::THUMBNAIL_UPLOAD,
+            event: self.send_mutation_timeout,
+        }
     }
 }
 
@@ -194,12 +218,21 @@ impl MessageSender for GatewayAdapter {
         room_id: &str,
         message: axon_core::link_preview::PreviewSend<'_>,
         attachment: Option<MediaAttachment>,
+        txn_id: Option<&str>,
     ) -> Result<String, SendError> {
-        self.with_upload_timeout(
+        let bounds = self.media_bounds();
+        // A text send with previews keeps its single upload bound.
+        let ceiling = if attachment.is_some() {
+            bounds.total()
+        } else {
+            self.upstream_upload_timeout
+        };
+        self.with_upload_ceiling(
             account_id,
+            ceiling,
             "preview send",
             self.gateway
-                .send_with_previews(account_id, room_id, message, attachment),
+                .send_with_previews(account_id, room_id, message, attachment, txn_id, bounds),
         )
         .await
     }
@@ -244,12 +277,15 @@ impl MessageSender for GatewayAdapter {
         caption: Option<&str>,
         formatted: Option<Formatted<'_>>,
         relation: Relation<'_>,
+        txn_id: Option<&str>,
     ) -> Result<String, SendError> {
-        self.with_upload_timeout(
+        let bounds = self.media_bounds();
+        self.with_upload_ceiling(
             account_id,
+            bounds.total(),
             "media send",
             self.gateway.send_media(
-                account_id, room_id, attachment, caption, formatted, relation,
+                account_id, room_id, attachment, caption, formatted, relation, txn_id, bounds,
             ),
         )
         .await
