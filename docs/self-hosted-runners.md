@@ -118,15 +118,24 @@ Delete the old directory afterwards.
 
 ```sh
 VERSION=$(gh release view -R actions/runner --json tagName --jq .tagName | sed 's/^v//')
-curl -fsSLo /tmp/actions-runner.tar.gz \
-  "https://github.com/actions/runner/releases/download/v$VERSION/actions-runner-linux-x64-$VERSION.tar.gz"
+TARBALL="actions-runner-linux-x64-$VERSION.tar.gz"
+SHA=$(gh release view -R actions/runner "v$VERSION" --json body --jq .body |
+  sed -n 's/.*<!-- BEGIN SHA linux-x64 -->\([0-9a-f]\{64\}\)<!-- END SHA linux-x64 -->.*/\1/p')
+DL=$(sudo mktemp -d)
+sudo curl -fsSLo "$DL/$TARBALL" "https://github.com/actions/runner/releases/download/v$VERSION/$TARBALL"
+echo "$SHA  $DL/$TARBALL" | sudo sha256sum -c -
 sudo install -d -o "$RUNNER" -m 755 "$DIR"
-sudo -u "$RUNNER" tar -xzf /tmp/actions-runner.tar.gz -C "$DIR"
+sudo cat "$DL/$TARBALL" | sudo -u "$RUNNER" tar -xzf - -C "$DIR"
+sudo rm -rf "$DL"
 cd "$DIR"
 sudo -u "$RUNNER" ./config.sh --unattended --url https://github.com/matrix-axon \
   --token "$(gh api -X POST orgs/matrix-axon/actions/runners/registration-token --jq .token)" \
   --name "$NAME" --labels axon-linux --work _work --disableupdate
 ```
+
+The tarball goes into a directory that only root can open, because the runner account could plant or swap a file in a shared one like `/tmp`.
+`sha256sum -c` checks it against the SHA-256 in the release notes. It fails if the hash does not match, and also if the notes gave none.
+Do not go on unless it prints `OK`.
 
 `--labels axon-linux` adds the pool label beside the default `self-hosted`, `Linux` and `X64`.
 `--disableupdate` stops the runner updating itself, which would need write access to its own binaries (see "Updating the runner" below).
@@ -166,7 +175,7 @@ The check fails, and the runner does not start, if any of these holds:
 It runs as the runner account, through the unit's `User=`, and refuses anything it cannot read.
 
 ```sh
-UNIT=$(cat "$DIR/.service")
+UNIT=$(sudo cat "$DIR/.service")   # closed to other accounts since the chmod above
 sudo install -d "/etc/systemd/system/$UNIT.d"
 printf '[Service]\nExecStartPre=%s %s %s\n' "$LIB/preflight.sh" "$DIR" "$RUNNER" |
   sudo tee "/etc/systemd/system/$UNIT.d/preflight.conf"
@@ -206,9 +215,13 @@ Because the runner cannot update itself, a maintainer installs each runner relea
 GitHub stops sending jobs to a runner that falls 30 days behind a release, and the picker cannot see the runner's version.
 The symptom is jobs waiting on `axon-linux` while the runner shows as idle: set the kill switch, then update.
 
+First download and check the new release with step 2's commands up to and including `sha256sum -c`, which leave it in `$DL`.
+Then, from `$DIR`:
+
 ```sh
 sudo ./svc.sh stop
-sudo tar -xzf /tmp/actions-runner.tar.gz -C "$DIR"      # the new release, downloaded as in step 2
+sudo tar -xzf "$DL/$TARBALL" --no-same-owner -C "$DIR"
+sudo rm -rf "$DL"
 sudo chown -R root:"$(id -gn "$RUNNER")" "$DIR"
 sudo chmod -R g+rX,g-w,o-rwx "$DIR"
 sudo chown -R "$RUNNER": "$DIR/_work" "$DIR/_diag"
