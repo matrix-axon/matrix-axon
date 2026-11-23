@@ -1247,8 +1247,13 @@ describe('RoomPage', () => {
         },
       ),
     )
-    const { findAllByRole, findByRole, getByLabelText, queryByRole } =
-      renderRoom([event('$1', T0)], { services })
+    const {
+      container,
+      findAllByRole,
+      findByRole,
+      getByLabelText,
+      queryByRole,
+    } = renderRoom([event('$1', T0)], { services })
     const review = await findAllByRole('button', {
       name: 'Review identity changes',
     })
@@ -1322,6 +1327,7 @@ describe('RoomPage', () => {
       await findAllByRole('button', { name: 'Review identity changes' }),
     ).toHaveLength(2)
     fireEvent.click(close)
+    expect(document.activeElement).toBe(container.querySelector('.timeline'))
     expect(composer.value).toBe('Keep my draft')
   })
 

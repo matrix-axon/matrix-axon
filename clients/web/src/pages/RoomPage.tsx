@@ -346,7 +346,7 @@ export function RoomPage() {
   const { openUnreadThreads, setJumpAction, setRoomChrome } = useShellActions()
   const heading = useRef<HTMLHeadingElement>(null)
   const roomBody = useRef<HTMLDivElement>(null)
-  /** Scopes the media viewer's focus-restore lookup to this room's rows. */
+  /** Scopes timeline and media focus lookups to this room's stream. */
   const roomStream = useRef<HTMLDivElement>(null)
   // Thread members live in the panel, not the main timeline (TUI parity);
   // state events are tiered behind the visibility setting, and bodyless
@@ -2366,15 +2366,17 @@ export function RoomPage() {
       }))
   }
 
+  const roomScroller = () =>
+    roomStream.current?.querySelector<HTMLDivElement>(':scope > .timeline') ??
+    null
+
   const pinLiveTimelineAfterComposerFocus = () => {
     if (highlighted !== null || !timeline.atEnd.value) {
       return
     }
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        const scroller = document.querySelector<HTMLElement>(
-          '.room-stream > .timeline',
-        )
+        const scroller = roomScroller()
         if (scroller !== null) {
           scroller.scrollTop = scroller.scrollHeight
         }
@@ -2483,7 +2485,6 @@ export function RoomPage() {
             panel beside it must stage there, not here (ADR 0065). */}
         <div
           ref={roomStream}
-          tabIndex={-1}
           class="room-stream"
           {...(attachable ? dropHandlers : {})}
         >
@@ -2715,7 +2716,7 @@ export function RoomPage() {
           restoreTo={() =>
             identityReviewOpener.current?.isConnected
               ? identityReviewOpener.current
-              : roomStream.current
+              : (roomScroller() ?? heading.current)
           }
         />
       )}
@@ -3572,10 +3573,13 @@ function Timeline({
     />
   )
 
+  // Focus the scroll container itself so native Page Up and Page Down scroll
+  // the timeline after clicking a message or returning from identity review.
   return (
     <div
       class="timeline"
       ref={scroller}
+      tabIndex={-1}
       onPointerDown={stopHighlightedCentering}
       onScroll={(event) => {
         const el = event.currentTarget

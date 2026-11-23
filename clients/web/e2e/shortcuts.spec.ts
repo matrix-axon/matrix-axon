@@ -452,3 +452,36 @@ test('the room controls carry their chords as tooltips', async ({
     `Hide rooms (${roomsShortcut}); drag or use arrow keys to resize`,
   )
 })
+
+test('Page Up and Page Down scroll the room timeline after a click', async ({
+  page,
+  request,
+}) => {
+  const seed = await request.post('/__e2e/bulk-timeline?count=40')
+  expect(seed.ok()).toBe(true)
+  try {
+    await signIn(page)
+    await page.goto(ROOM_URL)
+    const timeline = page.locator('.room-stream > .timeline')
+    await expect(
+      timeline.getByText('Bulk message 0', { exact: true }),
+    ).toBeAttached()
+    await timeline.evaluate((element) => {
+      element.scrollTop = (element.scrollHeight - element.clientHeight) / 2
+    })
+    // Use a pointer click on plain timeline content so the engine picks its
+    // own focus target, as it does when someone clicks a message to read.
+    await timeline.click({ position: { x: 4, y: 24 } })
+    const scrollTop = () => timeline.evaluate((element) => element.scrollTop)
+    const start = await scrollTop()
+
+    await page.keyboard.press('PageUp')
+    await expect.poll(scrollTop).toBeLessThan(start - 100)
+    const afterPageUp = await scrollTop()
+
+    await page.keyboard.press('PageDown')
+    await expect.poll(scrollTop).toBeGreaterThan(afterPageUp + 100)
+  } finally {
+    await request.post('/__e2e/bulk-timeline?count=0')
+  }
+})
