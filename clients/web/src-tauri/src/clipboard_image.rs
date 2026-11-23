@@ -1,7 +1,10 @@
 //! WebKitGTK can deliver an empty paste event for an image. Read the same
 //! display's CLIPBOARD selection through GTK and return the encoded raster.
 
-use gtk::{gdk, prelude::WidgetExt};
+use gtk::{
+    gdk,
+    prelude::{CastNone, GtkWindowExt, WidgetExt},
+};
 use std::time::Duration;
 use tauri::{ipc::Response, Runtime, WebviewWindow};
 use tokio::sync::{oneshot, Semaphore};
@@ -28,21 +31,25 @@ static CLIPBOARD_READ: Semaphore = Semaphore::const_new(1);
 pub(crate) async fn read_clipboard_image<R: Runtime>(
     window: WebviewWindow<R>,
 ) -> Result<Response, String> {
-    let Ok(permit) = CLIPBOARD_READ.try_acquire() else {
-        return Ok(Response::new(Vec::new()));
-    };
+    if window.label() != "main" {
+        return Err("clipboard_unavailable".into());
+    }
+    let permit = CLIPBOARD_READ.try_acquire().map_err(|_| "clipboard_busy")?;
     let (reply, received) = oneshot::channel();
-    let invoking_window = window.clone();
     window
         .with_webview(move |view| {
-            if invoking_window.label() != "main"
-                || !invoking_window.is_focused().unwrap_or(false)
-                || reply.is_closed()
-            {
-                let _ = reply.send(Ok(Vec::new()));
+            let widget = view.inner();
+            // Check GTK's active-window state at the read, without dispatching
+            // another Tauri window command from the GTK callback.
+            let focused = widget
+                .toplevel()
+                .and_downcast::<gtk::Window>()
+                .is_some_and(|window| window.is_active());
+            if !focused || reply.is_closed() {
+                let _ = reply.send(Err("clipboard_unavailable"));
                 return;
             }
-            let clipboard = view.inner().clipboard(&gdk::SELECTION_CLIPBOARD);
+            let clipboard = widget.clipboard(&gdk::SELECTION_CLIPBOARD);
             clipboard.request_contents(&gdk::Atom::intern("TARGETS"), move |clipboard, data| {
                 let target = data.targets().and_then(|offered| {
                     IMAGE_TARGETS
@@ -53,11 +60,14 @@ pub(crate) async fn read_clipboard_image<R: Runtime>(
                 if let Some(target) = target.filter(|_| !reply.is_closed()) {
                     clipboard.request_contents(&target, move |_, data| {
                         let _permit = permit;
+                        if reply.is_closed() {
+                            return;
+                        }
                         let length = data.length();
                         let result = if length > MAX_IMAGE_BYTES {
-                            Err("Clipboard image exceeds the attachment size limit")
-                        } else if length <= 0 || data.format() != 8 || reply.is_closed() {
-                            Ok(Vec::new())
+                            Err("clipboard_too_large")
+                        } else if length <= 0 || data.format() != 8 {
+                            Err("clipboard_unavailable")
                         } else {
                             Ok(data.data())
                         };
@@ -68,11 +78,11 @@ pub(crate) async fn read_clipboard_image<R: Runtime>(
                 }
             });
         })
-        .map_err(|_| "Could not access the Linux clipboard")?;
+        .map_err(|_| "clipboard_unavailable")?;
 
     match tokio::time::timeout(READ_TIMEOUT, received).await {
         Ok(Ok(result)) => result.map(Response::new).map_err(String::from),
-        Ok(Err(_)) => Err("Clipboard image read was canceled".into()),
-        Err(_) => Err("Clipboard image read timed out".into()),
+        Ok(Err(_)) => Err("clipboard_unavailable".into()),
+        Err(_) => Err("clipboard_timed_out".into()),
     }
 }

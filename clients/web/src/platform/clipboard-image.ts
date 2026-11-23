@@ -2,8 +2,25 @@ import { fileFromPath } from '../media/dropped-file'
 import { SNIFF_HEAD_BYTES, sniffImageFormat } from '../media/sniff'
 import { isTauriRuntime } from './index'
 
-export function supportsNativeImagePaste(): boolean {
-  return __AXON_TAURI_PLATFORM__ === 'linux' && isTauriRuntime()
+export function supportsNativeImagePaste(
+  event: Pick<ClipboardEvent, 'isTrusted'>,
+): boolean {
+  return (
+    event.isTrusted && __AXON_TAURI_PLATFORM__ === 'linux' && isTauriRuntime()
+  )
+}
+
+export function clipboardImageProblem(error: unknown): string {
+  switch (error) {
+    case 'clipboard_busy':
+      return 'The clipboard is still busy. Try pasting again.'
+    case 'clipboard_too_large':
+      return 'The clipboard image exceeds the attachment size limit.'
+    case 'clipboard_timed_out':
+      return 'Reading the clipboard image timed out. Try pasting again.'
+    default:
+      return 'Could not read the clipboard image. Try pasting again.'
+  }
 }
 
 export function canFallBackToClipboardImage(

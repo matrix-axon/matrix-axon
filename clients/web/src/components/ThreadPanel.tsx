@@ -294,6 +294,7 @@ export function ThreadPanel({
     }
     setRootPinned(scroller.scrollTop >= rootElement.offsetHeight)
   }, [root])
+  const attachmentScope = `${accountId}\0${roomId}\0${rootId}`
   const {
     setAction,
     banner: composerBanner,
@@ -319,7 +320,7 @@ export function ThreadPanel({
     rooms,
     roomTitles,
     ownUserId,
-    attachmentScope: `${accountId}\0${roomId}\0${rootId}`,
+    attachmentScope,
     onMutation: search.clear,
     staging,
     nativeDrops: platform.onNativeFileDrop,
@@ -1024,6 +1025,7 @@ export function ThreadPanel({
                 },
               }
         }
+        attachmentScope={attachmentScope}
         onAttach={attachable ? stage : undefined}
         attachments={{ ...attachments, onRemove: removeAttachment }}
         // The store is thread-scoped, so `thread_root` is already implied.

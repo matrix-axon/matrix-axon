@@ -33,6 +33,7 @@ import { SINGLE_PANE_QUERY, useMediaQuery } from '../layout'
 import { needsCameraCaptureButtons } from '../platform'
 import {
   canFallBackToClipboardImage,
+  clipboardImageProblem,
   readClipboardImage,
   supportsNativeImagePaste,
 } from '../platform/clipboard-image'
@@ -235,6 +236,7 @@ export function Composer({
   onDraftChange,
   onEditLast,
   attachments,
+  attachmentScope,
   onAttach,
   stickers,
   emoji,
@@ -305,6 +307,8 @@ export function Composer({
    * the edit-mode composer does — an edit replaces text, not media.
    */
   onAttach?(files: FileList | readonly File[]): void
+  /** Scope of the attachment staging bucket. Enables native image paste. */
+  attachmentScope?: string
   stickers?: StickerPickerOptions
   emoji?: Pick<StickerPickerOptions, 'api' | 'accountId' | 'roomId'>
   /** Focus this composer when it first mounts. */
@@ -404,13 +408,20 @@ export function Composer({
   const textarea = useRef<HTMLTextAreaElement>(null)
   const clipboardPaste = useRef<Promise<File | null> | null>(null)
   const [pastingImage, setPastingImage] = useState(false)
-  // A late clipboard reply belongs to the attachment scope that requested it.
+  const [pasteProblem, setPasteProblem] = useState<string | null>(null)
+  const attachPastedImage = useRef(onAttach)
+  useLayoutEffect(() => {
+    attachPastedImage.current = onAttach
+  }, [onAttach])
+  const pasteScope = onAttach === undefined ? undefined : attachmentScope
+  // A read may survive a callback change within the same attachment scope.
   useLayoutEffect(() => {
     setPastingImage(false)
+    setPasteProblem(null)
     return () => {
       clipboardPaste.current = null
     }
-  }, [onAttach])
+  }, [pasteScope])
   const fileInput = useRef<HTMLInputElement>(null)
   const photoInput = useRef<HTMLInputElement>(null)
   const videoInput = useRef<HTMLInputElement>(null)
@@ -1059,7 +1070,7 @@ export function Composer({
     }
   }
 
-  const pasteNativeImage = (attach: NonNullable<typeof onAttach>) => {
+  const pasteNativeImage = () => {
     if (clipboardPaste.current !== null) return
 
     const pending = readClipboardImage()
@@ -1068,10 +1079,14 @@ export function Composer({
     void pending
       .then((file) => {
         if (clipboardPaste.current === pending && file !== null) {
-          attach([file])
+          attachPastedImage.current?.([file])
         }
       })
-      .catch(() => console.warn('Could not attach the clipboard image'))
+      .catch((error: unknown) => {
+        if (clipboardPaste.current === pending) {
+          setPasteProblem(clipboardImageProblem(error))
+        }
+      })
       .finally(() => {
         if (clipboardPaste.current === pending) {
           clipboardPaste.current = null
@@ -1090,6 +1105,7 @@ export function Composer({
       return
     }
     setStickerProblem(null)
+    setPasteProblem(null)
     const body = draft.trim()
     // A staged file is itself a message: sending it bare, with no caption, is
     // the common case, so an empty draft is only inert when nothing is attached.
@@ -1733,9 +1749,9 @@ export function Composer({
             }}
             onPaste={(event) => {
               convertedEmoji.current = null
+              setPasteProblem(null)
               const clipboard = event.clipboardData
-              const nativeImagePaste =
-                event.isTrusted && supportsNativeImagePaste()
+              const nativeImagePaste = supportsNativeImagePaste(event)
               let files: FileList | File[] | undefined = clipboard?.files
               if (nativeImagePaste && files?.length) {
                 // Some WebKitGTK versions expose an image placeholder with no
@@ -1751,13 +1767,13 @@ export function Composer({
               }
               const pasted = clipboard?.getData?.('text/plain') ?? ''
               if (
-                onAttach !== undefined &&
+                pasteScope !== undefined &&
                 nativeImagePaste &&
                 clipboard != null &&
                 canFallBackToClipboardImage(clipboard, pasted)
               ) {
                 event.preventDefault()
-                pasteNativeImage(onAttach)
+                pasteNativeImage()
                 return
               }
               const start = event.currentTarget.selectionStart
@@ -2123,7 +2139,9 @@ export function Composer({
         </button>
       </form>
       {checkingSticker && <p role="status">Checking sticker packs…</p>}
+      {pastingImage && <p role="status">Reading clipboard image…</p>}
       {stickerProblem && <p role="alert">{stickerProblem}</p>}
+      {pasteProblem && <p role="alert">{pasteProblem}</p>}
     </div>
   )
 }

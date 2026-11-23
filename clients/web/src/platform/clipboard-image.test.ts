@@ -14,13 +14,14 @@ afterEach(() => {
 })
 
 describe('Linux clipboard image fallback', () => {
-  it('requires both the Linux build target and the desktop shell', () => {
+  it('requires a trusted paste in the Linux desktop shell', () => {
     vi.stubGlobal('__AXON_TAURI_PLATFORM__', 'linux')
-    expect(supportsNativeImagePaste()).toBe(false)
+    expect(supportsNativeImagePaste({ isTrusted: true })).toBe(false)
     vi.stubGlobal('__TAURI_INTERNALS__', {})
-    expect(supportsNativeImagePaste()).toBe(true)
+    expect(supportsNativeImagePaste({ isTrusted: true })).toBe(true)
+    expect(supportsNativeImagePaste({ isTrusted: false })).toBe(false)
     vi.stubGlobal('__AXON_TAURI_PLATFORM__', 'macos')
-    expect(supportsNativeImagePaste()).toBe(false)
+    expect(supportsNativeImagePaste({ isTrusted: true })).toBe(false)
   })
 
   it.each([

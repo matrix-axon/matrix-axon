@@ -1549,6 +1549,8 @@ export function RoomPage() {
   const accountRooms = rooms.rooms.value.filter(
     (candidate) => candidate.account_id === accountId,
   )
+  // The staging bucket and pending paste both belong to this account and room.
+  const attachmentScope = `${accountId}\0${roomId}`
   const {
     action,
     setAction,
@@ -1575,13 +1577,7 @@ export function RoomPage() {
     rooms: accountRooms,
     roomTitles: rooms.titles.value,
     ownUserId,
-    // Account *and* room: a room joined by two accounts is two rows
-    // (`roomKey`), and a file staged under one must never be sent from the
-    // other. Staging is now retained per scope (issue #89), so this key
-    // decides what the composer shows as well as what a send picks up —
-    // joined on `'\0'` like every other composite key, since a printable
-    // separator is a collision waiting to happen.
-    attachmentScope: `${accountId}\0${roomId}`,
+    attachmentScope,
     onMutation: search.clear,
     staging,
     nativeDrops: platform.onNativeFileDrop,
@@ -2650,6 +2646,7 @@ export function RoomPage() {
                     },
                   }
             }
+            attachmentScope={attachmentScope}
             onAttach={attachable ? stage : undefined}
             attachments={{ ...attachments, onRemove: removeAttachment }}
             onSubmit={submitMessage}
