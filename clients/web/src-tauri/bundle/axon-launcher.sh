@@ -14,6 +14,7 @@ probe() {
 webkit_failure() {
     printf '%s\n' "$1" | grep -Eq \
         -e 'undefined symbol: (webkit_|jsc_|JS[A-Z])' \
+        -e 'undefined symbol: .*[[:space:]]+\(.*/lib(webkit2gtk|javascriptcoregtk)-4[.]1[.]so([.][0-9]+)*\)[[:space:]]*$' \
         -e 'lib(webkit2gtk|javascriptcoregtk)-4[.]1[.]so[.]0 => not found' \
         -e 'lib(webkit2gtk|javascriptcoregtk)-4[.]1[.]so[.]0: (cannot open|wrong ELF|invalid ELF)' \
         -e 'not found \(required by .*lib(webkit2gtk|javascriptcoregtk)-4[.]1[.]so'
@@ -36,8 +37,20 @@ loaded_library() {
     '
 }
 
+shadowed_library() {
+    [ -n "$1" ] && resolved=$(readlink -f -- "$1") || return 1
+    case "$resolved" in
+        "$2"/*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 linkage=$(probe) || :
-if ! webkit_failure "$linkage"; then
+if webkit_failure "$linkage"; then
+    missing_dependency_only=no
+elif printf '%s\n' "$linkage" | grep -Fq '=> not found'; then
+    missing_dependency_only=yes
+else
     exec "$app" "$@"
 fi
 
@@ -46,6 +59,17 @@ minimum=2.42
 native_package=$package:$(dpkg --print-architecture)
 system_dir=$(dpkg-query -L "$native_package" 2>/dev/null |
     awk '/^\/(usr\/)?lib\/[^/]+\/libwebkit2gtk-4[.]1[.]so[.]0$/ { sub(/\/[^/]+$/, ""); print; exit }')
+
+webkit=$(loaded_library "$linkage" libwebkit2gtk-4.1.so.0)
+javascriptcore=$(loaded_library "$linkage" libjavascriptcoregtk-4.1.so.0)
+# ldd does not say which object needed a missing library. Try the distro
+# lookup only if the first lookup found a WebKit library outside that directory.
+if [ "$missing_dependency_only" = yes ]; then
+    distro_dir=$(readlink -f -- "$system_dir") || exec "$app" "$@"
+    if ! shadowed_library "$webkit" "$distro_dir" && ! shadowed_library "$javascriptcore" "$distro_dir"; then
+        exec "$app" "$@"
+    fi
+fi
 
 if [ -n "$system_dir" ] &&
     [ -r "$system_dir/libwebkit2gtk-4.1.so.0" ] &&
@@ -58,8 +82,6 @@ if [ -n "$system_dir" ] &&
     LD_LIBRARY_PATH=$system_dir exec "$app" "$@"
 fi
 
-webkit=$(loaded_library "$linkage" libwebkit2gtk-4.1.so.0)
-javascriptcore=$(loaded_library "$linkage" libjavascriptcoregtk-4.1.so.0)
 installed=$(dpkg-query -W -f='${db:Status-Status} ${Version}' "$native_package" 2>/dev/null) || installed=
 distro_version=${installed#installed }
 if [ "$distro_version" = "$installed" ]; then

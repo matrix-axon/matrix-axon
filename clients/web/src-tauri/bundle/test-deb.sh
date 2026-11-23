@@ -7,7 +7,8 @@ work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
 
 input=$work/input
-mkdir -p "$input/DEBIAN" "$input/usr/bin" "$input/usr/share/applications" "$work/old" "$work/tools"
+mkdir -p "$input/DEBIAN" "$input/usr/bin" "$input/usr/share/applications" \
+    "$work/old" "$work/bad-symbol" "$work/missing-library" "$work/tools"
 cat > "$input/DEBIAN/control" <<EOF
 Package: axon
 Version: 1.0
@@ -20,7 +21,7 @@ printf 'Exec=axon %%u\n' > "$input/usr/share/applications/Axon.desktop"
 
 # Use the same relocation as Axon without starting a webview or needing a
 # display. The callback argument and exit status must survive the launcher.
-cc -Wl,-z,now -x c - -lwebkit2gtk-4.1 -ljavascriptcoregtk-4.1 -o "$input/usr/bin/axon" <<'EOF'
+cat > "$work/app.c" <<'EOF'
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -38,9 +39,31 @@ int main(int argc, char **argv) {
     return 23;
 }
 EOF
+build_app() {
+    cc -Wl,-z,now "$work/app.c" -lwebkit2gtk-4.1 -ljavascriptcoregtk-4.1 "$@"
+}
+build_app -o "$input/usr/bin/axon"
+
 cc -shared -fPIC -Wl,-soname,libwebkit2gtk-4.1.so.0 -x c - -o "$work/old/libwebkit2gtk-4.1.so.0" <<'EOF'
 void axon_test_old_webkit(void) {}
 EOF
+cat > "$work/webkit.c" <<'EOF'
+void webkit_cookie_manager_get_all_cookies(void) {}
+EOF
+cc -shared -fPIC -Wl,-z,now,-soname,libwebkit2gtk-4.1.so.0 "$work/webkit.c" -x c - \
+    -o "$work/bad-symbol/libwebkit2gtk-4.1.so.0" <<'EOF'
+extern void axon_fixture_missing_symbol(void);
+void fixture_uses_dependency(void) { axon_fixture_missing_symbol(); }
+EOF
+cc -shared -fPIC -Wl,-soname,libaxon-fixture-dependency.so.0 -x c - \
+    -o "$work/libaxon-fixture-dependency.so.0" <<'EOF'
+void fixture_dependency(void) {}
+EOF
+# Record a needed library without a relocation, so ldd only reports
+# "=> not found" for this fixture. The library sits outside its search path.
+cc -shared -fPIC -Wl,-z,now,-soname,libwebkit2gtk-4.1.so.0 "$work/webkit.c" \
+    -Wl,--no-as-needed "$work/libaxon-fixture-dependency.so.0" \
+    -o "$work/missing-library/libwebkit2gtk-4.1.so.0"
 
 dpkg-deb --root-owner-group --build "$input" "$work/input.deb"
 "$bundle_dir/finalize-deb.sh" "$work/input.deb" "$work/axon.deb"
@@ -59,12 +82,19 @@ test "$status" -eq 23
 printf '%s\ndefault\n' "$callback" | diff - "$work/out"
 test ! -s "$work/error"
 
-status=0
-LD_LIBRARY_PATH=$work/old "$axon" "$callback" > "$work/out" 2> "$work/error" || status=$?
-test "$status" -eq 23
-grep -Fx "$callback" "$work/out"
-grep -Fx "$(pkg-config --variable=libdir webkit2gtk-4.1)" "$work/out"
-grep -F 'using the distro WebKitGTK and JavaScriptCore' "$work/error"
+expect_recovery() {
+    status=0
+    LD_LIBRARY_PATH=$1 "$axon" "$callback" > "$work/out" 2> "$work/error" || status=$?
+    if [ "$status" -ne 23 ]; then
+        cat "$work/error" >&2
+        return 1
+    fi
+    printf '%s\n%s\n' "$callback" "$(pkg-config --variable=libdir webkit2gtk-4.1)" | diff - "$work/out"
+    grep -F 'using the distro WebKitGTK and JavaScriptCore' "$work/error"
+}
+expect_recovery "$work/old"
+expect_recovery "$work/bad-symbol"
+expect_recovery "$work/missing-library"
 
 # A preload takes precedence even on the distro lookup. Exercise failure
 # without removing or downgrading anything on the test runner.
@@ -105,3 +135,13 @@ LD_PRELOAD=$work/old/libwebkit2gtk-4.1.so.0 "$axon" > "$work/out" 2> "$work/erro
 test "$status" -eq 1
 grep -F 'libwebkit2gtk-4.1-0: 2.40.5' "$work/error"
 grep -F 'Install or update libwebkit2gtk-4.1-0 to version 2.42 or newer' "$work/error"
+
+# When the app itself requires a missing library and both WebKit libraries
+# are distro copies, the launcher leaves the loader's own error intact.
+build_app -Wl,--no-as-needed "$work/libaxon-fixture-dependency.so.0" \
+    -o "$work/installed/usr/lib/axon/axon"
+status=0
+"$axon" "$callback" > "$work/out" 2> "$work/error" || status=$?
+test "$status" -eq 127
+grep -F 'error while loading shared libraries: libaxon-fixture-dependency.so.0' "$work/error"
+test ! -s "$work/out"
