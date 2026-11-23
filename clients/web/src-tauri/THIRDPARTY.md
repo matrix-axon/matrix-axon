@@ -1930,7 +1930,7 @@ third-party/chromium/LICENSE.
       - hashbrown 0.17.1
   - Copyright (c) 2017 Sergio Benitez
     Copyright (c) 2014 Alex Crichton
-      - cookie 0.18.2
+      - cookie 0.18.3
   - Copyright (c) 2012-2013 Mozilla Foundation
       - core-foundation 0.10.1
       - core-foundation 0.9.4
