@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use axon_api::{
-    ClaimedUpload, StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService,
-    UploadStream,
+    ClaimedUpload, SendThumbnail, StageUploadError, StageUploadRequest, StagedUpload,
+    StagedUploadService, UploadStream,
 };
 use axon_core::MediaConfig;
 use axon_store::{AccountState, MediaUploadKind, NewMediaUpload, Store};
@@ -36,7 +36,28 @@ const MAX_CONCURRENT_PREVIEW_RECOVERY: usize = 4;
 pub(crate) fn validate_preview_image(
     upload: ClaimedUpload,
 ) -> Result<axon_core::link_preview::PreviewImage, StageUploadError> {
+    decode_preview_image(upload).map(|decoded| decoded.preview)
+}
+
+/// Bytes the preview decoder may allocate.
+const PREVIEW_MAX_ALLOC: u64 = 32 * 1024 * 1024;
+
+/// A preview image that passed validation, with its decoded pixels and its
+/// EXIF orientation, for the callers that go on to normalise it.
+pub(crate) struct DecodedPreview {
+    pub preview: axon_core::link_preview::PreviewImage,
+    pub image: image::DynamicImage,
+    pub orientation: image::metadata::Orientation,
+}
+
+/// Sniff, check and decode a staged preview image: PNG, JPEG or WebP, a type
+/// that matches its bytes, at most 2 MiB and 4,000,000 pixels, decoded under
+/// a 32 MiB allocation cap.
+pub(crate) fn decode_preview_image(
+    upload: ClaimedUpload,
+) -> Result<DecodedPreview, StageUploadError> {
     use axon_core::link_preview::{PreviewImage, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS};
+    use image::ImageDecoder;
     let invalid = || {
         StageUploadError::Invalid("preview must be a valid PNG, JPEG or WebP image of at most 4,000,000 pixels with matching MIME type".into())
     };
@@ -70,14 +91,30 @@ pub(crate) fn validate_preview_image(
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(width);
     limits.max_image_height = Some(height);
-    limits.max_alloc = Some(32 * 1024 * 1024);
-    reader.limits(limits);
-    reader.decode().map_err(|_| invalid())?;
-    Ok(PreviewImage {
-        bytes: upload.bytes,
-        mimetype: mimetype.into(),
-        width,
-        height,
+    limits.max_alloc = Some(PREVIEW_MAX_ALLOC);
+    reader.limits(limits.clone());
+    // What `ImageReader::decode` does, but keeping the decoder long enough to
+    // read the orientation: reserve the output buffer against the cap, then
+    // hand the decoder what is left.
+    let mut decoder = reader.into_decoder().map_err(|_| invalid())?;
+    limits
+        .reserve(decoder.total_bytes())
+        .map_err(|_| invalid())?;
+    decoder.set_limits(limits).map_err(|_| invalid())?;
+    // A broken EXIF block only costs the turn, never the image.
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let image = image::DynamicImage::from_decoder(decoder).map_err(|_| invalid())?;
+    Ok(DecodedPreview {
+        preview: PreviewImage {
+            bytes: upload.bytes,
+            mimetype: mimetype.into(),
+            width,
+            height,
+        },
+        image,
+        orientation,
     })
 }
 
@@ -602,6 +639,64 @@ impl StagedUploadService for FilesystemStagedUploads {
         }
         result
     }
+    async fn claim_send_thumbnail(
+        &self,
+        account_id: Uuid,
+        upload_id: Uuid,
+        budget: Duration,
+    ) -> Result<SendThumbnail, StageUploadError> {
+        // Claim before waiting, so this send owns the row on every path below
+        // (ADR 0142 section 4). `claim_bounded` releases its own failures.
+        let upload = self
+            .claim_bounded(
+                account_id,
+                upload_id,
+                axon_core::link_preview::MAX_IMAGE_BYTES,
+            )
+            .await?;
+        // One budget for the permit wait, the decode, the normalisation and
+        // the encode.
+        let deadline = tokio::time::Instant::now() + budget;
+        let Ok(permit) =
+            tokio::time::timeout_at(deadline, self.concurrent_uploads.clone().acquire_owned())
+                .await
+        else {
+            return Ok(SendThumbnail::Skipped("decoder_busy"));
+        };
+        let permit = permit
+            .map_err(|_| StageUploadError::Internal("thumbnail decoder capacity closed".into()))?;
+        // The work keeps its permit until it finishes, even once the budget
+        // has run out and nobody waits for it, so an abandoned decode never
+        // overlaps the next one.
+        let work = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let decoded = decode_preview_image(upload)?;
+            crate::send_thumbnail::normalise(&decoded.image, decoded.orientation)
+                .map_err(|_| StageUploadError::Invalid("thumbnail could not be re-encoded".into()))
+        });
+        let result = match tokio::time::timeout_at(deadline, work).await {
+            Err(_) => return Ok(SendThumbnail::Skipped("budget_expired")),
+            Ok(Err(_)) => Err(StageUploadError::Internal(
+                "thumbnail decoder task failed".into(),
+            )),
+            Ok(Ok(result)) => result,
+        };
+        match result {
+            Ok(thumbnail) => Ok(SendThumbnail::Ready(thumbnail)),
+            Err(error) => {
+                if self
+                    .store
+                    .release_sending_media_upload(account_id, upload_id)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(%account_id, %upload_id, "failed to release invalid send thumbnail");
+                }
+                Err(error)
+            }
+        }
+    }
+
     async fn stage_upload(
         &self,
         request: StageUploadRequest,
@@ -1000,6 +1095,147 @@ mod tests {
             axon_store::MediaUploadState::Staged
         );
     }
+    /// A 40 × 20 JPEG whose EXIF says to turn it 90° clockwise (orientation
+    /// 6), so it is shown 20 × 40.
+    fn sideways_jpeg() -> Vec<u8> {
+        use image::ImageEncoder;
+        // A little-endian TIFF header and one IFD entry: 0x0112, SHORT, 6.
+        let exif = vec![
+            0x49, 0x49, 42, 0, 8, 0, 0, 0, // header, IFD at 8
+            1, 0, // one entry
+            0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, // orientation = 6
+            0, 0, 0, 0, // no next IFD
+        ];
+        let mut out = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new(&mut out);
+        encoder.set_exif_metadata(exif).unwrap();
+        let pixels = image::RgbImage::from_pixel(40, 20, image::Rgb([200, 10, 10]));
+        encoder
+            .write_image(&pixels, 40, 20, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        out
+    }
+
+    async fn stage_image(
+        service: &super::FilesystemStagedUploads,
+        account_id: Uuid,
+        content_type: &str,
+        bytes: Vec<u8>,
+    ) -> Uuid {
+        use axon_api::StagedUploadService;
+        let request = axon_api::StageUploadRequest {
+            account_id,
+            kind: axon_api::MediaUploadKindDto::Image,
+            filename: "thumb".into(),
+            content_type: Some(content_type.into()),
+        };
+        service
+            .stage_upload(
+                request,
+                Box::pin(futures_util::stream::once(async { Ok(bytes.into()) })),
+            )
+            .await
+            .unwrap()
+            .upload_id
+    }
+
+    /// ADR 0142 section 4: a client thumbnail is claimed before anything
+    /// else, normalised (upright, re-encoded, no EXIF), released when it is
+    /// invalid, and kept claimed but skipped when the decoder pool is busy.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn send_thumbnail_claim_normalises_releases_invalid_and_skips_when_busy() {
+        use axon_api::{SendThumbnail, StagedUploadService};
+        use axon_store::MediaUploadState;
+        let store = connect_store().await;
+        let owner = test_account(&store).await;
+        let dir = tempfile::tempdir().unwrap();
+        let service = uploads(store.clone(), dir.path().into());
+        let state = |id| {
+            let store = store.clone();
+            async move {
+                store
+                    .get_media_upload(owner, id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state
+            }
+        };
+        let budget = Duration::from_secs(5);
+
+        let id = stage_image(&service, owner, "image/jpeg", sideways_jpeg()).await;
+        let SendThumbnail::Ready(thumbnail) = service
+            .claim_send_thumbnail(owner, id, budget)
+            .await
+            .unwrap()
+        else {
+            panic!("an idle decoder should finish within the budget");
+        };
+        assert_eq!(thumbnail.mimetype, "image/jpeg");
+        assert_eq!(
+            (thumbnail.width, thumbnail.height),
+            (20, 40),
+            "turned upright"
+        );
+        let decoded = image::load_from_memory(&thumbnail.bytes).unwrap();
+        assert_eq!(
+            (decoded.width(), decoded.height()),
+            (20, 40),
+            "the published bytes are the upright ones"
+        );
+        let mut decoder =
+            image::codecs::jpeg::JpegDecoder::new(std::io::Cursor::new(&thumbnail.bytes)).unwrap();
+        assert_eq!(
+            image::ImageDecoder::exif_metadata(&mut decoder).unwrap(),
+            None,
+            "no EXIF survives"
+        );
+        assert_eq!(
+            state(id).await,
+            MediaUploadState::Sending,
+            "the caller settles it"
+        );
+
+        // A type that does not match the bytes fails validation and is released.
+        let id = stage_image(&service, owner, "image/png", sideways_jpeg()).await;
+        assert!(matches!(
+            service.claim_send_thumbnail(owner, id, budget).await,
+            Err(StageUploadError::Invalid(_))
+        ));
+        assert_eq!(state(id).await, MediaUploadState::Staged);
+
+        // With every decoder permit taken, the claim holds and the work is
+        // skipped once the budget runs out.
+        let id = stage_image(&service, owner, "image/png", preview_png()).await;
+        let held = service
+            .concurrent_uploads
+            .clone()
+            .acquire_many_owned(service.concurrent_uploads_total as u32)
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .claim_send_thumbnail(owner, id, Duration::from_millis(50))
+                .await
+                .unwrap(),
+            SendThumbnail::Skipped("decoder_busy")
+        );
+        assert_eq!(state(id).await, MediaUploadState::Sending);
+        drop(held);
+
+        // Someone else's upload cannot be claimed at all.
+        let other = test_account(&store).await;
+        let id = stage_image(&service, owner, "image/png", preview_png()).await;
+        assert!(matches!(
+            service.claim_send_thumbnail(other, id, budget).await,
+            Err(StageUploadError::NotFound(_))
+        ));
+        assert_eq!(state(id).await, MediaUploadState::Staged);
+        store.delete_account_row(owner).await.unwrap();
+        store.delete_account_row(other).await.unwrap();
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn preview_recovery_is_bounded_account_owned_nonconsuming_and_expiring() {

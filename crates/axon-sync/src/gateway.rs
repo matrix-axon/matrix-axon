@@ -3380,6 +3380,10 @@ mod tests {
                     content_type: Some(declared.into()),
                     size_bytes: 3,
                     bytes: vec![1, 2, 3],
+                    width: None,
+                    height: None,
+                    duration_ms: None,
+                    thumbnail: None,
                 };
                 let event_id = super::send_media_in_room(
                     &room,
@@ -3447,6 +3451,10 @@ mod tests {
                     content_type: declared.map(Into::into),
                     size_bytes: 3,
                     bytes: vec![1, 2, 3],
+                    width: None,
+                    height: None,
+                    duration_ms: None,
+                    thumbnail: None,
                 };
                 let err = super::send_media_in_room(
                     &room,
@@ -3549,6 +3557,10 @@ mod tests {
             content_type: content_type.map(Into::into),
             size_bytes: 3,
             bytes: vec![4, 5, 6],
+            width: None,
+            height: None,
+            duration_ms: None,
+            thumbnail: None,
         };
 
         let event_id = super::send_with_previews_in_room(

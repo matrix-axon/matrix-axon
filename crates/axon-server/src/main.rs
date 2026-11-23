@@ -27,6 +27,7 @@ mod preview_generation;
 mod push;
 mod room_identity;
 mod search;
+mod send_thumbnail;
 mod status;
 mod token;
 mod trust;
