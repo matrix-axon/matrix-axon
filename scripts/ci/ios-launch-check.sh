@@ -47,6 +47,21 @@ die() {
 }
 note() { echo "==> $*"; }
 
+# with_timeout <seconds> <command...>: runs it, and kills it and returns 124 if it
+# outlives the limit. macOS has no timeout(1). A simulator that never finishes booting
+# held a job for its whole 80 minutes with nothing in the log to say what it was doing.
+with_timeout() {
+  python3 - "$@" <<'PY'
+import subprocess, sys
+seconds, command = int(sys.argv[1]), sys.argv[2:]
+try:
+    sys.exit(subprocess.run(command, timeout=seconds).returncode)
+except subprocess.TimeoutExpired:
+    print("timed out after %ds: %s" % (seconds, " ".join(command)), file=sys.stderr)
+    sys.exit(124)
+PY
+}
+
 repo_root=$(CDPATH="" cd -- "$(dirname "$0")/../.." && pwd)
 web_dir="$repo_root/clients/web"
 tauri_dir="$web_dir/src-tauri"
@@ -230,17 +245,47 @@ case "$kind" in
   *) die "no iPhone simulator for iOS $target_ios (the SDK is $sdk)" ;;
 esac
 note "simulator $sim_name $udid (iOS $target_ios, SDK $sdk)"
+
+# Keeps what is known when the simulator itself fails (it never finishes booting, or
+# will not take the app), before the script gives up: the device list and the
+# simulator's own log say what a bare "timed out" cannot.
+keep_simulator_diagnostics() {
+  [ -n "$diagnostics" ] || return 0
+  mkdir -p "$diagnostics"
+  echo "$facts" >"$diagnostics/app-facts.txt"
+  xcrun simctl list devices >"$diagnostics/simulators.txt" 2>&1 || true
+  xcrun simctl list runtimes >>"$diagnostics/simulators.txt" 2>&1 || true
+  tail -n 4000 "$HOME/Library/Logs/CoreSimulator/$udid/system.log" >"$diagnostics/simulator-boot.log" 2>/dev/null || true
+  find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -type f \( -name '*.ips' -o -name '*.crash' \) -newer "$started_marker" 2>/dev/null \
+    | while IFS= read -r report; do mkdir -p "$diagnostics/crash-reports"; cp "$report" "$diagnostics/crash-reports/"; done
+}
+
+# The first boot of a runtime migrates its data, which the UI-test script gives ten
+# minutes; this allows fifteen, and no more, because a simulator that is going to boot
+# has by then.
+boot_seconds=${LAUNCH_CHECK_BOOT_SECONDS:-900}
+touch "$started_marker"
 xcrun simctl boot "$udid" 2>/dev/null || true
-xcrun simctl bootstatus "$udid" -b >/dev/null
+if ! with_timeout "$boot_seconds" xcrun simctl bootstatus "$udid" -b >/dev/null; then
+  keep_simulator_diagnostics
+  die "the $sim_name simulator on iOS $target_ios did not finish booting within ${boot_seconds}s" 1
+fi
+note "the simulator has booted"
 
 xcrun simctl terminate "$udid" "$bundle_id" 2>/dev/null || true
 xcrun simctl uninstall "$udid" "$bundle_id" 2>/dev/null || true
-xcrun simctl install "$udid" "$app"
+if ! with_timeout 300 xcrun simctl install "$udid" "$app"; then
+  keep_simulator_diagnostics
+  die "the simulator would not install the app" 1
+fi
 
 # Crash reports newer than this marker are this launch's.
 touch "$started_marker"
 note "launching $bundle_id"
-launch=$(xcrun simctl launch "$udid" "$bundle_id" 2>&1) || die "simctl could not launch it: $launch" 1
+if ! launch=$(with_timeout 180 xcrun simctl launch "$udid" "$bundle_id" 2>&1); then
+  keep_simulator_diagnostics
+  die "simctl could not launch it: $launch" 1
+fi
 echo "    $launch"
 sleep "$settle"
 
