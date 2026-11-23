@@ -499,8 +499,8 @@ export interface paths {
         get?: never;
         /**
          * Set insecure device exclusion
-         * @description Enabling requires Axon's own device to be cross-signed and an acknowledgement
-         *     of the current impact. Disabling needs only a valid bearer. A changed
+         * @description Enabling requires a cross-signed Axon device, a locally verified own
+         *     cross-signing identity, and acknowledgement of the current impact. Disabling needs only a valid bearer. A changed
          *     setting on an active account restarts its SDK session with the persisted
          *     policy. Previously decrypted history is preserved.
          */
@@ -523,7 +523,8 @@ export interface paths {
          * Read the impact of insecure device exclusion
          * @description Lists joined encrypted rooms and the members with affected devices known to
          *     Axon. Devices that have not uploaded identity keys are absent from the list.
-         *     A lazy membership roster may need to sync before this read succeeds.
+         *     The server confirms rooms whose cache says they are unencrypted and may
+         *     sync lazy rosters before this read succeeds.
          */
         get: operations["insecure_devices_impact"];
         put?: never;
@@ -8687,7 +8688,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Account state conflict, own device not cross-signed, or missing or stale acknowledgement. For impact_acknowledgement_required, review the returned impact before retrying. */
+            /** @description Account busy or in a conflicting state, own device not cross-signed, own identity not verified, or missing or stale acknowledgement. For impact_acknowledgement_required, review the returned impact before retrying. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -8705,7 +8706,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description The account or its room rosters are not ready */
+            /** @description The account connection, room encryption state, room rosters, or local crypto store are unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -8775,7 +8776,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description The account or its room rosters are not ready */
+            /** @description The account connection, room encryption state, room rosters, or local crypto store are unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;

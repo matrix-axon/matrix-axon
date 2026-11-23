@@ -144,8 +144,9 @@ Encrypted bridges and bots can lose access to new messages, and bridged messages
 
 Read `GET /v1/accounts/{account_id}/exclude_insecure_devices/impact` to see joined encrypted rooms and members with affected devices known to Axon.
 This reads device data from the local crypto store.
-Axon may sync a lazy room roster before returning the impact, and returns 503 if it cannot finish the read.
-Axon's own device must be cross-signed before you can enable the setting.
+Axon checks rooms cached as unencrypted with the homeserver and may sync a lazy room roster before returning the impact.
+The impact read returns 503 if the room encryption state or roster is unavailable.
+Axon's own device must be cross-signed and the SDK must verify its own cross-signing identity locally before you can enable the setting.
 Send `PUT /v1/accounts/{account_id}/exclude_insecure_devices` with `enabled: true` and the returned `acknowledgement_token`, including when the list is empty.
 If the acknowledgement is missing or stale, the server returns 409 with code `impact_acknowledgement_required` and the current `impact` so you can review it again.
 To disable, send `enabled: false`.

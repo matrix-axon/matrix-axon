@@ -47,12 +47,12 @@ use crate::homeserver_gate::Caller;
 use crate::insecure_devices::{
     read_impact, require_cross_signed_device, InsecureDevicesError, IMPACT_TIMEOUT,
 };
-use crate::manager::ClientManager;
+use crate::manager::{ClientManager, ClientRequest};
 use crate::matrix_oauth_grant::MatrixOAuthGrantRegistry;
 use crate::own_identity;
 use crate::redecrypt::{BackupSource, RedecryptContext, RedecryptSummary, SweepScope};
 use crate::sync_health::SyncHealth;
-use crate::verification::{FlowRegistry, VerificationRooms};
+use crate::verification::{cancel_account_flows, FlowRegistry, VerificationRooms};
 
 /// How long logout waits for a cancelled supervised task to finish draining
 /// (sync-service stop + re-decryption join) before escalating to an abort
@@ -95,7 +95,8 @@ const RECOVER_SWEEP_TIMEOUT: Duration = Duration::from_secs(30);
 /// returns 200 with a partial summary at this cap, never 504.
 const MANUAL_REDECRYPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const QR_TRUST_DERIVATION_TIMEOUT: Duration = Duration::from_secs(10);
-const ENCRYPTED_SEND_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+const CLIENT_REQUEST_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+const CLIENT_RETIRE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// What can go wrong running a lifecycle verb. Wire-neutral, like
 /// [`GatewayError`](crate::GatewayError): the composition-root adapter
@@ -779,7 +780,14 @@ impl AccountLifecycle {
     async fn lock_active_account_client(
         &self,
         account_id: Uuid,
-    ) -> Result<(Account, Client, tokio::sync::OwnedMutexGuard<()>), LifecycleError> {
+    ) -> Result<
+        (
+            Account,
+            ClientRequest<Client>,
+            tokio::sync::OwnedMutexGuard<()>,
+        ),
+        LifecycleError,
+    > {
         let (account, guard) = self.lock_account(account_id).await?;
         match account.state {
             AccountState::Active => {}
@@ -787,7 +795,11 @@ impl AccountLifecycle {
             AccountState::Deleting => return Err(LifecycleError::BeingDeleted(account_id)),
         }
 
-        let client = self.active_client(account_id).await?;
+        let client = self
+            .manager
+            .get_or_connect(account_id)
+            .await
+            .map_err(Self::active_client_error)?;
         Ok((account, client, guard))
     }
 
@@ -816,17 +828,12 @@ impl AccountLifecycle {
         Ok((account, guard))
     }
 
-    async fn active_client(&self, account_id: Uuid) -> Result<Client, LifecycleError> {
-        // The supervisor normally holds a cached client. A cold connect also
-        // checks that the row is active.
-        self.manager
-            .get_or_connect(account_id)
-            .await
-            .map_err(|err| match err {
-                GatewayError::UnknownAccount(id) => LifecycleError::NotFound(id),
-                GatewayError::AccountNotActive(id) => LifecycleError::NotActive(id),
-                other => LifecycleError::Upstream(other.to_string()),
-            })
+    fn active_client_error(error: GatewayError) -> LifecycleError {
+        match error {
+            GatewayError::UnknownAccount(id) => LifecycleError::NotFound(id),
+            GatewayError::AccountNotActive(id) => LifecycleError::NotActive(id),
+            other => LifecycleError::Upstream(other.to_string()),
+        }
     }
 
     /// Read current impact for an active account. The same preflight runs again
@@ -874,12 +881,28 @@ impl AccountLifecycle {
             return Ok(());
         }
 
-        let (affected_rooms, activation_client) = if enabled {
-            let client = self.active_client(account_id).await?;
+        // Stop admitting requests and let all current client holders finish.
+        // The supervisor keeps syncing while we wait, so read the impact only
+        // after acquiring the guard.
+        let requests = tokio::time::timeout(
+            CLIENT_REQUEST_DRAIN_TIMEOUT,
+            self.manager.lock_client_requests(account_id),
+        )
+        .await
+        .map_err(|_| InsecureDevicesError::ClientBusy)?;
+
+        let affected_rooms = if enabled {
+            let client = self
+                .manager
+                .get_or_connect_unleased(account_id)
+                .await
+                .map_err(Self::active_client_error)?;
             require_cross_signed_device(account_id, &client, None).await?;
             let impact = self
                 .read_insecure_devices_impact(account_id, &client)
                 .await?;
+            // Sync can observe an identity rotation during room hydration.
+            require_cross_signed_device(account_id, &client, Some(impact.rooms.len())).await?;
             if acknowledgement_token != Some(impact.acknowledgement_token.as_str()) {
                 let reason = if acknowledgement_token.is_none() {
                     "missing_acknowledgement"
@@ -890,38 +913,17 @@ impl AccountLifecycle {
                     reason, "refused MSC4153 setting change");
                 return Err(InsecureDevicesError::AcknowledgementRequired(impact));
             }
-            (impact.rooms.len(), Some(client))
+            impact.rooms.len()
         } else {
-            (0, None)
+            0
         };
-
-        // Let sends already using the old policy finish before committing a
-        // different one. A busy upload cannot pin this lifecycle verb.
-        let policy = if account.state == AccountState::Active {
-            Some(
-                tokio::time::timeout(
-                    ENCRYPTED_SEND_DRAIN_TIMEOUT,
-                    self.manager.lock_encryption_policy(account_id),
-                )
-                .await
-                .map_err(|_| LifecycleError::Draining(account_id))?,
-            )
-        } else {
-            None
-        };
-
-        // Sync may observe a new own identity during room hydration or while
-        // draining sends. Check its current signature before switching.
-        if let Some(client) = activation_client {
-            require_cross_signed_device(account_id, &client, Some(affected_rooms)).await?;
-        }
 
         // Once the old task is stopped, the replacement must be supervised
         // even if the caller disconnects or the database write fails.
         let lifecycle = self.clone();
         self.tracker
             .spawn(async move {
-                let (_identity, _policy) = (guard, policy);
+                let (_identity, _requests) = (guard, requests);
                 lifecycle
                     .restart_with_insecure_devices(account, enabled, affected_rooms)
                     .await
@@ -943,21 +945,24 @@ impl AccountLifecycle {
         let old = account.exclude_insecure_devices;
         let active = account.state == AccountState::Active;
         if active {
-            self.matrix_oauth_grants.cancel_account(account_id);
             self.reap_task(account_id).await?;
+            // The supervisor normally drains SAS drivers itself. Cover a run
+            // aborted during cleanup, or a driver started before sync came up.
+            cancel_account_flows(&self.verifications, account_id).await;
         }
 
         let result = self
             .manager
-            .set_exclude_insecure_devices(account_id, enabled)
+            .set_exclude_insecure_devices(account_id, enabled, CLIENT_RETIRE_TIMEOUT)
             .await;
         if result.is_ok() {
+            self.matrix_oauth_grants.cancel_account(account_id);
             account.exclude_insecure_devices = enabled;
         }
         if active {
             self.supervise(account);
         }
-        result.map_err(LifecycleError::from)?;
+        result?;
 
         tracing::info!(%account_id, old, new = enabled, affected_rooms, "changed MSC4153 setting");
         Ok(())

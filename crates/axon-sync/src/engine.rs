@@ -2177,7 +2177,7 @@ async fn run_account(
     // The manager owns client construction + caching (and single-flight with the
     // gateway, which may have connected this account already). A connect failure
     // surfaces as a SyncError so the supervisor's backoff/retry is unchanged.
-    let client = manager.get_or_connect(account.account_id).await?;
+    let client = manager.get_or_connect_unleased(account.account_id).await?;
     // Every background request below takes a permit from this (ADR 0122).
     let gate = manager.homeserver_gate(&client);
     // Subscribe before sync can make an authenticated request and trigger token

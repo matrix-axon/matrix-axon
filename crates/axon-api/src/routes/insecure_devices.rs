@@ -84,6 +84,15 @@ fn error_response(error: InsecureDevicesError) -> Response {
             "Verify or recover Axon's device before enabling this setting.",
             None,
         ),
+        InsecureDevicesError::OwnIdentityNotVerified => conflict(
+            "own_identity_not_verified",
+            "Verify Axon's own cross-signing identity or recover its cross-signing keys before enabling this setting.",
+            None,
+        ),
+        InsecureDevicesError::OwnTrustUnavailable => ApiError::service_unavailable(
+            "Axon's device trust could not be read. Retry shortly.",
+        )
+        .into_response(),
         InsecureDevicesError::AcknowledgementRequired(impact) => conflict(
             "impact_acknowledgement_required",
             "Review and acknowledge the current impact before enabling this setting.",
@@ -101,7 +110,8 @@ fn error_response(error: InsecureDevicesError) -> Response {
 ///
 /// Lists joined encrypted rooms and the members with affected devices known to
 /// Axon. Devices that have not uploaded identity keys are absent from the list.
-/// A lazy membership roster may need to sync before this read succeeds.
+/// The server confirms rooms whose cache says they are unencrypted and may
+/// sync lazy rosters before this read succeeds.
 #[utoipa::path(
     get,
     operation_id = "insecure_devices_impact",
@@ -112,7 +122,7 @@ fn error_response(error: InsecureDevicesError) -> Response {
         (status = 404, description = "Account not found", body = ErrorResponse),
         (status = 409, description = "Account is inactive or being deleted", body = ErrorResponse),
         (status = 500, description = "Internal error", body = ErrorResponse),
-        (status = 503, description = "The account or its room rosters are not ready", body = ErrorResponse),
+        (status = 503, description = "The account connection, room encryption state, room rosters, or local crypto store are unavailable", body = ErrorResponse),
     ),
     tag = "accounts",
 )]
@@ -129,8 +139,8 @@ pub async fn impact(
 
 /// Set insecure device exclusion
 ///
-/// Enabling requires Axon's own device to be cross-signed and an acknowledgement
-/// of the current impact. Disabling needs only a valid bearer. A changed
+/// Enabling requires a cross-signed Axon device, a locally verified own
+/// cross-signing identity, and acknowledgement of the current impact. Disabling needs only a valid bearer. A changed
 /// setting on an active account restarts its SDK session with the persisted
 /// policy. Previously decrypted history is preserved.
 #[utoipa::path(
@@ -143,9 +153,9 @@ pub async fn impact(
         (status = 200, description = "The persisted setting", body = ApiResponse<InsecureDevicesSettingDto>),
         (status = 400, description = "Malformed request", body = ErrorResponse),
         (status = 404, description = "Account not found", body = ErrorResponse),
-        (status = 409, description = "Account state conflict, own device not cross-signed, or missing or stale acknowledgement. For impact_acknowledgement_required, review the returned impact before retrying.", body = InsecureDevicesConflictResponse),
+        (status = 409, description = "Account busy or in a conflicting state, own device not cross-signed, own identity not verified, or missing or stale acknowledgement. For impact_acknowledgement_required, review the returned impact before retrying.", body = InsecureDevicesConflictResponse),
         (status = 500, description = "Internal error", body = ErrorResponse),
-        (status = 503, description = "The account or its room rosters are not ready", body = ErrorResponse),
+        (status = 503, description = "The account connection, room encryption state, room rosters, or local crypto store are unavailable", body = ErrorResponse),
     ),
     tag = "accounts",
 )]

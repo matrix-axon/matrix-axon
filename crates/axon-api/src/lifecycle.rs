@@ -58,6 +58,8 @@ pub enum InsecureDevicesError {
     NotFound(String),
     Conflict(String),
     OwnDeviceNotCrossSigned,
+    OwnIdentityNotVerified,
+    OwnTrustUnavailable,
     AcknowledgementRequired(InsecureDeviceImpact),
     Unavailable,
     Internal,

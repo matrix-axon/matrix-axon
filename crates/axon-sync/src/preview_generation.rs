@@ -56,7 +56,7 @@ impl HomeserverPreviewGenerator {
                         .get_or_connect(account_id)
                         .await
                         .map_err(|_| unavailable("connect", "account_connection"))?;
-                    acquire_from(&self.http, &client.homeserver(), &client, url).await
+                    acquire_from(&self.http, &client.homeserver(), &*client, url).await
                 })
                 .await
                 .map_err(|_| {

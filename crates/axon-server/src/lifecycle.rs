@@ -227,6 +227,14 @@ fn map_insecure_devices_err(error: SyncInsecureDevicesError) -> InsecureDevicesE
         SyncInsecureDevicesError::OwnDeviceNotCrossSigned => {
             InsecureDevicesError::OwnDeviceNotCrossSigned
         }
+        SyncInsecureDevicesError::OwnIdentityNotVerified => {
+            InsecureDevicesError::OwnIdentityNotVerified
+        }
+        SyncInsecureDevicesError::OwnTrustUnavailable => InsecureDevicesError::OwnTrustUnavailable,
+        error @ (SyncInsecureDevicesError::ClientBusy
+        | SyncInsecureDevicesError::ClientRetiring) => {
+            InsecureDevicesError::Conflict(error.to_string())
+        }
         SyncInsecureDevicesError::AcknowledgementRequired(impact) => {
             InsecureDevicesError::AcknowledgementRequired(impact)
         }

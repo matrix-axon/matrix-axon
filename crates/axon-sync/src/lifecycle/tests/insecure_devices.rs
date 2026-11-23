@@ -1,22 +1,27 @@
 use super::*;
 use axum::{
-    extract::State,
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
 use matrix_sdk::{
     ruma::{
-        device_id, events::room::encryption::RoomEncryptionEventContent, room_id, serde::Raw,
-        user_id,
+        api::client::keys::get_keys, device_id,
+        events::room::encryption::RoomEncryptionEventContent, room_id, serde::Raw, user_id,
+        TransactionId,
     },
     RoomInfo, RoomState, StateChanges,
 };
-use matrix_sdk_base::crypto::{olm::Account as CryptoAccount, TrustRequirement};
+use matrix_sdk_base::crypto::{olm::Account as CryptoAccount, OlmMachine, TrustRequirement};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const DEVICE: &str = "AXON";
 const PEER: &str = "@peer:localhost";
 const ROOM_ID: &str = "!encrypted:localhost";
+const NEWLY_ENCRYPTED: &str = "!newly-encrypted:localhost";
 const EVENT_ID: &str = "$decrypted:localhost";
 
 async fn room_fixture(client: &Client) {
@@ -24,6 +29,7 @@ async fn room_fixture(client: &Client) {
     for (room_id, encrypted) in [
         (room_id!("!encrypted:localhost"), true),
         (room_id!("!plain:localhost"), false),
+        (room_id!("!newly-encrypted:localhost"), false),
     ] {
         let mut room = RoomInfo::new(room_id, RoomState::Joined);
         if encrypted {
@@ -31,7 +37,9 @@ async fn room_fixture(client: &Client) {
                 RoomEncryptionEventContent::with_recommended_defaults().into(),
             ));
         }
-        room.mark_encryption_state_synced();
+        if room_id.as_str() != NEWLY_ENCRYPTED {
+            room.mark_encryption_state_synced();
+        }
         room.mark_members_synced();
         changes.add_room(room);
         for member in [PEER, "@no-device:localhost"] {
@@ -50,6 +58,54 @@ async fn room_fixture(client: &Client) {
     client.state_store().save_changes(&changes).await.unwrap();
 }
 
+/// The other session signs our real device key. As after device-only SAS,
+/// only the public identity and device signature arrive at Axon.
+async fn cross_sign_from_another_session(client: &Client, keys: &Mutex<Value>) {
+    let own = client.user_id().unwrap();
+    let device = client.device_id().unwrap();
+    let signer = OlmMachine::new(own, device_id!("OTHER")).await;
+    let signing = signer
+        .bootstrap_cross_signing(true)
+        .await
+        .unwrap()
+        .upload_signing_keys_req;
+    let own_device = client.encryption().get_own_device().await.unwrap().unwrap();
+    let mut public_keys = json!(own_device.as_device_keys());
+    let mut query = get_keys::v3::Response::new();
+    query.device_keys = serde_json::from_value(json!({own: {device: public_keys}})).unwrap();
+    signer
+        .mark_request_as_sent(&TransactionId::new(), &query)
+        .await
+        .unwrap();
+    let device_to_sign = signer.get_device(own, device, None).await.unwrap().unwrap();
+    let signatures = json!(device_to_sign.verify().await.unwrap().signed_keys);
+    public_keys["signatures"][own.as_str()]
+        .as_object_mut()
+        .unwrap()
+        .extend(
+            signatures[own.as_str()][device.as_str()]["signatures"][own.as_str()]
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+
+    {
+        let mut keys = keys.lock().unwrap();
+        keys["master_keys"] = json!({own: signing.master_key});
+        keys["self_signing_keys"] = json!({own: signing.self_signing_key});
+        keys["user_signing_keys"] = json!({own: signing.user_signing_key});
+        keys["device_keys"][own.as_str()] = json!({device: public_keys});
+    }
+    let identity = client
+        .encryption()
+        .request_user_identity(own)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!identity.is_verified());
+    assert!(derive_verified(client).await);
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn insecure_devices_requires_current_impact_and_preserves_decrypted_history() {
@@ -62,7 +118,31 @@ async fn insecure_devices_requires_current_impact_and_preserves_decrypted_histor
     .await;
     let own = format!("@insecure-devices-{}:localhost", Uuid::new_v4().simple());
     let keys = Arc::new(Mutex::new(json!({"device_keys": {}, "failures": {}})));
+    let newly_encrypted = Arc::new(AtomicBool::new(false));
+    let remotely_encrypted = newly_encrypted.clone();
+    let room_encryption = get(move |Path(room_id): Path<String>| {
+        let encrypted = room_id == NEWLY_ENCRYPTED && remotely_encrypted.load(Ordering::SeqCst);
+        async move {
+            if encrypted {
+                Json(RoomEncryptionEventContent::with_recommended_defaults()).into_response()
+            } else {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"errcode": "M_NOT_FOUND", "error": "no encryption"})),
+                )
+                    .into_response()
+            }
+        }
+    });
     let hs = Router::new()
+        .route(
+            "/_matrix/client/v3/rooms/{room_id}/state/m.room.encryption",
+            room_encryption.clone(),
+        )
+        .route(
+            "/_matrix/client/v3/rooms/{room_id}/state/m.room.encryption/",
+            room_encryption,
+        )
         .route(
             "/_matrix/client/versions",
             get(|| async { Json(json!({"versions": ["v1.11"]})) }),
@@ -104,15 +184,14 @@ async fn insecure_devices_requires_current_impact_and_preserves_decrypted_histor
                 |State(keys): State<Arc<Mutex<Value>>>, Json(signatures): Json<Value>| async move {
                     let mut response = keys.lock().unwrap();
                     for (user, signed) in signatures.as_object().unwrap() {
-                        let current = response["device_keys"][user][DEVICE]["signatures"][user]
-                            .as_object_mut()
-                            .unwrap();
-                        current.extend(
-                            signed[DEVICE]["signatures"][user]
-                                .as_object()
+                        if let Some(device_signatures) =
+                            signed[DEVICE]["signatures"][user].as_object()
+                        {
+                            response["device_keys"][user][DEVICE]["signatures"][user]
+                                .as_object_mut()
                                 .unwrap()
-                                .clone(),
-                        );
+                                .extend(device_signatures.clone());
+                        }
                     }
                     Json(json!({"failures": {}}))
                 },
@@ -132,9 +211,44 @@ async fn insecure_devices_requires_current_impact_and_preserves_decrypted_histor
         .unwrap();
     let client = lc.manager.get_or_connect(account_id).await.unwrap();
     room_fixture(&client).await;
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        client.encryption().wait_for_e2ee_initialization_tasks(),
+    )
+    .await
+    .expect("initial SDK setup finishes before the fixture evicts its client");
     drop(client);
     lc.manager.evict(account_id).await;
-    let client = lc.manager.get_or_connect(account_id).await.unwrap();
+    let client = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            match lc.manager.get_or_connect(account_id).await {
+                Ok(client) => break client,
+                Err(GatewayError::NotConnected(_)) => {
+                    tokio::time::sleep(Duration::from_millis(20)).await
+                }
+                Err(error) => panic!("{error}"),
+            }
+        }
+    })
+    .await
+    .expect("the fixture client can reopen after the original closes");
+    assert!(matches!(
+        lc.insecure_devices_impact(account_id).await,
+        Err(InsecureDevicesError::ImpactUnavailable)
+    ));
+    let room = client
+        .get_room(room_id!("!newly-encrypted:localhost"))
+        .unwrap();
+    let base_room: &matrix_sdk_base::Room = &room;
+    base_room
+        .update_and_save_room_info(|mut info| {
+            info.mark_encryption_state_synced();
+            (info, matrix_sdk_base::RoomInfoNotableUpdateReasons::empty())
+        })
+        .await
+        .unwrap();
+    drop(room);
+    drop(client);
 
     let initial = lc.insecure_devices_impact(account_id).await.unwrap();
     assert!(initial.rooms.is_empty());
@@ -143,18 +257,25 @@ async fn insecure_devices_requires_current_impact_and_preserves_decrypted_histor
             .await,
         Err(InsecureDevicesError::OwnDeviceNotCrossSigned)
     ));
-    client
+    let client = lc.manager.get_or_connect(account_id).await.unwrap();
+    cross_sign_from_another_session(&client, &keys).await;
+    drop(client);
+    assert!(matches!(
+        lc.set_exclude_insecure_devices(account_id, true, Some(&initial.acknowledgement_token))
+            .await,
+        Err(InsecureDevicesError::OwnIdentityNotVerified)
+    ));
+
+    let client = lc.manager.get_or_connect(account_id).await.unwrap();
+    let own_identity = client
         .encryption()
-        .bootstrap_cross_signing(None)
+        .get_user_identity(client.user_id().unwrap())
         .await
+        .unwrap()
         .unwrap();
-    let own_id = client.user_id().unwrap();
-    client
-        .encryption()
-        .request_user_identity(own_id)
-        .await
-        .unwrap();
-    assert!(derive_verified(&client).await);
+    own_identity.verify().await.unwrap();
+    assert!(own_identity.is_verified());
+    drop(own_identity);
 
     let peer = CryptoAccount::with_device_id(user_id!("@peer:localhost"), device_id!("PEER"));
     keys.lock().unwrap()["device_keys"][PEER] = json!({"PEER": peer.device_keys()});
@@ -163,6 +284,7 @@ async fn insecure_devices_requires_current_impact_and_preserves_decrypted_histor
         .request_user_identity(user_id!("@peer:localhost"))
         .await
         .unwrap();
+    drop(client);
     let impact = lc.insecure_devices_impact(account_id).await.unwrap();
     assert_eq!(impact.rooms.len(), 1);
     assert_eq!(impact.rooms[0].room_id, ROOM_ID);
@@ -177,6 +299,52 @@ async fn insecure_devices_requires_current_impact_and_preserves_decrypted_histor
         };
         assert_eq!(current, impact);
     }
+
+    // A normal room request holds the old client. The PUT must wait for it
+    // and recompute the impact after it drains.
+    let room = lc
+        .manager
+        .get_or_connect(account_id)
+        .await
+        .unwrap()
+        .room(room_id!("!plain:localhost"))
+        .unwrap();
+    let stale_token = impact.acknowledgement_token;
+    let mut enable = tokio::spawn({
+        let lc = lc.clone();
+        async move {
+            lc.set_exclude_insecure_devices(account_id, true, Some(&stale_token))
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while lc.manager.cached(account_id).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("enable queued behind the room request");
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut enable)
+        .await
+        .is_err());
+    newly_encrypted.store(true, Ordering::SeqCst);
+    drop(room);
+    let error = enable.await.unwrap().unwrap_err();
+    let InsecureDevicesError::AcknowledgementRequired(impact) = error else {
+        panic!("{error}");
+    };
+    assert_eq!(
+        impact
+            .rooms
+            .iter()
+            .map(|room| room.room_id.as_str())
+            .collect::<Vec<_>>(),
+        [ROOM_ID, NEWLY_ENCRYPTED]
+    );
+    assert!(impact
+        .rooms
+        .iter()
+        .all(|room| room.member_user_ids == [PEER]));
 
     let plaintext = json!({"msgtype": "m.text", "body": "decrypted before enabling"});
     lc.store
@@ -196,7 +364,6 @@ async fn insecure_devices_requires_current_impact_and_preserves_decrypted_histor
         })
         .await
         .unwrap();
-    drop(client);
 
     lc.set_exclude_insecure_devices(account_id, true, Some(&impact.acknowledgement_token))
         .await

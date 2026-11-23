@@ -182,6 +182,9 @@ It does not need step-up, because it changes no credential.
 The server refuses to turn the setting on (409) while Axon's own device is not cross-signed.
 With it on, every encrypted send would otherwise fail with `SendingFromUnverifiedDevice`.
 
+The SDK must also mark Axon's own cross-signing identity verified locally.
+A device signature alone can leave that identity unverified, which also triggers `SendingFromUnverifiedDevice`.
+
 Before the user confirms, an impact read lists, from the account's crypto store, the encrypted rooms that have members with devices that are not cross-signed, and those members.
 Bots and bridges, which make up most of production's list, are named in it.
 It is the only way a user would find out that bridged rooms are about to stop working.

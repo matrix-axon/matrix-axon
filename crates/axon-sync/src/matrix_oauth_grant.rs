@@ -39,7 +39,7 @@ use uuid::Uuid;
 
 use crate::{
     lifecycle::{derive_verified, lock_for, IdentityLock, IdentityLocks},
-    manager::ClientManager,
+    manager::{ClientManager, ClientRequest},
     matrix_oauth_acquire::{
         parse_check_code, parse_grant_qr_payload, validate_qr_url, MatrixOAuthAcquireError,
     },
@@ -578,7 +578,7 @@ impl MatrixOAuthGrantEngine {
         &self,
         account_id: Uuid,
         expected_client: Option<&Client>,
-    ) -> Result<(axon_store::Account, Client), MatrixOAuthGrantError> {
+    ) -> Result<(axon_store::Account, ClientRequest<Client>), MatrixOAuthGrantError> {
         let account = self.load_active_account(account_id).await?;
         let client = self
             .validate_current_trusted_client(account_id, expected_client)
@@ -608,7 +608,7 @@ impl MatrixOAuthGrantEngine {
         &self,
         account_id: Uuid,
         expected_client: Option<&Client>,
-    ) -> Result<Client, MatrixOAuthGrantError> {
+    ) -> Result<ClientRequest<Client>, MatrixOAuthGrantError> {
         let client = tokio::time::timeout(
             CLIENT_TIMEOUT,
             self.inner.manager.get_or_connect(account_id),

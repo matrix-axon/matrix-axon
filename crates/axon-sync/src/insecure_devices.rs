@@ -12,7 +12,8 @@ use matrix_sdk::{Client, Room, RoomMemberships};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::homeserver_gate::HomeserverGate;
+use crate::gateway::fresh_room_encryption;
+use crate::homeserver_gate::{outcome_of, HomeserverGate};
 use crate::LifecycleError;
 
 pub(crate) const IMPACT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -27,6 +28,14 @@ pub enum InsecureDevicesError {
     Lifecycle(#[from] LifecycleError),
     #[error("Axon's device must be cross-signed before enabling this setting")]
     OwnDeviceNotCrossSigned,
+    #[error("Axon's own cross-signing identity must be verified before enabling this setting")]
+    OwnIdentityNotVerified,
+    #[error("could not read Axon's own device and cross-signing identity")]
+    OwnTrustUnavailable,
+    #[error("account operations are still using the current Matrix client; retry shortly")]
+    ClientBusy,
+    #[error("the previous Matrix client is still closing; retry shortly")]
+    ClientRetiring,
     #[error("the current impact must be acknowledged before enabling this setting")]
     AcknowledgementRequired(InsecureDeviceImpact),
     #[error("the impact could not be read; retry when the account has synced")]
@@ -40,34 +49,40 @@ pub(crate) async fn require_cross_signed_device(
     client: &Client,
     affected_rooms: Option<usize>,
 ) -> Result<(), InsecureDevicesError> {
+    use InsecureDevicesError::{
+        OwnDeviceNotCrossSigned, OwnIdentityNotVerified, OwnTrustUnavailable,
+    };
+
     let encryption = client.encryption();
-    let reason = tokio::time::timeout(Duration::from_secs(5), async {
-        if encryption
+    let Some(user) = client.user_id() else {
+        return Err(OwnTrustUnavailable);
+    };
+    let observation = tokio::time::timeout(Duration::from_secs(5), async {
+        let identity = encryption.get_user_identity(user).await?;
+        let cross_signed = encryption
             .get_own_device()
             .await?
-            .is_some_and(|device| device.is_cross_signed_by_owner())
-        {
-            return Ok(None);
-        }
-        let reason = match client.user_id() {
-            Some(user) if encryption.get_user_identity(user).await?.is_none() => {
-                "cross_signing_not_set_up"
-            }
-            _ => "own_device_not_cross_signed",
-        };
-        Ok::<_, matrix_sdk::encryption::CryptoStoreError>(Some(reason))
+            .is_some_and(|device| device.is_cross_signed_by_owner());
+        Ok::<_, matrix_sdk::encryption::CryptoStoreError>((identity, cross_signed))
     })
     .await
-    .map_err(|_| InsecureDevicesError::ImpactUnavailable)?
+    .map_err(|_| OwnTrustUnavailable)?
     .map_err(|error| {
         tracing::warn!(%account_id, %error, "could not read Axon's device trust for MSC4153");
-        InsecureDevicesError::ImpactUnavailable
+        OwnTrustUnavailable
     })?;
-    if let Some(reason) = reason {
-        tracing::info!(%account_id, affected_rooms, reason, "refused MSC4153 setting change");
-        return Err(InsecureDevicesError::OwnDeviceNotCrossSigned);
-    }
-    Ok(())
+    // IdentityBasedStrategy also refuses sends if the own identity exists but
+    // is unverified locally, even when the current device is cross-signed.
+    let (reason, error) = match observation {
+        (None, _) => ("cross_signing_not_set_up", OwnDeviceNotCrossSigned),
+        (_, false) => ("own_device_not_cross_signed", OwnDeviceNotCrossSigned),
+        (Some(identity), true) if !identity.is_verified() => {
+            ("own_identity_not_verified", OwnIdentityNotVerified)
+        }
+        (Some(_), true) => return Ok(()),
+    };
+    tracing::info!(%account_id, affected_rooms, reason, "refused MSC4153 setting change");
+    Err(error)
 }
 
 /// Each affected user is looked up once, even across rooms. Device lists stay
@@ -79,9 +94,9 @@ pub(crate) async fn read_impact(
     gate: &Arc<HomeserverGate>,
 ) -> Result<InsecureDeviceImpact, InsecureDevicesError> {
     let rooms: BTreeMap<_, _> = stream::iter(client.joined_rooms())
-        .filter(|room| std::future::ready(room.encryption_state().is_encrypted()))
-        .map(|room| read_roster(account_id, client, gate, room))
+        .map(|room| read_encrypted_roster(account_id, client, gate, room))
         .buffer_unordered(ROOM_READ_CONCURRENCY)
+        .try_filter_map(futures_util::future::ok)
         .try_collect()
         .await?;
 
@@ -125,13 +140,41 @@ pub(crate) async fn read_impact(
     })
 }
 
-async fn read_roster(
+async fn read_encrypted_roster(
     account_id: Uuid,
     client: &Client,
     gate: &Arc<HomeserverGate>,
     room: Room,
-) -> Result<(OwnedRoomId, BTreeSet<OwnedUserId>), InsecureDevicesError> {
+) -> Result<Option<(OwnedRoomId, BTreeSet<OwnedUserId>)>, InsecureDevicesError> {
     let room_id = room.room_id().to_owned();
+    let encryption_state = room.encryption_state();
+    if encryption_state.is_unknown() {
+        tracing::debug!(%account_id, %room_id, "room encryption unavailable for MSC4153 impact");
+        return Err(InsecureDevicesError::ImpactUnavailable);
+    }
+    if !encryption_state.is_encrypted() {
+        let permit = gate
+            .acquire_briefly(MEMBER_SYNC_TIMEOUT, MEMBER_SYNC_ADMISSION_WAIT)
+            .await
+            .ok_or(InsecureDevicesError::ImpactUnavailable)?;
+        if room.encryption_settings().is_none() {
+            let result = tokio::time::timeout(
+                MEMBER_SYNC_TIMEOUT,
+                fresh_room_encryption(&room, account_id),
+            )
+            .await;
+            permit.finish(outcome_of(&result));
+            if !result
+                .map_err(|_| InsecureDevicesError::ImpactUnavailable)?
+                .map_err(|error| {
+                    tracing::debug!(%account_id, %room_id, %error, "could not confirm room encryption for MSC4153");
+                    InsecureDevicesError::ImpactUnavailable
+                })?
+            {
+                return Ok(None);
+            }
+        }
+    }
     if !gate
         .ensure_room_members(&room, MEMBER_SYNC_TIMEOUT, MEMBER_SYNC_ADMISSION_WAIT)
         .await
@@ -154,7 +197,7 @@ async fn read_roster(
             tracing::warn!(%account_id, %room_id, %error, "could not read room roster for MSC4153 impact");
             InsecureDevicesError::ImpactUnavailable
         })?;
-    Ok((room_id, users.into_iter().collect()))
+    Ok(Some((room_id, users.into_iter().collect())))
 }
 
 fn acknowledgement_token(account_id: Uuid, rooms: &[InsecureDeviceRoom]) -> String {

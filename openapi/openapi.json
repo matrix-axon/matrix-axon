@@ -1633,7 +1633,7 @@
           "accounts"
         ],
         "summary": "Set insecure device exclusion",
-        "description": "Enabling requires Axon's own device to be cross-signed and an acknowledgement\nof the current impact. Disabling needs only a valid bearer. A changed\nsetting on an active account restarts its SDK session with the persisted\npolicy. Previously decrypted history is preserved.",
+        "description": "Enabling requires a cross-signed Axon device, a locally verified own\ncross-signing identity, and acknowledgement of the current impact. Disabling needs only a valid bearer. A changed\nsetting on an active account restarts its SDK session with the persisted\npolicy. Previously decrypted history is preserved.",
         "operationId": "set_exclude_insecure_devices",
         "parameters": [
           {
@@ -1707,7 +1707,7 @@
             }
           },
           "409": {
-            "description": "Account state conflict, own device not cross-signed, or missing or stale acknowledgement. For impact_acknowledgement_required, review the returned impact before retrying.",
+            "description": "Account busy or in a conflicting state, own device not cross-signed, own identity not verified, or missing or stale acknowledgement. For impact_acknowledgement_required, review the returned impact before retrying.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1727,7 +1727,7 @@
             }
           },
           "503": {
-            "description": "The account or its room rosters are not ready",
+            "description": "The account connection, room encryption state, room rosters, or local crypto store are unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -1745,7 +1745,7 @@
           "accounts"
         ],
         "summary": "Read the impact of insecure device exclusion",
-        "description": "Lists joined encrypted rooms and the members with affected devices known to\nAxon. Devices that have not uploaded identity keys are absent from the list.\nA lazy membership roster may need to sync before this read succeeds.",
+        "description": "Lists joined encrypted rooms and the members with affected devices known to\nAxon. Devices that have not uploaded identity keys are absent from the list.\nThe server confirms rooms whose cache says they are unencrypted and may\nsync lazy rosters before this read succeeds.",
         "operationId": "insecure_devices_impact",
         "parameters": [
           {
@@ -1819,7 +1819,7 @@
             }
           },
           "503": {
-            "description": "The account or its room rosters are not ready",
+            "description": "The account connection, room encryption state, room rosters, or local crypto store are unavailable",
             "content": {
               "application/json": {
                 "schema": {

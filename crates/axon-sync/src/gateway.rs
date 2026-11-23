@@ -66,7 +66,7 @@ use uuid::Uuid;
 
 use crate::error::GatewayError;
 use crate::homeserver_gate::{GateError, InteractiveCall, Outcome};
-use crate::manager::ClientManager;
+use crate::manager::{ClientManager, ClientRequest};
 
 /// Map an SDK error from a send/fetch into a [`GatewayError`]. A homeserver
 /// `M_FORBIDDEN` (e.g. redacting without the required power level) becomes
@@ -740,7 +740,10 @@ async fn upload_media_source_with_encryption(
 /// newly created encrypted room can have that value until sync catches up. Fetch directly
 /// before permitting plaintext, and persist positive evidence under the SDK
 /// store lock so the eventual event send uses the same encryption decision.
-async fn fresh_room_encryption(room: &Room, account_id: Uuid) -> Result<bool, GatewayError> {
+pub(crate) async fn fresh_room_encryption(
+    room: &Room,
+    account_id: Uuid,
+) -> Result<bool, GatewayError> {
     use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
     use matrix_sdk::ruma::events::room::encryption::PossiblyRedactedRoomEncryptionEventContent;
 
@@ -1640,12 +1643,16 @@ impl SdkGateway {
     /// account's client on demand. A malformed room id is a `400`-class
     /// [`GatewayError::Invalid`]; a room the client doesn't know is a `404`-class
     /// [`GatewayError::RoomNotFound`].
-    async fn room(&self, account_id: Uuid, room_id: &str) -> Result<Room, GatewayError> {
+    async fn room(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> Result<ClientRequest<Room>, GatewayError> {
         let client = self.manager.get_or_connect(account_id).await?;
         let parsed =
             RoomId::parse(room_id).map_err(|e| GatewayError::Invalid(format!("room id: {e}")))?;
         client
-            .get_room(&parsed)
+            .room(&parsed)
             .ok_or_else(|| GatewayError::RoomNotFound(room_id.to_owned()))
     }
 
@@ -1666,7 +1673,6 @@ impl SdkGateway {
         // The budget starts before the room is resolved, as the adapter's
         // single timeout did.
         let clock = MediaClock::start(bounds);
-        let _policy = self.manager.lock_encrypted_send(account_id).await;
         let room = clock.run(self.room(account_id, room_id)).await?;
         // Boxed as a trait object: the send future is deep enough that,
         // nested once more inside the server's adapter, proving it `Send`
@@ -1684,7 +1690,6 @@ impl SdkGateway {
         formatted: Option<Formatted<'_>>,
         relation: Relation<'_>,
     ) -> Result<String, GatewayError> {
-        let _policy = self.manager.lock_encrypted_send(account_id).await;
         let room = self.room(account_id, room_id).await?;
 
         // Plain, unrelated message: use the typed constructor. `format` is
@@ -1720,7 +1725,6 @@ impl SdkGateway {
         relation: Relation<'_>,
     ) -> Result<String, GatewayError> {
         let content = sticker_content(sticker, relation)?;
-        let _policy = self.manager.lock_encrypted_send(account_id).await;
         let room = self.room(account_id, room_id).await?;
         let response = room
             .send_raw("m.sticker", content)
@@ -1758,7 +1762,6 @@ impl SdkGateway {
     ) -> Result<String, GatewayError> {
         use futures_util::FutureExt;
         let clock = MediaClock::start(bounds);
-        let _policy = self.manager.lock_encrypted_send(account_id).await;
         let room = clock.run(self.room(account_id, room_id)).await?;
         // Boxed for the same reason as `send_with_previews`.
         send_media_in_room(
@@ -1798,7 +1801,6 @@ impl SdkGateway {
         use axon_core::edit_preview::{self as previews, EditPreview};
         use futures_util::{FutureExt, StreamExt, TryStreamExt};
         let (body, formatted) = (edit.body, edit.formatted);
-        let _policy = self.manager.lock_encrypted_send(account_id).await;
         let room = self.room(account_id, room_id).await?;
         // Validate the target id up front so a bad id is a clean 400, not a 502.
         let target_id = parse_event_id(event_id)?;
@@ -2210,7 +2212,6 @@ impl SdkGateway {
         room_id: &str,
         user_id: &str,
     ) -> Result<(), GatewayError> {
-        let _policy = self.manager.lock_encrypted_send(account_id).await;
         let room = self.room(account_id, room_id).await?;
         let user_id = parse_user_id(user_id)?;
         room.invite_user_by_id(&user_id).await.map_err(map_sdk_err)
