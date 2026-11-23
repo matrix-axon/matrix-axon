@@ -234,19 +234,50 @@ keep_simulator_diagnostics() {
     | while IFS= read -r report; do mkdir -p "$diagnostics/crash-reports"; cp "$report" "$diagnostics/crash-reports/"; done
 }
 
-# The first boot of a runtime migrates its data, which the UI-test script gives ten
-# minutes. A runtime downloaded a moment ago has never booted here, and the first
-# attempt on one, an iOS 26.0 simulator on the Xcode 27.2 image, did not finish in
-# fifteen with the device already reported Booted, so it is allowed forty.
-if [ -n "${LAUNCH_CHECK_IOS:-}" ]; then boot_default=2400; else boot_default=900; fi
-boot_seconds=${LAUNCH_CHECK_BOOT_SECONDS:-$boot_default}
+# A runtime downloaded a moment ago has never booted here, and its first boot migrates
+# its data. An iOS 26.0 simulator on the Xcode 27.2 image has taken 12 minutes to finish,
+# and twice has not finished in 15 and in 40 with the device already reported Booted and
+# its display service failing. A boot that has stalled that long is not going to finish,
+# but a shutdown and a second boot of the same device can, so each attempt gets 15
+# minutes and there are three.
+# bootstatus reports a record a second. The job log gets one line per change of stage
+# (BackBoard, each data migrator, the system app, finished) and the artifact all of it.
+boot_stage_changes() {
+  awk 'BEGIN { RS = ""; FS = "\n" }
+    {
+      s = ""
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^\[/ || $i ~ /Elapsed:/) continue
+        gsub(/^[ \t]+/, "", $i)
+        s = s (s == "" ? "" : " | ") $i
+      }
+      if (s != "" && s != last) { print s; last = s; fflush() }
+    }'
+}
+boot_seconds=${LAUNCH_CHECK_BOOT_SECONDS:-900}
+boot_attempts=3
 bootstatus_log="$noop_bin/bootstatus.log"
 touch "$started_marker"
-xcrun simctl boot "$udid" 2>/dev/null || true
-# bootstatus says which stage it is waiting for; that goes in the log and is kept.
-if ! with_timeout "$boot_seconds" xcrun simctl bootstatus "$udid" -b 2>&1 | tee "$bootstatus_log"; then
+booted=""
+attempt=1
+while [ "$attempt" -le "$boot_attempts" ]; do
+  xcrun simctl boot "$udid" 2>/dev/null || true
+  # bootstatus says which stage it is waiting for, but it buffers its output unless it
+  # has a terminal, and a killed process loses the buffer: so it runs under script(1),
+  # which gives it one, and what it says is logged and kept.
+  if with_timeout "$boot_seconds" script -q /dev/null xcrun simctl bootstatus "$udid" -b 2>&1 | tr -d '\004\r' | tee -a "$bootstatus_log" | boot_stage_changes; then
+    booted=yes
+    break
+  fi
+  echo "    boot attempt $attempt of $boot_attempts did not finish in ${boot_seconds}s" >&2
+  # The first stall is the evidence; later ones add nothing but time.
+  if [ "$attempt" -eq 1 ]; then keep_simulator_diagnostics; fi
+  xcrun simctl shutdown "$udid" 2>/dev/null || true
+  attempt=$((attempt + 1))
+done
+if [ -z "$booted" ]; then
   keep_simulator_diagnostics
-  die "the $sim_name simulator on iOS $target_ios did not finish booting within ${boot_seconds}s" 1
+  die "the $sim_name simulator on iOS $target_ios did not finish booting in $boot_attempts attempts of ${boot_seconds}s" 1
 fi
 note "the simulator has booted"
 
