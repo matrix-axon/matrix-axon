@@ -62,6 +62,8 @@ impl From<ClaimedUpload> for MediaAttachment {
             kind: match upload.kind {
                 MediaUploadKindDto::Image => MediaSendKind::Image,
                 MediaUploadKindDto::File => MediaSendKind::File,
+                MediaUploadKindDto::Video => MediaSendKind::Video,
+                MediaUploadKindDto::Audio => MediaSendKind::Audio,
             },
             filename: upload.filename,
             content_type: upload.content_type,

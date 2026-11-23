@@ -23,7 +23,9 @@ use axon_core::{
     MediaSendKind, PowerLevelChanges, PublicRoomSummary, PublicRoomsPage, PublicRoomsQuery,
     Relation, ResolvedPowerLevels, ResolvedUserLevel, RoomPreset,
 };
-use matrix_sdk::attachment::{AttachmentConfig, AttachmentInfo, BaseFileInfo, BaseImageInfo};
+use matrix_sdk::attachment::{
+    AttachmentConfig, AttachmentInfo, BaseAudioInfo, BaseFileInfo, BaseImageInfo, BaseVideoInfo,
+};
 use matrix_sdk::room::reply::{EnforceThread, Reply};
 use matrix_sdk::room::Receipts;
 use matrix_sdk::ruma::api::client::directory::get_public_rooms_filtered;
@@ -36,10 +38,11 @@ use matrix_sdk::ruma::events::reaction::ReactionEventContent;
 use matrix_sdk::ruma::events::relation::{Annotation, Thread};
 use matrix_sdk::ruma::events::room::encryption::RoomEncryptionEventContent;
 use matrix_sdk::ruma::events::room::message::{
-    AddMentions, EmoteMessageEventContent, FileInfo, FileMessageEventContent, FormattedBody,
-    ImageMessageEventContent, MessageType, NoticeMessageEventContent, Relation as MessageRelation,
-    ReplacementMetadata, ReplyWithinThread, RoomMessageEventContent,
-    RoomMessageEventContentWithoutRelation, TextMessageEventContent,
+    AddMentions, AudioInfo, AudioMessageEventContent, EmoteMessageEventContent, FileInfo,
+    FileMessageEventContent, FormattedBody, ImageMessageEventContent, MessageType,
+    NoticeMessageEventContent, Relation as MessageRelation, ReplacementMetadata, ReplyWithinThread,
+    RoomMessageEventContent, RoomMessageEventContentWithoutRelation, TextMessageEventContent,
+    VideoInfo, VideoMessageEventContent,
 };
 use matrix_sdk::ruma::events::room::power_levels::{
     RoomPowerLevels, RoomPowerLevelsEventContent, UserPowerLevel,
@@ -564,34 +567,52 @@ fn build_create_room_request(
     Ok(built)
 }
 
+/// The mimetype a media event declares for `kind` (ADR 0142 section 1).
+///
+/// `image`, `video` and `audio` keep the declared type, which must have the
+/// kind's major type: `image/*`, `video/*` or `audio/*`. Anything else is
+/// [`GatewayError::Invalid`], a `400`. An `image` with no type is sent as
+/// `image/png`, as it always has been; a `video` or `audio` with no type is
+/// rejected, because no one type stands for every video or audio file.
+///
+/// `file` accepts any type, but rewrites `image/*`, `video/*` and `audio/*` to
+/// `application/octet-stream`. matrix-sdk's `send_attachment` picks
+/// `m.image`, `m.video` or `m.audio` from the major type, so without the
+/// rewrite a `file` upload would not send as `m.file`. A client that stages a
+/// video as `file`, as every client did before the `video` kind, sends exactly
+/// what it sent before.
 fn effective_mime(
     kind: MediaSendKind,
     content_type: Option<&str>,
 ) -> Result<mime::Mime, GatewayError> {
-    let parsed = match content_type {
-        Some(value) => value
-            .parse::<mime::Mime>()
-            .map_err(|e| GatewayError::Invalid(format!("content_type: {e}")))?,
-        None => match kind {
-            MediaSendKind::Image => mime::IMAGE_PNG,
-            MediaSendKind::File => mime::APPLICATION_OCTET_STREAM,
-        },
-    };
-
-    match kind {
-        MediaSendKind::Image if parsed.type_() != mime::IMAGE => Err(GatewayError::Invalid(
-            "image uploads must have an image/* content type".to_owned(),
-        )),
-        MediaSendKind::Image => Ok(parsed),
-        // matrix-sdk chooses m.image/m.audio/m.video from the MIME major type.
-        // M15 supports only explicit m.file for file uploads, so avoid those
-        // major types even when the original Content-Type was specific.
-        MediaSendKind::File
-            if matches!(parsed.type_(), mime::IMAGE | mime::AUDIO | mime::VIDEO) =>
-        {
-            Ok(mime::APPLICATION_OCTET_STREAM)
+    let parsed = content_type
+        .map(|value| {
+            value
+                .parse::<mime::Mime>()
+                .map_err(|e| GatewayError::Invalid(format!("content_type: {e}")))
+        })
+        .transpose()?;
+    let (required, article) = match kind {
+        MediaSendKind::Image => (mime::IMAGE, "an"),
+        MediaSendKind::Video => (mime::VIDEO, "a"),
+        MediaSendKind::Audio => (mime::AUDIO, "an"),
+        MediaSendKind::File => {
+            let parsed = parsed.unwrap_or(mime::APPLICATION_OCTET_STREAM);
+            return Ok(
+                if matches!(parsed.type_(), mime::IMAGE | mime::AUDIO | mime::VIDEO) {
+                    mime::APPLICATION_OCTET_STREAM
+                } else {
+                    parsed
+                },
+            );
         }
-        MediaSendKind::File => Ok(parsed),
+    };
+    match parsed {
+        Some(parsed) if parsed.type_() == required => Ok(parsed),
+        None if kind == MediaSendKind::Image => Ok(mime::IMAGE_PNG),
+        _ => Err(GatewayError::Invalid(format!(
+            "{required} uploads must have {article} {required}/* content type"
+        ))),
     }
 }
 
@@ -603,6 +624,14 @@ fn attachment_info(kind: MediaSendKind, size_bytes: u64) -> Result<AttachmentInf
         MediaSendKind::Image => AttachmentInfo::Image(BaseImageInfo {
             size: Some(size),
             ..BaseImageInfo::default()
+        }),
+        MediaSendKind::Video => AttachmentInfo::Video(BaseVideoInfo {
+            size: Some(size),
+            ..BaseVideoInfo::default()
+        }),
+        MediaSendKind::Audio => AttachmentInfo::Audio(BaseAudioInfo {
+            size: Some(size),
+            ..BaseAudioInfo::default()
         }),
         MediaSendKind::File => AttachmentInfo::File(BaseFileInfo { size: Some(size) }),
     })
@@ -739,12 +768,16 @@ async fn fresh_preview_encryption(room: &Room, account_id: Uuid) -> Result<bool,
     Ok(encrypted)
 }
 
-/// Build the `m.image`/`m.file` [`MessageType`] for an already-uploaded
-/// `source`, mirroring matrix-sdk's private `make_media_type!` for the two
-/// kinds [`MediaSendKind`] supports. A caption becomes the event body (with
-/// the original filename kept in `filename`, and its HTML, if any, in
-/// `formatted_body`); otherwise the filename is the body and `filename` is left
-/// unset, matching `Room::send_attachment`'s convention (MSC2530).
+/// Build the `m.image`, `m.file`, `m.video` or `m.audio` [`MessageType`] for
+/// an already-uploaded `source`, mirroring matrix-sdk's private
+/// `make_media_type!` for the kinds [`MediaSendKind`] supports. The event type
+/// follows `kind`; `content_type` is the one [`effective_mime`] chose for it,
+/// so its major type agrees with the one the SDK would pick from.
+///
+/// A caption becomes the event body (with the original filename kept in
+/// `filename`, and its HTML, if any, in `formatted_body`); otherwise the
+/// filename is the body and `filename` is left unset, matching
+/// `Room::send_attachment`'s convention (MSC2530).
 fn media_message_type(
     kind: MediaSendKind,
     filename: String,
@@ -779,6 +812,24 @@ fn media_message_type(
             content.filename = filename;
             content.info = Some(Box::new(info));
             MessageType::File(content)
+        }
+        MediaSendKind::Video => {
+            let mut info: VideoInfo = info.into();
+            info.mimetype = mimetype;
+            let mut content = VideoMessageEventContent::new(body, source);
+            content.formatted = formatted;
+            content.filename = filename;
+            content.info = Some(Box::new(info));
+            MessageType::Video(content)
+        }
+        MediaSendKind::Audio => {
+            let mut info: AudioInfo = info.into();
+            info.mimetype = mimetype;
+            let mut content = AudioMessageEventContent::new(body, source);
+            content.formatted = formatted;
+            content.filename = filename;
+            content.info = Some(Box::new(info));
+            MessageType::Audio(content)
         }
     }
 }
@@ -904,6 +955,145 @@ async fn send_thread_member_attachment(
     )));
     let resp = room.send(content).await.map_err(map_sdk_err)?;
     Ok(resp.response.event_id.to_string())
+}
+
+/// [`SdkGateway::send_with_previews`] once the room is resolved. Everything a
+/// request can get wrong, the attachment's kind and type included, is checked
+/// before the first upload.
+async fn send_with_previews_in_room(
+    room: &Room,
+    account_id: Uuid,
+    message: axon_core::link_preview::PreviewSend<'_>,
+    attachment: Option<MediaAttachment>,
+) -> Result<String, GatewayError> {
+    use axon_core::link_preview;
+    link_preview::preflight(
+        message.body,
+        message.formatted,
+        message.relation,
+        &message
+            .previews
+            .iter()
+            .map(|p| (p.metadata.clone(), p.image.is_some()))
+            .collect::<Vec<_>>(),
+        attachment.is_some(),
+    )
+    .map_err(preview_validation_error)?;
+    // Validate everything before any upload: the relation, and the
+    // attachment too. A kind that does not match its type must fail before a
+    // preview image is uploaded, or each retry would upload another orphaned
+    // copy of it.
+    message_relates_to(message.relation)?;
+    let attachment = attachment
+        .map(|attachment| {
+            if attachment.filename.len() > 1024
+                || attachment
+                    .content_type
+                    .as_ref()
+                    .is_some_and(|s| s.len() > 256)
+            {
+                return Err(GatewayError::Invalid(
+                    "media filename/type exceeds preview-aware send limits".into(),
+                ));
+            }
+            let mime = effective_mime(attachment.kind, attachment.content_type.as_deref())?;
+            let info = attachment_info(attachment.kind, attachment.size_bytes)?;
+            Ok((attachment, mime, info))
+        })
+        .transpose()?;
+    ensure_joined(room)?;
+    // A cached false state can also expose the message itself. Keep one
+    // fresh lookup even for metadata-only sends, including explicit opt-out.
+    let encrypted = fresh_preview_encryption(room, account_id).await?;
+    let has_uploads = attachment.is_some() || message.previews.iter().any(|p| p.image.is_some());
+    use futures_util::{FutureExt, StreamExt, TryStreamExt};
+    // At most two uploads per send run at once. Consume the owned bytes;
+    // avoid cloning up to 16 MiB while preserving input card order.
+    let entries = futures_util::stream::iter(message.previews)
+        .map(|preview| preview_entry(room, preview, encrypted).boxed())
+        .buffered(2)
+        .try_collect::<Vec<_>>()
+        .await?;
+    let mut content = if let Some((attachment, mime, info)) = attachment {
+        let source =
+            upload_media_source_with_encryption(room, &mime, attachment.bytes, encrypted).await?;
+        validate_preview_media_source(&source)?;
+        let caption = (!message.body.is_empty()).then(|| match message.formatted {
+            Some(f) => TextMessageEventContent::html(message.body, f.body),
+            None => TextMessageEventContent::plain(message.body),
+        });
+        let media = RoomMessageEventContent::new(media_message_type(
+            attachment.kind,
+            attachment.filename,
+            &mime,
+            source,
+            info,
+            caption,
+        ));
+        serde_json::to_value(media_content_with_relation(room, media, message.relation).await?)
+            .map_err(|_| GatewayError::Invalid("invalid media metadata".into()))?
+    } else {
+        link_preview::text_content(message.body, message.formatted, message.relation)
+    };
+    link_preview::install_previews(&mut content, entries);
+    // Preflight reserves are conservative, but validate actual SDK fields
+    // too. If they exceed the reserve, reject the parent event and accept
+    // that already-uploaded Matrix objects can remain orphaned; staged
+    // originals are released for explicit correction/retry by the caller.
+    link_preview::check_content(&content).map_err(preview_validation_error)?;
+    // Do not send plaintext thumbnail references after a concurrent room
+    // encryption upgrade. The next explicit attempt will reupload them.
+    if has_uploads && !encrypted && fresh_preview_encryption(room, account_id).await? {
+        return Err(GatewayError::Invalid(
+            "room encryption changed; review and retry the send".into(),
+        ));
+    }
+    let response = room
+        .send_raw("m.room.message", content)
+        .await
+        .map_err(map_preview_send_error)?;
+    Ok(response.response.event_id.to_string())
+}
+
+/// [`SdkGateway::send_media`] once the room is resolved: the relation decides
+/// between the SDK's `send_attachment` and [`send_thread_member_attachment`],
+/// and both send the event type `attachment.kind` names.
+async fn send_media_in_room(
+    room: &Room,
+    attachment: MediaAttachment,
+    caption: Option<&str>,
+    formatted: Option<Formatted<'_>>,
+    relation: Relation<'_>,
+) -> Result<String, GatewayError> {
+    let content_type = effective_mime(attachment.kind, attachment.content_type.as_deref())?;
+    let info = attachment_info(attachment.kind, attachment.size_bytes)?;
+    let caption = caption.map(|caption| match formatted {
+        Some(f) => TextMessageEventContent::html(caption, f.body),
+        None => TextMessageEventContent::plain(caption),
+    });
+
+    if let Some(thread_root) = thread_member_root(relation)? {
+        return send_thread_member_attachment(
+            room,
+            attachment,
+            &content_type,
+            info,
+            caption,
+            thread_root,
+        )
+        .await;
+    }
+
+    let reply = attachment_reply(relation)?;
+    let config = AttachmentConfig::new()
+        .info(info)
+        .caption(caption)
+        .reply(reply);
+    let resp = room
+        .send_attachment(attachment.filename, &content_type, attachment.bytes, config)
+        .await
+        .map_err(map_sdk_err)?;
+    Ok(resp.event_id.to_string())
 }
 
 /// The content of the `m.room.message` an edit replaces, from the fetched
@@ -1217,87 +1407,14 @@ impl SdkGateway {
         message: axon_core::link_preview::PreviewSend<'_>,
         attachment: Option<MediaAttachment>,
     ) -> Result<String, GatewayError> {
-        use axon_core::link_preview;
-        link_preview::preflight(
-            message.body,
-            message.formatted,
-            message.relation,
-            &message
-                .previews
-                .iter()
-                .map(|p| (p.metadata.clone(), p.image.is_some()))
-                .collect::<Vec<_>>(),
-            attachment.is_some(),
-        )
-        .map_err(preview_validation_error)?;
-        message_relates_to(message.relation)?; // Validate before any upload.
+        use futures_util::FutureExt;
         let room = self.room(account_id, room_id).await?;
-        ensure_joined(&room)?;
-        // A cached false state can also expose the message itself. Keep one
-        // fresh lookup even for metadata-only sends, including explicit opt-out.
-        let encrypted = fresh_preview_encryption(&room, account_id).await?;
-        let has_uploads =
-            attachment.is_some() || message.previews.iter().any(|p| p.image.is_some());
-        use futures_util::{FutureExt, StreamExt, TryStreamExt};
-        // At most two uploads per send run at once. Consume the owned bytes;
-        // avoid cloning up to 16 MiB while preserving input card order.
-        let entries = futures_util::stream::iter(message.previews)
-            .map(|preview| preview_entry(&room, preview, encrypted).boxed())
-            .buffered(2)
-            .try_collect::<Vec<_>>()
-            .await?;
-        let mut content = if let Some(attachment) = attachment {
-            if attachment.filename.len() > 1024
-                || attachment
-                    .content_type
-                    .as_ref()
-                    .is_some_and(|s| s.len() > 256)
-            {
-                return Err(GatewayError::Invalid(
-                    "media filename/type exceeds preview-aware send limits".into(),
-                ));
-            }
-            let mime = effective_mime(attachment.kind, attachment.content_type.as_deref())?;
-            let info = attachment_info(attachment.kind, attachment.size_bytes)?;
-            let source =
-                upload_media_source_with_encryption(&room, &mime, attachment.bytes, encrypted)
-                    .await?;
-            validate_preview_media_source(&source)?;
-            let caption = (!message.body.is_empty()).then(|| match message.formatted {
-                Some(f) => TextMessageEventContent::html(message.body, f.body),
-                None => TextMessageEventContent::plain(message.body),
-            });
-            let media = RoomMessageEventContent::new(media_message_type(
-                attachment.kind,
-                attachment.filename,
-                &mime,
-                source,
-                info,
-                caption,
-            ));
-            serde_json::to_value(media_content_with_relation(&room, media, message.relation).await?)
-                .map_err(|_| GatewayError::Invalid("invalid media metadata".into()))?
-        } else {
-            link_preview::text_content(message.body, message.formatted, message.relation)
-        };
-        link_preview::install_previews(&mut content, entries);
-        // Preflight reserves are conservative, but validate actual SDK fields
-        // too. If they exceed the reserve, reject the parent event and accept
-        // that already-uploaded Matrix objects can remain orphaned; staged
-        // originals are released for explicit correction/retry by the caller.
-        link_preview::check_content(&content).map_err(preview_validation_error)?;
-        // Do not send plaintext thumbnail references after a concurrent room
-        // encryption upgrade. The next explicit attempt will reupload them.
-        if has_uploads && !encrypted && fresh_preview_encryption(&room, account_id).await? {
-            return Err(GatewayError::Invalid(
-                "room encryption changed; review and retry the send".into(),
-            ));
-        }
-        let response = room
-            .send_raw("m.room.message", content)
+        // Boxed as a trait object: the send future is deep enough that,
+        // nested once more inside the server's adapter, proving it `Send`
+        // overflows the compiler's recursion limit.
+        send_with_previews_in_room(&room, account_id, message, attachment)
+            .boxed()
             .await
-            .map_err(map_preview_send_error)?;
-        Ok(response.response.event_id.to_string())
     }
 
     pub async fn send_message(
@@ -1351,7 +1468,8 @@ impl SdkGateway {
         Ok(response.response.event_id.to_string())
     }
 
-    /// Send a staged media attachment as an `m.image` or `m.file`.
+    /// Send a staged media attachment as an `m.image`, `m.file`, `m.video` or
+    /// `m.audio`, following its kind (ADR 0142 section 1).
     ///
     /// `thread_root` without `reply_to` (a thread member, not a reply) can't be
     /// expressed through the SDK's typed reply/attachment helper: `AttachmentConfig`
@@ -1380,35 +1498,7 @@ impl SdkGateway {
         relation: Relation<'_>,
     ) -> Result<String, GatewayError> {
         let room = self.room(account_id, room_id).await?;
-        let content_type = effective_mime(attachment.kind, attachment.content_type.as_deref())?;
-        let info = attachment_info(attachment.kind, attachment.size_bytes)?;
-        let caption = caption.map(|caption| match formatted {
-            Some(f) => TextMessageEventContent::html(caption, f.body),
-            None => TextMessageEventContent::plain(caption),
-        });
-
-        if let Some(thread_root) = thread_member_root(relation)? {
-            return send_thread_member_attachment(
-                &room,
-                attachment,
-                &content_type,
-                info,
-                caption,
-                thread_root,
-            )
-            .await;
-        }
-
-        let reply = attachment_reply(relation)?;
-        let config = AttachmentConfig::new()
-            .info(info)
-            .caption(caption)
-            .reply(reply);
-        let resp = room
-            .send_attachment(attachment.filename, &content_type, attachment.bytes, config)
-            .await
-            .map_err(map_sdk_err)?;
-        Ok(resp.event_id.to_string())
+        send_media_in_room(&room, attachment, caption, formatted, relation).await
     }
 
     /// Edit a message by sending an `m.replace` replacement of `event_id`.
@@ -2820,6 +2910,86 @@ mod tests {
         assert_eq!(u64::from(file_info.size.expect("file size")), 456);
     }
 
+    /// ADR 0142 section 1: `video` and `audio` keep the declared type,
+    /// parameters included, the same way `image` does.
+    #[test]
+    fn effective_mime_keeps_video_and_audio_types() {
+        for (kind, content_type) in [
+            (MediaSendKind::Video, "video/quicktime"),
+            (MediaSendKind::Video, "video/mp4"),
+            (MediaSendKind::Audio, "audio/ogg; codecs=opus"),
+            (MediaSendKind::Audio, "audio/mpeg"),
+        ] {
+            assert_eq!(
+                effective_mime(kind, Some(content_type))
+                    .expect("matching type")
+                    .as_ref(),
+                content_type
+            );
+        }
+    }
+
+    /// A kind whose type does not match is `Invalid` (a `400`), and so is a
+    /// `video` or `audio` upload with no type at all: unlike `image`, there is
+    /// no default to fall back on.
+    #[test]
+    fn effective_mime_rejects_a_kind_that_does_not_match_its_type() {
+        for (kind, content_type, expected) in [
+            (
+                MediaSendKind::Video,
+                Some("audio/mp4"),
+                "video uploads must have a video/* content type",
+            ),
+            (
+                MediaSendKind::Video,
+                Some("application/octet-stream"),
+                "video uploads must have a video/* content type",
+            ),
+            (
+                MediaSendKind::Video,
+                None,
+                "video uploads must have a video/* content type",
+            ),
+            (
+                MediaSendKind::Audio,
+                Some("video/mp4"),
+                "audio uploads must have an audio/* content type",
+            ),
+            (
+                MediaSendKind::Audio,
+                None,
+                "audio uploads must have an audio/* content type",
+            ),
+            (
+                MediaSendKind::Image,
+                Some("video/mp4"),
+                "image uploads must have an image/* content type",
+            ),
+        ] {
+            let err = effective_mime(kind, content_type).expect_err("mismatch should fail");
+            assert!(
+                matches!(&err, GatewayError::Invalid(message) if message == expected),
+                "{kind:?} {content_type:?}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn attachment_info_records_size_for_video_and_audio() {
+        let AttachmentInfo::Video(video) =
+            attachment_info(MediaSendKind::Video, 789).expect("video info")
+        else {
+            panic!("expected video attachment info");
+        };
+        assert_eq!(u64::from(video.size.expect("video size")), 789);
+        let AttachmentInfo::Audio(audio) =
+            attachment_info(MediaSendKind::Audio, 1011).expect("audio info")
+        else {
+            panic!("expected audio attachment info");
+        };
+        assert_eq!(u64::from(audio.size.expect("audio size")), 1011);
+    }
+
     #[test]
     fn attachment_info_rejects_sizes_too_large_for_matrix_metadata() {
         let err = attachment_info(MediaSendKind::File, u64::MAX)
@@ -3093,6 +3263,336 @@ mod tests {
                 assert!(content["m.relates_to"].get("m.in_reply_to").is_none());
             }
         }
+        server.abort();
+    }
+
+    /// ADR 0142 section 1 through the real send paths: each kind, sent with
+    /// each relation shape, reaches the homeserver with the event type the
+    /// kind names and the mimetype `effective_mime` chose. No relation, a
+    /// reply and a reply inside a thread go through matrix-sdk's
+    /// `send_attachment`; a thread member goes through
+    /// `send_thread_member_attachment`. A kind that does not match its type
+    /// fails before anything is uploaded.
+    #[tokio::test]
+    async fn send_media_sends_the_event_type_its_kind_names_on_every_relation_path() {
+        use axum::{
+            body::Bytes, extract::State, http::Method, http::StatusCode, response::IntoResponse,
+            Json, Router,
+        };
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct Seen {
+            uploads: Vec<String>,
+            sent: Vec<serde_json::Value>,
+        }
+        async fn handler(
+            State(seen): State<Arc<Mutex<Seen>>>,
+            method: Method,
+            uri: axum::http::Uri,
+            headers: axum::http::HeaderMap,
+            body: Bytes,
+        ) -> axum::response::Response {
+            let path = uri.path();
+            if path.contains("/join") {
+                return Json(json!({"room_id":"!preview:localhost"})).into_response();
+            }
+            if path.ends_with("/media/config") {
+                return Json(json!({"m.upload.size": 1024})).into_response();
+            }
+            if path.contains("/media/") && path.ends_with("/upload") {
+                let content_type = headers
+                    .get(axum::http::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned();
+                seen.lock().unwrap().uploads.push(content_type);
+                return Json(json!({"content_uri":"mxc://localhost/uploaded"})).into_response();
+            }
+            if method == Method::PUT && path.contains("/send/m.room.message/") {
+                let content: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                seen.lock().unwrap().sent.push(content);
+                return Json(json!({"event_id":"$sent:localhost"})).into_response();
+            }
+            if path.contains("/event/") {
+                let threaded = path.contains("thread");
+                let mut event = json!({"room_id":"!preview:localhost", "type":"m.room.message",
+                    "event_id": if threaded {"$thread:localhost"} else {"$reply:localhost"},
+                    "sender":"@other:localhost", "origin_server_ts":1,
+                    "content":{"msgtype":"m.text","body":"original"}});
+                if threaded {
+                    event["content"]["m.relates_to"] =
+                        json!({"rel_type":"m.thread","event_id":"$root:localhost"});
+                }
+                return Json(event).into_response();
+            }
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"errcode":"M_NOT_FOUND","error":"absent"})),
+            )
+                .into_response()
+        }
+
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let (room, server) =
+            preview_test_room(Router::new().fallback(handler).with_state(seen.clone())).await;
+        room.update_room_info(|mut info| {
+            info.set_encryption_event(None);
+            info.mark_encryption_state_synced();
+            (info, matrix_sdk_base::RoomInfoNotableUpdateReasons::empty())
+        })
+        .await;
+
+        let relations = [
+            (None, None),
+            (Some("$reply:localhost"), None),
+            (None, Some("$root:localhost")),
+            (Some("$thread:localhost"), Some("$root:localhost")),
+        ];
+        for (kind, declared, msgtype, mimetype) in [
+            (MediaSendKind::Image, "image/jpeg", "m.image", "image/jpeg"),
+            (
+                MediaSendKind::Video,
+                "video/quicktime",
+                "m.video",
+                "video/quicktime",
+            ),
+            (MediaSendKind::Audio, "audio/ogg", "m.audio", "audio/ogg"),
+            (
+                MediaSendKind::File,
+                "application/pdf",
+                "m.file",
+                "application/pdf",
+            ),
+            // A video staged as `file`, as every client did before the
+            // `video` kind: unchanged, an `m.file` declared as octet-stream.
+            (
+                MediaSendKind::File,
+                "video/quicktime",
+                "m.file",
+                "application/octet-stream",
+            ),
+        ] {
+            for (reply_to, thread_root) in relations {
+                let attachment = axon_core::MediaAttachment {
+                    kind,
+                    filename: "IMG_9306.mov".into(),
+                    content_type: Some(declared.into()),
+                    size_bytes: 3,
+                    bytes: vec![1, 2, 3],
+                };
+                let event_id = super::send_media_in_room(
+                    &room,
+                    attachment,
+                    Some("caption"),
+                    None,
+                    Relation {
+                        reply_to,
+                        thread_root,
+                    },
+                )
+                .await
+                .unwrap_or_else(|e| panic!("{kind:?} {reply_to:?} {thread_root:?}: {e:?}"));
+                assert_eq!(event_id, "$sent:localhost");
+
+                let (upload, content) = {
+                    let mut seen = seen.lock().unwrap();
+                    (
+                        seen.uploads.pop().expect("one upload"),
+                        seen.sent.pop().expect("one event"),
+                    )
+                };
+                let case = format!("{kind:?} {declared} {reply_to:?} {thread_root:?}");
+                assert_eq!(upload, mimetype, "{case}");
+                assert_eq!(content["msgtype"], msgtype, "{case}");
+                assert_eq!(content["info"]["mimetype"], mimetype, "{case}");
+                assert_eq!(content["info"]["size"], 3, "{case}");
+                assert_eq!(content["body"], "caption", "{case}");
+                assert_eq!(content["filename"], "IMG_9306.mov", "{case}");
+                assert_eq!(content["url"], "mxc://localhost/uploaded", "{case}");
+                match (reply_to, thread_root) {
+                    (None, None) => assert!(content.get("m.relates_to").is_none(), "{case}"),
+                    (Some(reply), None) => {
+                        assert_eq!(content["m.relates_to"]["m.in_reply_to"]["event_id"], reply);
+                        assert!(content["m.relates_to"].get("rel_type").is_none(), "{case}");
+                    }
+                    (None, Some(root)) => {
+                        assert_eq!(content["m.relates_to"]["rel_type"], "m.thread", "{case}");
+                        assert_eq!(content["m.relates_to"]["event_id"], root, "{case}");
+                        assert!(
+                            content["m.relates_to"].get("m.in_reply_to").is_none(),
+                            "{case}"
+                        );
+                    }
+                    (Some(reply), Some(root)) => {
+                        assert_eq!(content["m.relates_to"]["rel_type"], "m.thread", "{case}");
+                        assert_eq!(content["m.relates_to"]["event_id"], root, "{case}");
+                        assert_eq!(content["m.relates_to"]["m.in_reply_to"]["event_id"], reply);
+                    }
+                }
+            }
+        }
+
+        // A mismatch fails on both paths before anything reaches the
+        // homeserver.
+        for (reply_to, thread_root) in relations {
+            for (kind, declared) in [
+                (MediaSendKind::Video, Some("audio/mp4")),
+                (MediaSendKind::Audio, Some("video/mp4")),
+                (MediaSendKind::Video, None),
+            ] {
+                let attachment = axon_core::MediaAttachment {
+                    kind,
+                    filename: "clip".into(),
+                    content_type: declared.map(Into::into),
+                    size_bytes: 3,
+                    bytes: vec![1, 2, 3],
+                };
+                let err = super::send_media_in_room(
+                    &room,
+                    attachment,
+                    None,
+                    None,
+                    Relation {
+                        reply_to,
+                        thread_root,
+                    },
+                )
+                .await
+                .expect_err("a mismatched kind fails");
+                assert!(matches!(err, GatewayError::Invalid(_)), "{err:?}");
+            }
+        }
+        let seen = seen.lock().unwrap();
+        assert!(seen.uploads.is_empty() && seen.sent.is_empty());
+        drop(seen);
+        server.abort();
+    }
+
+    /// A caption with a bundled preview image: an attachment whose kind does
+    /// not match its type fails before the preview image is uploaded, so a
+    /// retry never leaves another orphaned copy on the homeserver. The valid
+    /// send first proves the probe sees both uploads when they happen.
+    #[tokio::test]
+    async fn preview_send_validates_the_attachment_before_any_upload() {
+        use axon_core::link_preview::{LinkPreview, PreviewImage, PreviewMetadata, PreviewSend};
+        use axum::{
+            body::Bytes, extract::State, http::Method, http::StatusCode, response::IntoResponse,
+            Json, Router,
+        };
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct Seen {
+            uploads: Vec<String>,
+            sent: Vec<serde_json::Value>,
+        }
+        async fn handler(
+            State(seen): State<Arc<Mutex<Seen>>>,
+            method: Method,
+            uri: axum::http::Uri,
+            headers: axum::http::HeaderMap,
+            body: Bytes,
+        ) -> axum::response::Response {
+            let path = uri.path();
+            if path.contains("/join") {
+                return Json(json!({"room_id":"!preview:localhost"})).into_response();
+            }
+            if path.ends_with("/media/config") {
+                return Json(json!({"m.upload.size": 1024})).into_response();
+            }
+            if path.contains("/media/") && path.ends_with("/upload") {
+                let content_type = headers
+                    .get(axum::http::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned();
+                seen.lock().unwrap().uploads.push(content_type);
+                return Json(json!({"content_uri":"mxc://localhost/uploaded"})).into_response();
+            }
+            if method == Method::PUT && path.contains("/send/m.room.message/") {
+                let content: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                seen.lock().unwrap().sent.push(content);
+                return Json(json!({"event_id":"$sent:localhost"})).into_response();
+            }
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"errcode":"M_NOT_FOUND","error":"absent"})),
+            )
+                .into_response()
+        }
+
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let (room, server) =
+            preview_test_room(Router::new().fallback(handler).with_state(seen.clone())).await;
+        let message = || PreviewSend {
+            body: "clip https://example.org/clip",
+            formatted: None,
+            relation: Relation::default(),
+            previews: vec![LinkPreview {
+                metadata: PreviewMetadata {
+                    matched_url: "https://example.org/clip".into(),
+                    title: Some("Clip".into()),
+                    ..Default::default()
+                },
+                image: Some(PreviewImage {
+                    bytes: vec![1, 2, 3],
+                    mimetype: "image/png".into(),
+                    width: 1,
+                    height: 1,
+                }),
+            }],
+        };
+        let attachment = |kind, content_type: Option<&str>| axon_core::MediaAttachment {
+            kind,
+            filename: "clip.mp4".into(),
+            content_type: content_type.map(Into::into),
+            size_bytes: 3,
+            bytes: vec![4, 5, 6],
+        };
+
+        let event_id = super::send_with_previews_in_room(
+            &room,
+            uuid::Uuid::nil(),
+            message(),
+            Some(attachment(MediaSendKind::Video, Some("video/mp4"))),
+        )
+        .await
+        .expect("a valid send");
+        assert_eq!(event_id, "$sent:localhost");
+        {
+            let mut seen = seen.lock().unwrap();
+            assert_eq!(seen.uploads.len(), 2, "{:?}", seen.uploads);
+            assert!(seen.uploads.contains(&"image/png".to_owned()));
+            assert!(seen.uploads.contains(&"video/mp4".to_owned()));
+            let sent = seen.sent.pop().expect("one event");
+            assert_eq!(sent["msgtype"], "m.video");
+            assert_eq!(sent["info"]["mimetype"], "video/mp4");
+            seen.uploads.clear();
+        }
+
+        for (kind, content_type) in [
+            (MediaSendKind::Video, Some("audio/ogg")),
+            (MediaSendKind::Audio, None),
+            (MediaSendKind::Image, Some("video/mp4")),
+        ] {
+            let err = super::send_with_previews_in_room(
+                &room,
+                uuid::Uuid::nil(),
+                message(),
+                Some(attachment(kind, content_type)),
+            )
+            .await
+            .expect_err("a mismatched kind fails");
+            assert!(
+                matches!(err, GatewayError::Invalid(_)),
+                "{kind:?} {content_type:?}: {err:?}"
+            );
+        }
+        let seen = seen.lock().unwrap();
+        assert!(seen.uploads.is_empty(), "{:?}", seen.uploads);
+        assert!(seen.sent.is_empty());
+        drop(seen);
         server.abort();
     }
 

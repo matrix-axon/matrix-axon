@@ -70,6 +70,57 @@ async fn insert_get_and_delete_staged_upload_metadata() {
     common::cleanup_account(&pool, account_id).await;
 }
 
+/// ADR 0142 section 1: the `video` and `audio` kinds pass the table's CHECK
+/// and read back as themselves; any other kind is still refused.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn video_and_audio_kinds_round_trip() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "media-upload-kinds").await;
+    let expires_at = Utc::now() + Duration::hours(1);
+
+    for (kind, filename, content_type) in [
+        (MediaUploadKind::Video, "IMG_9306.mov", "video/quicktime"),
+        (MediaUploadKind::Audio, "memo.ogg", "audio/ogg"),
+    ] {
+        let upload_id = Uuid::new_v4();
+        let inserted = store
+            .insert_media_upload(&NewMediaUpload {
+                upload_id,
+                account_id,
+                kind,
+                filename,
+                content_type: Some(content_type),
+                size_bytes: 3,
+                path: "/tmp/clip",
+                expires_at,
+            })
+            .await
+            .expect("insert upload");
+        assert_eq!(inserted.kind, kind);
+        let fetched = store
+            .get_media_upload(account_id, upload_id)
+            .await
+            .expect("get upload")
+            .expect("upload present");
+        assert_eq!(fetched.kind, kind);
+        assert_eq!(fetched.content_type.as_deref(), Some(content_type));
+    }
+
+    let refused = sqlx_core::query::query(
+        "INSERT INTO media_uploads (upload_id, account_id, kind, filename, size_bytes, path, expires_at) \
+         VALUES ($1, $2, 'sticker', 'x', 0, '/tmp/x', now() + interval '1 hour')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(account_id)
+    .execute(&pool)
+    .await;
+    assert!(refused.is_err(), "an unknown kind must fail the CHECK");
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn delete_staged_upload_does_not_delete_sending_rows() {

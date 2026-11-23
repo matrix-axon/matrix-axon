@@ -2829,6 +2829,15 @@ export interface components {
                  *     when it omits them (ADR 0132 section 8).
                  */
                 edit_url_previews: boolean;
+                /**
+                 * @description The kinds `POST …/media/uploads` accepts (ADR 0142 section 1). A server
+                 *     without this field accepts only `image` and `file`, and rejects any
+                 *     other kind when staging, so a client stages a video or audio file as
+                 *     `video` or `audio` only when it is listed here, and as `file` otherwise.
+                 *     This server always sends it; the schema marks it optional because a
+                 *     server that predates it answers without it.
+                 */
+                media_upload_kinds?: components["schemas"]["MediaUploadKindDto"][];
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -4607,6 +4616,15 @@ export interface components {
              *     when it omits them (ADR 0132 section 8).
              */
             edit_url_previews: boolean;
+            /**
+             * @description The kinds `POST …/media/uploads` accepts (ADR 0142 section 1). A server
+             *     without this field accepts only `image` and `file`, and rejects any
+             *     other kind when staging, so a client stages a video or audio file as
+             *     `video` or `audio` only when it is listed here, and as `file` otherwise.
+             *     This server always sends it; the schema marks it optional because a
+             *     server that predates it answers without it.
+             */
+            media_upload_kinds?: components["schemas"]["MediaUploadKindDto"][];
         };
         /**
          * @description Why a crawl failed or stopped early. Allowlisted; never upstream text.
@@ -5728,10 +5746,21 @@ export interface components {
             user_id: string;
         };
         /**
-         * @description Supported outbound media kind for M15.
+         * @description The Matrix message a staged upload becomes (ADR 0059, ADR 0142 section 1).
+         *
+         *     - `image` sends `m.image` and needs an `image/*` type.
+         *     - `video` sends `m.video` and needs a `video/*` type.
+         *     - `audio` sends `m.audio` and needs an `audio/*` type.
+         *     - `file` sends `m.file` with any type, but an `image/*`, `video/*` or
+         *       `audio/*` type is sent as `application/octet-stream`.
+         *
+         *     A kind that does not match the upload's type fails the send with a `400`.
+         *     `video` and `audio` are newer than `image` and `file`: use them only when
+         *     `GET /v1/capabilities` lists them in `media_upload_kinds`, because an
+         *     older server rejects them when staging.
          * @enum {string}
          */
-        MediaUploadKindDto: "image" | "file";
+        MediaUploadKindDto: "image" | "file" | "video" | "audio";
         /**
          * @description Request body shared by the user-targeted membership actions that carry an
          *     optional reason — `kick`, `ban`, `unban` (ADR 0068 M19b). Matrix models all

@@ -267,6 +267,36 @@ async fn only_video_and_audio_with_an_owning_event_get_a_ticket() {
     fx.store.delete_account_row(fx.account_id).await.unwrap();
 }
 
+/// A parameterized or mixed-case video or audio type gets a ticket, and the
+/// ticket serves it as its lowercased essence (ADR 0142 section 1: Axon sends
+/// the declared type, parameters included).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_parameterized_video_or_audio_type_gets_a_ticket_and_serves_its_essence() {
+    let fx = Fixture::new().await;
+    let proxy = Arc::new(ConfiguredMediaProxy::ok(DATA));
+    let app = ticket_app(fx.store.clone(), proxy.clone(), StubTokenVerifier::ok());
+
+    for (declared, served) in [
+        ("audio/ogg; codecs=opus", "audio/ogg"),
+        ("video/webm; codecs=vp9", "video/webm"),
+        ("Video/MP4", "video/mp4"),
+    ] {
+        let (_, mxc) = fx.media(declared).await;
+        let path = mint_path(&app, &fx.mint_uri(&mxc)).await;
+        let (status, headers, bytes) = play(&app, &path, None).await;
+        assert_eq!(status, StatusCode::OK, "{declared}");
+        assert_eq!(bytes, DATA, "{declared}");
+        assert_eq!(headers["content-type"], served, "{declared}");
+    }
+    // A parameter does not make an unsafe type ticketable.
+    let (_, mxc) = fx.media("text/html; charset=utf-8").await;
+    let (status, _) = mint(&app, &fx.mint_uri(&mxc)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    fx.store.delete_account_row(fx.account_id).await.unwrap();
+}
+
 /// A ticket is accepted exactly when the token that issued it would be, and
 /// a refused ticket never comes back.
 #[tokio::test]

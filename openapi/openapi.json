@@ -11307,6 +11307,13 @@
               "edit_url_previews": {
                 "type": "boolean",
                 "description": "An edit accepts `url_previews` and carries a message's previews forward\nwhen it omits them (ADR 0132 section 8)."
+              },
+              "media_upload_kinds": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/MediaUploadKindDto"
+                },
+                "description": "The kinds `POST …/media/uploads` accepts (ADR 0142 section 1). A server\nwithout this field accepts only `image` and `file`, and rejects any\nother kind when staging, so a client stages a video or audio file as\n`video` or `audio` only when it is listed here, and as `file` otherwise.\nThis server always sends it; the schema marks it optional because a\nserver that predates it answers without it."
               }
             }
           }
@@ -14980,6 +14987,13 @@
           "edit_url_previews": {
             "type": "boolean",
             "description": "An edit accepts `url_previews` and carries a message's previews forward\nwhen it omits them (ADR 0132 section 8)."
+          },
+          "media_upload_kinds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MediaUploadKindDto"
+            },
+            "description": "The kinds `POST …/media/uploads` accepts (ADR 0142 section 1). A server\nwithout this field accepts only `image` and `file`, and rejects any\nother kind when staging, so a client stages a video or audio file as\n`video` or `audio` only when it is listed here, and as `file` otherwise.\nThis server always sends it; the schema marks it optional because a\nserver that predates it answers without it."
           }
         }
       },
@@ -16911,10 +16925,12 @@
       },
       "MediaUploadKindDto": {
         "type": "string",
-        "description": "Supported outbound media kind for M15.",
+        "description": "The Matrix message a staged upload becomes (ADR 0059, ADR 0142 section 1).\n\n- `image` sends `m.image` and needs an `image/*` type.\n- `video` sends `m.video` and needs a `video/*` type.\n- `audio` sends `m.audio` and needs an `audio/*` type.\n- `file` sends `m.file` with any type, but an `image/*`, `video/*` or\n  `audio/*` type is sent as `application/octet-stream`.\n\nA kind that does not match the upload's type fails the send with a `400`.\n`video` and `audio` are newer than `image` and `file`: use them only when\n`GET /v1/capabilities` lists them in `media_upload_kinds`, because an\nolder server rejects them when staging.",
         "enum": [
           "image",
-          "file"
+          "file",
+          "video",
+          "audio"
         ]
       },
       "MemberActionRequest": {

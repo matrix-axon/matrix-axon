@@ -22,6 +22,8 @@ use crate::{Store, StoreError};
 pub enum MediaUploadKind {
     Image,
     File,
+    Video,
+    Audio,
 }
 
 impl MediaUploadKind {
@@ -29,6 +31,8 @@ impl MediaUploadKind {
         match self {
             MediaUploadKind::Image => "image",
             MediaUploadKind::File => "file",
+            MediaUploadKind::Video => "video",
+            MediaUploadKind::Audio => "audio",
         }
     }
 
@@ -36,6 +40,8 @@ impl MediaUploadKind {
         match s {
             "image" => Ok(MediaUploadKind::Image),
             "file" => Ok(MediaUploadKind::File),
+            "video" => Ok(MediaUploadKind::Video),
+            "audio" => Ok(MediaUploadKind::Audio),
             other => Err(sqlx_core::Error::ColumnDecode {
                 index: "kind".to_owned(),
                 source: format!("unknown media upload kind {other:?}").into(),
