@@ -186,7 +186,14 @@ pick_simulator() { node "$web_dir/scripts/sharing-simulator-device.mjs" pick "$t
 choice=$(pick_simulator)
 if [ "${choice%% *}" = none ] && [ -n "${LAUNCH_CHECK_IOS:-}" ]; then
   note "no iOS $target_ios simulator runtime is installed; downloading it"
-  xcodebuild -downloadPlatform iOS -buildVersion "$target_ios" || echo "    the download failed" >&2
+  # Apple's download is a network call to its catalog and then 8 GB; it has failed once
+  # with "a general networking error" and succeeded on the next run, so try it again
+  # before giving up rather than losing the whole build to one bad request.
+  for attempt in 1 2 3; do
+    if xcodebuild -downloadPlatform iOS -buildVersion "$target_ios"; then break; fi
+    echo "    download attempt $attempt of 3 failed" >&2
+    if [ "$attempt" -lt 3 ]; then sleep $((attempt * 30)); fi
+  done
   choice=$(pick_simulator)
 fi
 read -r kind first second rest <<EOF
