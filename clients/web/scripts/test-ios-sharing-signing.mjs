@@ -15,6 +15,8 @@ import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import yaml from 'js-yaml'
 
+import { minimumIosVersion } from './ios-minimum-version.mjs'
+
 // Run the real generation hook in an isolated project and return what it wrote.
 // XcodeGen is replaced only after the hook has written its project and export
 // settings.
@@ -32,12 +34,14 @@ function generate(env) {
     symlinkSync(join(source, 'node_modules'), join(web, 'node_modules'))
     for (const name of [
       'configure-ios-sharing.mjs',
+      'ios-minimum-version.mjs',
       'ios-share-activation.json',
     ])
       copyFileSync(join(source, 'scripts', name), join(scripts, name))
     for (const name of [
       'Entitlements.ios.plist',
       'Entitlements.share.ios.plist',
+      'tauri.conf.json',
     ])
       copyFileSync(join(source, 'src-tauri', name), join(tauri, name))
     copyFileSync(join(source, 'package.json'), join(web, 'package.json'))
@@ -207,5 +211,24 @@ test(
         name,
       )
     }
+  },
+)
+
+test(
+  'the app declares the configured minimum iOS, and the extension keeps its own',
+  { skip: process.platform !== 'darwin' },
+  () => {
+    // The app target once declared nothing and took the SDK's version as its minimum:
+    // 26.5 under Xcode 26, 27.2 under Xcode 27. Only the extension, which sets its
+    // own, was right.
+    const { project } = generate({
+      AXON_IOS_EXPORT_METHOD: 'debugging',
+      AXON_APS_ENVIRONMENT: 'development',
+    })
+    const configured = minimumIosVersion(
+      fileURLToPath(new URL('../src-tauri/', import.meta.url)),
+    )
+    assert.equal(project.targets.axon_iOS.deploymentTarget, configured)
+    assert.equal(project.targets.axon_share.deploymentTarget, '15.0')
   },
 )

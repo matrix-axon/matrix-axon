@@ -3,6 +3,8 @@ import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import yaml from 'js-yaml'
 
+import { minimumIosVersion } from './ios-minimum-version.mjs'
+
 // Run after EVERY tauri ios init. Generated Xcode files are never the source
 // of truth. The production share destination is always embedded; the optional
 // probe is omitted from distribution builds by default.
@@ -41,6 +43,10 @@ if (process.env.AXON_APS_ENVIRONMENT)
 const projectPath = new URL('project.yml', apple)
 const project = yaml.load(readFileSync(projectPath, 'utf8'))
 const app = project.targets.axon_iOS
+// The app declares its own deployment target. The project-level one `tauri ios init`
+// writes does not reach the Xcode project, and without this the app took the SDK's
+// version as its minimum iOS; see ios-minimum-version.mjs.
+app.deploymentTarget = minimumIosVersion(fileURLToPath(tauri))
 app.info.properties.CFBundleShortVersionString = JSON.parse(
   readFileSync(new URL('../package.json', tauri), 'utf8'),
 ).version
