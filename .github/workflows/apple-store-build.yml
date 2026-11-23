@@ -48,6 +48,13 @@ on:
         description: "CFBundleVersion, or 'auto' for one more than App Store Connect has on that platform"
         type: string
         default: auto
+      runner:
+        description: "Runner image, which fixes the Xcode. Keep macos-26 for a build to ship; xcode-27 is for testing it"
+        type: choice
+        options:
+          - macos-26
+          - xcode-27
+        default: macos-26
 
 permissions:
   contents: read
@@ -64,11 +71,16 @@ jobs:
   ios:
     name: Build for iOS (App Store)
     if: ${{ inputs.platform == 'ios' || inputs.platform == 'both' }}
-    # Xcode 26 or 27, so the iOS 26 SDK or newer: App Store Connect rejects uploads
-    # made with an older one, after the build and the upload have succeeded. The
-    # Xcode step below checks it rather than trusting the image. Xcode 27 needs the
-    # llvm-tools step below; Xcode 26 builds with or without it.
-    runs-on: xcode-27
+    # Xcode 26 by default. The first Xcode 27 build, run through the `runner` input,
+    # produced an app that declares a minimum iOS of 27.2 although the project says
+    # 15, and one with no scene manifest, which iOS 27 stops at launch in the one
+    # case seen (the ios-sharing test host). Neither is understood yet, so a build
+    # that ships stays on 26. Any Xcode with the iOS 26 SDK or newer is accepted:
+    # App Store Connect rejects uploads made with an older one, after the build and
+    # the upload have succeeded, and the Xcode step below checks it rather than
+    # trusting the image. The llvm-tools step below is what Xcode 27 needs and is
+    # harmless on 26.
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 60
     env:
       BUILD_NUMBER: ${{ inputs.build_number }}
@@ -294,7 +306,7 @@ jobs:
   macos:
     name: Build for the Mac App Store
     if: ${{ inputs.platform == 'macos' || inputs.platform == 'both' }}
-    runs-on: xcode-27
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 90
     env:
       BUILD_NUMBER: ${{ inputs.build_number }}
