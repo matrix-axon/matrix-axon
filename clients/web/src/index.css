@@ -2360,6 +2360,11 @@ button.ghost.pin:hover {
   overflow-anchor: none;
 }
 
+.room-stream > .timeline:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .timeline-edge {
   display: block;
   margin: 0 auto 0.75rem;

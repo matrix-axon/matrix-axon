@@ -1327,7 +1327,9 @@ describe('RoomPage', () => {
       await findAllByRole('button', { name: 'Review identity changes' }),
     ).toHaveLength(2)
     fireEvent.click(close)
-    expect(document.activeElement).toBe(container.querySelector('.timeline'))
+    expect(document.activeElement).toBe(
+      container.querySelector('.room-stream > .timeline'),
+    )
     expect(composer.value).toBe('Keep my draft')
   })
 

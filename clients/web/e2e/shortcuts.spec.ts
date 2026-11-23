@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test'
 import {
   active,
   expectLive,
+  expectRoomReady,
   expectSendsSettled,
   LAST_ROOM_URL,
   openRoom,
@@ -462,16 +463,16 @@ test('Page Up and Page Down scroll the room timeline after a click', async ({
   try {
     await signIn(page)
     await page.goto(ROOM_URL)
+    await expectRoomReady(page)
     const timeline = page.locator('.room-stream > .timeline')
-    await expect(
-      timeline.getByText('Bulk message 0', { exact: true }),
-    ).toBeAttached()
-    await timeline.evaluate((element) => {
-      element.scrollTop = (element.scrollHeight - element.clientHeight) / 2
+    // Click plain text in the middle of the seeded history so the timeline
+    // can scroll in both directions after the browser chooses its focus target.
+    const message = timeline.getByText('Bulk message 20', { exact: true })
+    await message.evaluate((element) => {
+      element.scrollIntoView({ block: 'center', behavior: 'instant' })
     })
-    // Use a pointer click on plain timeline content so the engine picks its
-    // own focus target, as it does when someone clicks a message to read.
-    await timeline.click({ position: { x: 4, y: 24 } })
+    await message.click()
+    await expect(timeline).toBeFocused()
     const scrollTop = () => timeline.evaluate((element) => element.scrollTop)
     const start = await scrollTop()
 
