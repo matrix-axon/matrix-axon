@@ -261,7 +261,9 @@ touch "$started_marker"
 booted=""
 attempt=1
 while [ "$attempt" -le "$boot_attempts" ]; do
-  xcrun simctl boot "$udid" 2>/dev/null || true
+  # `bootstatus -b` boots the device if it is not booted, so there is no separate
+  # `simctl boot`: that call blocks until the device is up, and on the iOS 26.0 runtime
+  # it took 12 and a half minutes with no limit on it and nothing in the log.
   # bootstatus says which stage it is waiting for, but it buffers its output unless it
   # has a terminal, and a killed process loses the buffer: so it runs under script(1),
   # which gives it one, and what it says is logged and kept.
@@ -281,9 +283,14 @@ if [ -z "$booted" ]; then
 fi
 note "the simulator has booted"
 
+# A runtime that has only just been downloaded is slow at everything once it is up: on
+# iOS 26.0 the install took 4 minutes 43 seconds and the launch 1 minute 54 against
+# limits of 5 and 3, one slow run from failing. Allow it three times as long.
+op_scale=1
+if [ -n "${LAUNCH_CHECK_IOS:-}" ]; then op_scale=3; fi
 xcrun simctl terminate "$udid" "$bundle_id" 2>/dev/null || true
 xcrun simctl uninstall "$udid" "$bundle_id" 2>/dev/null || true
-if ! with_timeout 300 xcrun simctl install "$udid" "$app"; then
+if ! with_timeout $((300 * op_scale)) xcrun simctl install "$udid" "$app"; then
   keep_simulator_diagnostics
   die "the simulator would not install the app" 1
 fi
@@ -291,7 +298,7 @@ fi
 # Crash reports newer than this marker are this launch's.
 touch "$started_marker"
 note "launching $bundle_id"
-if ! launch=$(with_timeout 180 xcrun simctl launch "$udid" "$bundle_id" 2>&1); then
+if ! launch=$(with_timeout $((180 * op_scale)) xcrun simctl launch "$udid" "$bundle_id" 2>&1); then
   keep_simulator_diagnostics
   die "simctl could not launch it: $launch" 1
 fi
