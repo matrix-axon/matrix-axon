@@ -96,6 +96,10 @@ RUNNER_ARGV = "python3 scripts/ci/run-hook-entry.py"
 WORKSPACE = "${{ github.workspace }}"
 RUST_STEP_IF = "steps.rust-changed.outputs.changed == 'true'"
 CROSS_JOB_IF = "${{ github.event.inputs.checks != 'false' }}"
+# lint-and-test `needs` the runner picker (ADR 0141). Without an `if`, a failed
+# picker job would skip lint-and-test, and a skipped required check passes. This
+# one runs it in every case except a cancelled run.
+LINT_JOB_IF = "${{ !cancelled() }}"
 BASE_ENV = {
     "BASE_REF": "${{ github.event.pull_request.base.ref }}",
     "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
@@ -249,6 +253,9 @@ EXEMPT: dict[Step, str] = {
     Step(LINT, LINT_JOB, "Install pre-commit"): "installs the runner the pre-commit steps use",
     Step(LINT, LINT_JOB, "test changed-by-hook"): "unit test of the path filter, not a hook entry",
     Step(LINT, LINT_JOB, "rust-changed"): "decides whether the rust steps run; not a hook entry",
+    Step(LINT, LINT_JOB, "test runner scripts"): (
+        "unit tests of the runner picker, hook and start check (ADR 0141), not hook entries"
+    ),
     Step(DESKTOP, DESKTOP_JOB, "Install Linux webview dependencies"): (
         "apt packages the shell links against"
     ),
@@ -273,6 +280,7 @@ STEP_IF = {
 
 JOB_IF = {
     (CROSS, CROSS_JOB): CROSS_JOB_IF,
+    (LINT, LINT_JOB): LINT_JOB_IF,
 }
 
 

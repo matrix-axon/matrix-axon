@@ -30,6 +30,15 @@ import {
   isUnsupportedBodylessEvent,
   MessageEventRow,
 } from '../components/MessageEventRow'
+import {
+  AccountTrustActions,
+  OWN_IDENTITY_WARNING,
+} from '../components/AccountTrustActions'
+import {
+  RoomIdentityReview,
+  RoomIdentityWarning,
+} from '../components/RoomIdentityWarning'
+import { roomDetailsKey } from '../stores/room-details'
 import { RoomInfoPanel } from '../components/RoomInfoPanel'
 import { UserInfoPanel } from '../components/UserInfoPanel'
 import type { OpenUserHandler } from '../components/UserOpenTarget'
@@ -224,7 +233,9 @@ export function RoomPage() {
   const {
     api,
     auth,
+    accounts,
     rooms,
+    roomDetails,
     activeRoom,
     activeThread,
     live,
@@ -304,6 +315,10 @@ export function RoomPage() {
     string | null
   >(null)
   const [roomInfoOpen, setRoomInfoOpen] = useState(false)
+  const [identityReviewRoom, setIdentityReviewRoom] = useState<string | null>(
+    null,
+  )
+  const identityReviewOpener = useRef<HTMLButtonElement>(null)
   const [userInfoUserId, setUserInfoUserId] = useState<string | null>(null)
   /** The sender control that opened User information, restored on close. */
   const userInfoOpener = useRef<HTMLElement | null>(null)
@@ -1494,6 +1509,41 @@ export function RoomPage() {
       : (cachedTitle ?? roomId)
   const composerLabelTitle = title !== roomId ? title : null
   const ownUserId = room?.account_user_id ?? null
+  const account = accounts.accounts.value.find(
+    (candidate) => candidate.account_id === accountId,
+  )
+  const detailsKey = roomDetailsKey(accountId, roomId)
+  const watchIdentity = signedIn && room !== undefined
+  useEffect(() => () => roomDetails.watchInfo(null), [roomDetails])
+  useEffect(() => {
+    roomDetails.watchInfo(
+      watchIdentity ? { accountId, roomId, joined: true } : null,
+    )
+    setIdentityReviewRoom(null)
+  }, [roomDetails, watchIdentity, accountId, roomId])
+  const details = roomDetails.state.value
+  const identityChanges = useMemo(
+    () =>
+      watchIdentity && details.key === detailsKey
+        ? details.identityChanges.filter(
+            (warning) =>
+              warning.kind === 'pin_violation' ||
+              warning.kind === 'verification_violation',
+          )
+        : [],
+    [details.identityChanges, details.key, detailsKey, watchIdentity],
+  )
+  const openIdentityReview = (opener: HTMLButtonElement) => {
+    identityReviewOpener.current = opener
+    setIdentityReviewRoom(detailsKey)
+  }
+  const composerIdentityWarning = (
+    <RoomIdentityWarning
+      count={identityChanges.length}
+      onReview={openIdentityReview}
+      announce={false}
+    />
+  )
   // Completions and reference links resolve against this account's rooms,
   // matching what the thread panel is handed.
   const accountRooms = rooms.rooms.value.filter(
@@ -2397,6 +2447,16 @@ export function RoomPage() {
           </button>
         </h1>
       </header>
+      {account?.state === 'active' && account.own_identity_changed === true && (
+        <div class="trust-warning">
+          <span role="status">{OWN_IDENTITY_WARNING}</span>
+          <AccountTrustActions account={account} />
+        </div>
+      )}
+      <RoomIdentityWarning
+        count={identityChanges.length}
+        onReview={openIdentityReview}
+      />
 
       <ErrorBanner error={timeline.error} />
       <LinkedEventNotice
@@ -2423,6 +2483,7 @@ export function RoomPage() {
             panel beside it must stage there, not here (ADR 0065). */}
         <div
           ref={roomStream}
+          tabIndex={-1}
           class="room-stream"
           {...(attachable ? dropHandlers : {})}
         >
@@ -2493,6 +2554,7 @@ export function RoomPage() {
             </p>
           )}
 
+          {composerIdentityWarning}
           <Composer
             // Scoped to the account *and* room: this page is not remounted
             // when the route changes, so an unkeyed composer would carry room
@@ -2618,6 +2680,7 @@ export function RoomPage() {
             roomCompletions={roomCompletions}
             onClose={() => setThreadParam(null)}
             onOpenUser={openUserInfo}
+            identityWarning={composerIdentityWarning}
           />
         )}
         {userInfoUserId !== null && (
@@ -2642,6 +2705,20 @@ export function RoomPage() {
           />
         )}
       </div>
+      {identityReviewRoom === detailsKey && watchIdentity && (
+        <RoomIdentityReview
+          key={detailsKey}
+          accountId={accountId}
+          roomId={roomId}
+          warnings={identityChanges}
+          onClose={() => setIdentityReviewRoom(null)}
+          restoreTo={() =>
+            identityReviewOpener.current?.isConnected
+              ? identityReviewOpener.current
+              : roomStream.current
+          }
+        />
+      )}
       {jumpOpen && (
         <JumpDialog
           onClose={() => setJumpOpen(false)}

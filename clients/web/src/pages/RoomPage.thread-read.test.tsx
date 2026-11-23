@@ -30,6 +30,7 @@ import {
 } from '../stores/device-state'
 import { RECEIPT_DEBOUNCE_MS } from '../stores/ephemeral-sender'
 import type { EventDto } from '../stores/timeline'
+import { emptyRoomInfoHandler } from '../test/room-details'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { RoomPage } from './RoomPage'
 
@@ -143,7 +144,7 @@ const OTHER_THREAD_NEW: ThreadSummary = {
   latest_reply_ts: OTHER_REPLY_NEW.origin_ts,
 }
 
-const server = setupServer()
+const server = setupServer(emptyRoomInfoHandler(TEST_BASE_URL))
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
   cleanup()

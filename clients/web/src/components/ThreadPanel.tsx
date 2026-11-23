@@ -41,7 +41,7 @@ import {
   LINKED_THREAD_ROOT_MISSING,
   LinkedEventNotice,
 } from './LinkedEventNotice'
-import { Fragment } from 'preact'
+import { Fragment, type ComponentChildren } from 'preact'
 import { MediaViewerProvider } from '../media/media-viewer'
 import { MediaGalleryRow } from './MediaGalleryRow'
 import { sameLocalDay } from '../calendar-day'
@@ -143,6 +143,7 @@ export function ThreadPanel({
   onOpenUser,
   covered = false,
   highlightedEventId = null,
+  identityWarning,
 }: {
   accountId: string
   roomId: string
@@ -182,6 +183,7 @@ export function ThreadPanel({
   covered?: boolean
   /** An event in this thread to fetch, reveal, and highlight. */
   highlightedEventId?: string | null
+  identityWarning?: ComponentChildren
 }) {
   const {
     api,
@@ -963,6 +965,7 @@ export function ThreadPanel({
         )}
       </div>
 
+      {identityWarning}
       <Composer
         placeholder="Reply in thread"
         autoFocus

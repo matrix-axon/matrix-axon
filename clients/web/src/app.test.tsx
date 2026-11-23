@@ -26,6 +26,7 @@ import type { Account } from './stores/accounts'
 import type { EventDto } from './stores/timeline'
 import { discoveredRoom, roomDiscovery } from './test/room-details'
 import { memoryStorage } from './test/memory-storage'
+import { emptyRoomInfoHandler } from './test/room-details'
 import { TEST_BASE_URL, UNKNOWN_BACKUP, testServices } from './test/services'
 import { createIncomingShareStore } from './incoming-share/store'
 import type { IncomingShare } from './incoming-share/types'
@@ -48,6 +49,7 @@ const ACCOUNT_DTO: Account = {
 }
 
 const server = setupServer(
+  emptyRoomInfoHandler(TEST_BASE_URL),
   http.get(`${TEST_BASE_URL}/v1/accounts`, () =>
     HttpResponse.json({ data: [ACCOUNT_DTO] }),
   ),

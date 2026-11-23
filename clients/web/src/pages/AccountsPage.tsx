@@ -8,6 +8,7 @@ import {
   enableBackupNotice,
   recoverHonestyNotice,
 } from '../backup'
+import { OWN_IDENTITY_WARNING } from '../components/AccountTrustActions'
 import { CopyableText } from '../components/CopyableText'
 import { ErrorBanner } from '../components/ErrorBanner'
 import { NoticeBanner, type Notice } from '../components/NoticeBanner'
@@ -33,6 +34,7 @@ import { MatrixOAuthQrGrant } from './accounts/MatrixOAuthQrGrant'
  * switch persisted in settings.
  */
 export function AccountsPage() {
+  const { query } = useLocation()
   const { accounts, matrixOAuthQr, matrixOAuthBrowser } = useServices()
   const [acquisition, setAcquisition] = useState<{
     reactivation: Account | null
@@ -116,6 +118,7 @@ export function AccountsPage() {
             <AccountCard
               key={account.account_id}
               account={account}
+              openRecovery={query.recover === account.account_id}
               onReactivate={beginReactivation}
             />
           ))}
@@ -201,9 +204,11 @@ function SyncBadge({ account }: { account: Account }) {
 
 function AccountCard({
   account,
+  openRecovery,
   onReactivate,
 }: {
   account: Account
+  openRecovery: boolean
   onReactivate: (account: Account) => void
 }) {
   const { accounts, settings, api, verification } = useServices()
@@ -212,6 +217,16 @@ function AccountCard({
     null,
   )
   const [secretKey, setSecretKey] = useState('')
+  const recoveryInput = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    if (openRecovery) {
+      setSecretForm('recover')
+      setSecretKey('')
+    }
+  }, [openRecovery])
+  useEffect(() => {
+    if (openRecovery && secretForm === 'recover') recoveryInput.current?.focus()
+  }, [openRecovery, secretForm])
   const [displayName, setDisplayName] = useState<string | null>(null)
   // Per-card recover / enable outcome, held in a signal so it survives the
   // form closing on success; `NoticeBanner` reads and dismisses it (same idiom
@@ -366,6 +381,12 @@ function AccountCard({
         </div>
       )}
 
+      {account.state === 'active' && account.own_identity_changed === true && (
+        <p class="trust-warning" role="status">
+          {OWN_IDENTITY_WARNING}
+        </p>
+      )}
+
       <div class="card-actions">
         {account.state === 'deactivated' && (
           <button
@@ -500,6 +521,7 @@ function AccountCard({
             <label>
               Recovery key
               <input
+                ref={recoveryInput}
                 type="password"
                 value={secretKey}
                 placeholder="EsTc …"

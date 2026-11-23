@@ -12,6 +12,7 @@ import {
   vi,
 } from 'vitest'
 import { ServicesContext } from '../services'
+import { emptyRoomInfoHandler } from '../test/room-details'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { RoomPage } from './RoomPage'
 
@@ -20,6 +21,7 @@ const ROOM_A = '!a:hs'
 const ROOM_B = '!b:hs'
 
 const server = setupServer(
+  emptyRoomInfoHandler(TEST_BASE_URL),
   http.get(`${TEST_BASE_URL}/v1/invites`, () =>
     HttpResponse.json({ data: [] }),
   ),

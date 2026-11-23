@@ -13,7 +13,7 @@ export type EventDto = components['schemas']['EventDto']
  * `sender_trust.violation`, `device_state.changed`, `ephemeral.passthrough`,
  * `unread_counts.changed`, `room_display_name.changed`, `invite.added`,
  * `invite.removed`, `account_data.changed`, `preferences.changed`,
- * `room_details.changed`, `heartbeat`.
+ * `room_details.changed`, `account.own_identity_changed`, `heartbeat`.
  */
 export interface LiveFrame {
   /** Namespaced tag, e.g. `timeline.event`. */
@@ -44,6 +44,9 @@ export const ROOM_DISPLAY_NAME_CHANGED = 'room_display_name.changed'
  * (`ws.rs` `ROOM_DETAILS_CHANGED`, ADR 0126 decision 5).
  */
 export const ROOM_DETAILS_CHANGED = 'room_details.changed'
+
+/** An account's master key was replaced or its identity warning cleared. */
+export const ACCOUNT_OWN_IDENTITY_CHANGED = 'account.own_identity_changed'
 
 /** The `type` tag for a newly persisted pending invite (ADR 0091). */
 export const INVITE_ADDED = 'invite.added'
@@ -130,7 +133,7 @@ export interface RoomDisplayNameChange {
  * § Change notification). Each names one endpoint to re-read:
  *
  * - `metadata`: `GET …/metadata`
- * - `member_counts`: `GET …/info`
+ * - `member_counts` and `identity_changes`: `GET …/info`
  * - `homeserver_details`: `GET …/homeserver_details`
  * - `space_hierarchy`: `GET …/space/hierarchy` (the frame's room is the space)
  * - `discovery`: `GET …/discovery` (the frame's room is the unjoined room)
@@ -138,6 +141,7 @@ export interface RoomDisplayNameChange {
 export type RoomDetailSource =
   | 'metadata'
   | 'member_counts'
+  | 'identity_changes'
   | 'homeserver_details'
   | 'space_hierarchy'
   | 'discovery'
@@ -145,6 +149,7 @@ export type RoomDetailSource =
 const ROOM_DETAIL_SOURCES: ReadonlySet<string> = new Set<RoomDetailSource>([
   'metadata',
   'member_counts',
+  'identity_changes',
   'homeserver_details',
   'space_hierarchy',
   'discovery',
