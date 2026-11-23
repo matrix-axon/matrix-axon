@@ -38,10 +38,11 @@ concurrency:
 jobs:
   native:
     runs-on: xcode-27
-    # Observed passing runs take 16-30 min; leave room for one xcodegen retry and for
-    # both simulator phases using their 15 minutes each on a slow runner. A job that
-    # times out is cancelled, which skips the step that keeps the diagnostics.
-    timeout-minutes: 55
+    # Observed passing runs take 16-35 min; leave room for one xcodegen retry and for the
+    # simulator phases running long on a slow runner (15 minutes for the unit phase, 25
+    # for the UI phase). A job that times out is cancelled, which skips the step that
+    # keeps the diagnostics.
+    timeout-minutes: 65
     steps:
       - uses: actions/checkout@v7
       # The Xcode is chosen, as the store and launch-check jobs choose it, and not left to

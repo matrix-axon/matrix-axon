@@ -297,7 +297,10 @@ try {
     900_000,
   )
   // Eight UI scenarios plus their build, simulator launches, and result-bundle
-  // finalization exceeded ten minutes on CI even though every test passed.
+  // finalization exceeded ten minutes on CI even though every test passed, and on a
+  // slow Xcode 27.2 runner fifteen: seven had passed and the eighth, the longest at
+  // about four minutes, was running when the cap killed it. A green run takes about
+  // 13 and a half, so this leaves room for a slower one.
   run(
     'xcodebuild',
     [
@@ -314,7 +317,7 @@ try {
       join(output, 'activation.xcresult'),
       'CODE_SIGNING_ALLOWED=NO',
     ],
-    900_000,
+    1_500_000,
   )
 } catch (error) {
   keepDiagnostics()
