@@ -31,6 +31,11 @@ import { markdownCodeRanges } from '../markdown/markdown'
 import { MESSAGE_TOUCH_HOLD_MS } from '../gestures'
 import { SINGLE_PANE_QUERY, useMediaQuery } from '../layout'
 import { needsCameraCaptureButtons } from '../platform'
+import {
+  canFallBackToClipboardImage,
+  readClipboardImage,
+  supportsNativeImagePaste,
+} from '../platform/clipboard-image'
 import { humanSize } from '../media/human-size'
 import {
   applyFormatEdit,
@@ -397,6 +402,15 @@ export function Composer({
   /** The edit seed the cards were last reset with. */
   const syncedSeed = useRef(linkPreviews?.edit?.seed)
   const textarea = useRef<HTMLTextAreaElement>(null)
+  const clipboardPaste = useRef<Promise<File | null> | null>(null)
+  const [pastingImage, setPastingImage] = useState(false)
+  // A late clipboard reply belongs to the attachment scope that requested it.
+  useLayoutEffect(() => {
+    setPastingImage(false)
+    return () => {
+      clipboardPaste.current = null
+    }
+  }, [onAttach])
   const fileInput = useRef<HTMLInputElement>(null)
   const photoInput = useRef<HTMLInputElement>(null)
   const videoInput = useRef<HTMLInputElement>(null)
@@ -1045,8 +1059,29 @@ export function Composer({
     }
   }
 
+  const pasteNativeImage = (attach: NonNullable<typeof onAttach>) => {
+    if (clipboardPaste.current !== null) return
+
+    const pending = readClipboardImage()
+    clipboardPaste.current = pending
+    setPastingImage(true)
+    void pending
+      .then((file) => {
+        if (clipboardPaste.current === pending && file !== null) {
+          attach([file])
+        }
+      })
+      .catch(() => console.warn('Could not attach the clipboard image'))
+      .finally(() => {
+        if (clipboardPaste.current === pending) {
+          clipboardPaste.current = null
+          setPastingImage(false)
+        }
+      })
+  }
+
   const submit = (allowUnmarked = false) => {
-    if (markerCheck.current) return
+    if (markerCheck.current || clipboardPaste.current !== null) return
     convertedEmoji.current = null
     if (stickerLookup.current !== null) {
       setStickerProblem(
@@ -1698,25 +1733,33 @@ export function Composer({
             }}
             onPaste={(event) => {
               convertedEmoji.current = null
-              // A pasted screenshot arrives as a file on the clipboard. Claim
-              // the event *only* when one is actually there — an ordinary text
-              // paste must still land in the field.
-              //
-              // The whole list is handed over, N or 1. Measured in Chromium: a
-              // web-page multi-image copy delivers *no* files at all (ADR
-              // 0081), so this rarely sees more than one — but the staging
-              // hook takes whatever arrives and the caps live there.
-              const pastedFiles = event.clipboardData?.files
-              if (
-                pastedFiles !== undefined &&
-                pastedFiles.length > 0 &&
-                onAttach !== undefined
-              ) {
+              const clipboard = event.clipboardData
+              const nativeImagePaste =
+                event.isTrusted && supportsNativeImagePaste()
+              let files: FileList | File[] | undefined = clipboard?.files
+              if (nativeImagePaste && files?.length) {
+                // Some WebKitGTK versions expose an image placeholder with no
+                // bytes. Keep any usable files from the same paste.
+                files = Array.from(files).filter(
+                  (file) => file.size > 0 || !file.type.startsWith('image/'),
+                )
+              }
+              if (onAttach !== undefined && files?.length) {
                 event.preventDefault()
-                onAttach(pastedFiles)
+                onAttach(files)
                 return
               }
-              const pasted = event.clipboardData?.getData?.('text/plain') ?? ''
+              const pasted = clipboard?.getData?.('text/plain') ?? ''
+              if (
+                onAttach !== undefined &&
+                nativeImagePaste &&
+                clipboard != null &&
+                canFallBackToClipboardImage(clipboard, pasted)
+              ) {
+                event.preventDefault()
+                pasteNativeImage(onAttach)
+                return
+              }
               const start = event.currentTarget.selectionStart
               const end = event.currentTarget.selectionEnd
               if (start === end) {
@@ -2058,6 +2101,7 @@ export function Composer({
           title="Send"
           disabled={
             checkingSticker ||
+            pastingImage ||
             (draft.trim() === '' && (attachments?.items.length ?? 0) === 0)
           }
         >

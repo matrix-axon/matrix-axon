@@ -39,7 +39,7 @@
     },
     {
       "identifier": "clipboard-manager:allow-write-text",
-      "comment": "Copy a message's text or an event link when the page's own clipboard write would be refused for lack of a user gesture (the timestamp hold on iOS). Write only: `clipboard-manager:default` also grants read, and nothing here reads the clipboard."
+      "comment": "Copy a message's text or an event link when the page's own clipboard write would be refused for lack of a user gesture (the timestamp hold on iOS). The clipboard-manager plugin is granted text writes only."
     },
     {
       "identifier": "core:webview:allow-set-webview-zoom",

@@ -462,6 +462,10 @@ pnpm tauri build   # release binary + installers
 own produces a binary with no frontend in it, the Linux build dependencies, and
 why the shell is its own cargo workspace rather than a member of the root one.
 
+On Linux, paste a screenshot or copied image directly into a room or thread composer to stage it as an attachment.
+The desktop shell reads image data through GTK when WebKitGTK supplies no usable file.
+Use the paperclip or drag and drop to attach a file from the file manager.
+
 ## Icons
 
 `public/favicon.svg` is the artwork, and it is the master for **both** clients:
