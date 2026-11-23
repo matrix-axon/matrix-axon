@@ -29,6 +29,8 @@ export const API_ROUTES = [
   '/v1/accounts/{account_id}/events/{event_id}/reactions',
   '/v1/accounts/{account_id}/events/{event_id}/replies',
   '/v1/accounts/{account_id}/events/{event_id}/verification',
+  '/v1/accounts/{account_id}/exclude_insecure_devices',
+  '/v1/accounts/{account_id}/exclude_insecure_devices/impact',
   '/v1/accounts/{account_id}/link-previews/generate',
   '/v1/accounts/{account_id}/login-grants/qr',
   '/v1/accounts/{account_id}/login-grants/qr/{flow_id}',
