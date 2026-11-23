@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test'
 import {
   active,
   expectLive,
+  expectRoomReady,
   expectSendsSettled,
   LAST_ROOM_URL,
   openRoom,
@@ -451,4 +452,37 @@ test('the room controls carry their chords as tooltips', async ({
     'title',
     `Hide rooms (${roomsShortcut}); drag or use arrow keys to resize`,
   )
+})
+
+test('Page Up and Page Down scroll the room timeline after a click', async ({
+  page,
+  request,
+}) => {
+  const seed = await request.post('/__e2e/bulk-timeline?count=40')
+  expect(seed.ok()).toBe(true)
+  try {
+    await signIn(page)
+    await page.goto(ROOM_URL)
+    await expectRoomReady(page)
+    const timeline = page.locator('.room-stream > .timeline')
+    // Click plain text in the middle of the seeded history so the timeline
+    // can scroll in both directions after the browser chooses its focus target.
+    const message = timeline.getByText('Bulk message 20', { exact: true })
+    await message.evaluate((element) => {
+      element.scrollIntoView({ block: 'center', behavior: 'instant' })
+    })
+    await message.click()
+    await expect(timeline).toBeFocused()
+    const scrollTop = () => timeline.evaluate((element) => element.scrollTop)
+    const start = await scrollTop()
+
+    await page.keyboard.press('PageUp')
+    await expect.poll(scrollTop).toBeLessThan(start - 100)
+    const afterPageUp = await scrollTop()
+
+    await page.keyboard.press('PageDown')
+    await expect.poll(scrollTop).toBeGreaterThan(afterPageUp + 100)
+  } finally {
+    await request.post('/__e2e/bulk-timeline?count=0')
+  }
 })
