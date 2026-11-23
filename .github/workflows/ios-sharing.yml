@@ -36,10 +36,18 @@ concurrency:
 jobs:
   native:
     runs-on: xcode-27
-    # Observed passing runs take 16-24 min; leave room for one xcodegen retry.
-    timeout-minutes: 40
+    # Observed passing runs take 16-30 min; leave room for one xcodegen retry and for
+    # both simulator phases using their 15 minutes each on a slow runner. A job that
+    # times out is cancelled, which skips the step that keeps the diagnostics.
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v7
+      # The Xcode is chosen, as the store and launch-check jobs choose it, and not left to
+      # whichever the runner image defaults to. The default, 27.1, offered one iPhone
+      # simulator, the Duo, whose short screen scrolls the composer's header away; the
+      # launch check on 27.2 ran on a standard-size iPhone.
+      - name: Select an Xcode with the iOS 26 SDK, system-wide as well
+        run: scripts/ci/store-credentials.sh xcode --min-sdk 26
       - uses: actions/setup-node@v6
         with:
           node-version: 24
