@@ -7,10 +7,13 @@
 # builds it for the team cannot run Xcode 27. See scripts/ci/ios-launch-check.sh.
 #
 # It takes about as long as the store build and is not a gate. It runs by hand, and on a
-# pull request that changes this workflow or its script, once on each runner so the
-# newer Xcode has an older one to be compared with. (GitHub dispatches only workflows
-# that exist on the default branch, so the pull request is how a new one first runs.)
-# It needs no signing material: the simulator build is unsigned.
+# pull request that changes this workflow, its script or the minimum iOS: once on each
+# runner so the newer Xcode has an older one to be compared with, and once more with the
+# newer Xcode's build launched on the oldest iOS the app claims to support
+# (bundle.iOS.minimumSystemVersion), which is what keeping that claim honest needs.
+# (GitHub dispatches only workflows that exist on the default branch, so the pull
+# request is how a new one first runs.) It needs no signing material: the simulator
+# build is unsigned.
 
 name: iOS launch check
 
@@ -24,10 +27,17 @@ on:
           - xcode-27
           - macos-26
         default: xcode-27
+      ios:
+        description: "iOS to launch on, such as 26.0 (downloaded if not installed); empty for the SDK's own"
+        type: string
+        default: ""
   pull_request:
     paths:
       - scripts/ci/ios-launch-check.sh
       - .github/workflows/ios-launch-check.yml
+      - clients/web/scripts/ios-minimum-version.mjs
+      - clients/web/scripts/configure-ios-sharing.mjs
+      - clients/web/src-tauri/tauri.conf.json
 
 permissions:
   contents: read
@@ -42,16 +52,17 @@ env:
 
 jobs:
   launch:
-    name: Build and launch the app in the iOS simulator (${{ matrix.runner }})
+    name: Build and launch the app in the iOS simulator (${{ matrix.runner }}${{ matrix.ios && format(', on iOS {0}', matrix.ios) || '' }})
     strategy:
       fail-fast: false
       matrix:
-        runner: >-
+        include: >-
           ${{ github.event_name == 'workflow_dispatch'
-          && fromJson(format('["{0}"]', inputs.runner))
-          || fromJson('["xcode-27","macos-26"]') }}
+          && fromJson(format('[{{"runner":"{0}","ios":"{1}"}}]', inputs.runner, inputs.ios))
+          || fromJson('[{"runner":"xcode-27","ios":""},{"runner":"macos-26","ios":""},{"runner":"xcode-27","ios":"26.0"}]') }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    # The build is about 25 minutes; downloading an older simulator runtime adds more.
+    timeout-minutes: 80
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -134,13 +145,14 @@ jobs:
       - name: Build, install and launch the app
         env:
           AXON_LAUNCH_DIAGNOSTICS: ${{ runner.temp }}/ios-launch-diagnostics
+          LAUNCH_CHECK_IOS: ${{ matrix.ios }}
         run: scripts/ci/ios-launch-check.sh
 
       - name: Keep the launch results
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: ios-launch-check-${{ matrix.runner }}
+          name: ios-launch-check-${{ matrix.runner }}${{ matrix.ios && format('-ios{0}', matrix.ios) || '' }}
           path: ${{ runner.temp }}/ios-launch-diagnostics
           if-no-files-found: ignore
           retention-days: 7
