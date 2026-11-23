@@ -7,6 +7,12 @@
 // is an inset sheet with no navigation bar in view, so four photo-composer tests
 // failed to find Cancel or Send while the app itself was working. So a standard
 // model is preferred, and anything unfamiliar is a last resort.
+//
+// scripts/ci/ios-launch-check.sh chooses its simulator the same way, through the
+// `pick` command at the bottom of this file, so there is one ranking and it is tested.
+
+import { execFileSync } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
 
 /** 0 for "iPhone 17 Pro" style names, up to 3 for a model these tests were not made for. */
 export const rankDevice = (name) => {
@@ -64,4 +70,81 @@ export const createStandardPhone = ({ runtime, exec, log = console }) => {
     log.warn(`Could not create a standard iPhone simulator: ${error.message}`)
     return undefined
   }
+}
+
+const majorMinor = (version) => version.split('.').slice(0, 2).join('.')
+
+/**
+ * Where to launch on iOS `want`: the most standard iPhone already installed on any
+ * runtime of that version, or else a device type to make one from. More than one
+ * runtime can share a version: the Xcode 27.2 image has iOS-27-2 and, listed first,
+ * iOS-27-2-iPhone19-4, which is for the iPhone Duo alone, so choosing across all of
+ * them is what keeps the Duo from being taken because it came first.
+ *
+ * `runtimes` and `devices` are the objects `simctl list runtimes -j` and
+ * `simctl list devices available -j` hold. Returns one of
+ * { kind: 'device', udid, name }, { kind: 'create', type, runtime, name }, { kind: 'none' }.
+ */
+export const pickSimulator = ({ runtimes, devices, want }) => {
+  const matching = runtimes.filter(
+    (runtime) =>
+      runtime.isAvailable !== false &&
+      runtime.identifier?.startsWith(
+        'com.apple.CoreSimulator.SimRuntime.iOS',
+      ) &&
+      majorMinor(runtime.version) === majorMinor(want),
+  )
+  const installed = pickPhone(
+    matching.flatMap((runtime) =>
+      (devices[runtime.identifier] ?? []).filter((device) =>
+        device.name.startsWith('iPhone'),
+      ),
+    ),
+  )
+  if (installed)
+    return { kind: 'device', udid: installed.udid, name: installed.name }
+  const type = pickPhone(
+    matching.flatMap((runtime) =>
+      (runtime.supportedDeviceTypes ?? [])
+        .filter((candidate) => candidate.name.startsWith('iPhone'))
+        .map((candidate) => ({ ...candidate, runtime: runtime.identifier })),
+    ),
+  )
+  if (type)
+    return {
+      kind: 'create',
+      type: type.identifier,
+      runtime: type.runtime,
+      name: type.name,
+    }
+  return { kind: 'none' }
+}
+
+// `node sharing-simulator-device.mjs pick 26.0` asks the simulators installed here and
+// prints "device <udid> <name>", "create <type> <runtime> <name>" or "none".
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href &&
+  process.argv[2] === 'pick'
+) {
+  const simctl = (...args) =>
+    JSON.parse(
+      execFileSync('xcrun', ['simctl', ...args, '-j'], {
+        encoding: 'utf8',
+        timeout: 60_000,
+        maxBuffer: 32 * 1024 * 1024,
+      }),
+    )
+  const pick = pickSimulator({
+    runtimes: simctl('list', 'runtimes').runtimes,
+    devices: simctl('list', 'devices', 'available').devices,
+    want: process.argv[3] ?? '',
+  })
+  console.log(
+    pick.kind === 'device'
+      ? `device ${pick.udid} ${pick.name}`
+      : pick.kind === 'create'
+        ? `create ${pick.type} ${pick.runtime} ${pick.name}`
+        : 'none',
+  )
 }

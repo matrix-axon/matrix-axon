@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   createStandardPhone,
   pickPhone,
+  pickSimulator,
   rankDevice,
 } from './sharing-simulator-device.mjs'
 
@@ -149,5 +150,108 @@ test('a simctl that refuses to create, or to list, leaves the caller its own dev
       },
     }),
     undefined,
+  )
+})
+
+// The Xcode 27.2 runner image, as `simctl` listed it: two runtimes of the same version,
+// the Duo's first, and a 26.0 runtime only after it is downloaded.
+const runtime = (identifier, version, types = [], extra = {}) => ({
+  identifier: `com.apple.CoreSimulator.SimRuntime.${identifier}`,
+  version,
+  isAvailable: true,
+  supportedDeviceTypes: types.map((name) => ({
+    name,
+    identifier: `type.${name.replaceAll(' ', '-')}`,
+  })),
+  ...extra,
+})
+const runner = {
+  runtimes: [
+    runtime('iOS-26-0', '26.0', ['iPhone 17 Pro', 'iPhone 17']),
+    runtime('iOS-27-1', '27.1', ['iPhone Duo']),
+    runtime('iOS-27-2-iPhone19-4', '27.2', ['iPhone Duo']),
+    runtime('iOS-27-2', '27.2', ['iPhone 18 Pro', 'iPhone 17', 'iPhone Duo']),
+    runtime('tvOS-27-2', '27.2', ['Apple TV']),
+  ],
+  devices: {
+    'com.apple.CoreSimulator.SimRuntime.iOS-27-1': [device('iPhone Duo')],
+    'com.apple.CoreSimulator.SimRuntime.iOS-27-2-iPhone19-4': [
+      device('iPhone Duo'),
+    ],
+    'com.apple.CoreSimulator.SimRuntime.iOS-27-2': [
+      device('iPhone Duo'),
+      device('iPhone 17'),
+      device('iPhone 18 Pro'),
+    ],
+  },
+}
+
+test('two runtimes share a version: the standard phone on one beats the Duo on the other', () => {
+  const picked = pickSimulator({ ...runner, want: '27.2' })
+  assert.deepEqual(picked, {
+    kind: 'device',
+    udid: 'udid-iPhone 18 Pro',
+    name: 'iPhone 18 Pro',
+  })
+  // The Duo's runtime being first must not matter.
+  const reversed = {
+    ...runner,
+    runtimes: [...runner.runtimes].reverse(),
+  }
+  assert.equal(
+    pickSimulator({ ...reversed, want: '27.2' }).name,
+    'iPhone 18 Pro',
+  )
+})
+
+test('a runtime that offers only the Duo gets the Duo', () => {
+  assert.equal(pickSimulator({ ...runner, want: '27.1' }).name, 'iPhone Duo')
+})
+
+test('a runtime with no devices yet gets a standard one made from its types', () => {
+  assert.deepEqual(pickSimulator({ ...runner, want: '26.0' }), {
+    kind: 'create',
+    type: 'type.iPhone-17-Pro',
+    runtime: 'com.apple.CoreSimulator.SimRuntime.iOS-26-0',
+    name: 'iPhone 17 Pro',
+  })
+})
+
+test('a version with no runtime, an unavailable one, or another platform, is none', () => {
+  assert.deepEqual(pickSimulator({ ...runner, want: '99.9' }), { kind: 'none' })
+  assert.deepEqual(
+    pickSimulator({
+      devices: {},
+      want: '26.0',
+      runtimes: [
+        runtime('iOS-26-0', '26.0', ['iPhone 17 Pro'], { isAvailable: false }),
+      ],
+    }),
+    { kind: 'none' },
+  )
+  assert.deepEqual(pickSimulator({ ...runner, want: '27.2' }).kind, 'device')
+  // tvOS 27.2 shares the version number and must not be taken for iOS.
+  assert.deepEqual(
+    pickSimulator({
+      devices: {},
+      want: '27.2',
+      runtimes: [runtime('tvOS-27-2', '27.2', ['iPhone 17 Pro'])],
+    }),
+    { kind: 'none' },
+  )
+})
+
+test('a patch release matches its major.minor', () => {
+  assert.equal(
+    pickSimulator({
+      devices: {
+        'com.apple.CoreSimulator.SimRuntime.iOS-26-0': [
+          device('iPhone 17 Pro'),
+        ],
+      },
+      runtimes: [runtime('iOS-26-0', '26.0.1', ['iPhone 17 Pro'])],
+      want: '26.0',
+    }).name,
+    'iPhone 17 Pro',
   )
 })

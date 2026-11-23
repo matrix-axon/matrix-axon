@@ -36,6 +36,7 @@ on:
       - scripts/ci/ios-launch-check.sh
       - .github/workflows/ios-launch-check.yml
       - clients/web/scripts/ios-minimum-version.mjs
+      - clients/web/scripts/sharing-simulator-device.mjs
       - clients/web/scripts/configure-ios-sharing.mjs
       - clients/web/src-tauri/tauri.conf.json
 

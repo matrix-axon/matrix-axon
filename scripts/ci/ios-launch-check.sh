@@ -178,50 +178,10 @@ target_ios=${LAUNCH_CHECK_IOS:-$sdk}
 note "installed simulator runtimes"
 xcrun simctl list runtimes | sed 's/^/    /'
 
-# Prints "device <udid> <name>", "create <type> <runtime> <name>" or "none".
-pick_simulator() {
-  python3 - "$target_ios" <<'PY'
-import json, re, subprocess, sys
-
-want = ".".join(sys.argv[1].split(".")[:2])
-
-def simctl(*args):
-    return json.loads(subprocess.check_output(["xcrun", "simctl", *args, "-j"]))
-
-def rank(name):
-    if re.fullmatch(r"iPhone \d+ Pro", name): return 0
-    if re.fullmatch(r"iPhone \d+", name): return 1
-    if re.match(r"iPhone \d+", name): return 2
-    return 3
-
-def model(name):
-    found = re.match(r"iPhone (\d+)", name)
-    return int(found.group(1)) if found else 0
-
-runtimes = [
-    r for r in simctl("list", "runtimes")["runtimes"]
-    if r.get("isAvailable", True)
-    and ".".join(r["version"].split(".")[:2]) == want
-    and r.get("identifier", "").startswith("com.apple.CoreSimulator.SimRuntime.iOS")
-]
-if not runtimes:
-    print("none")
-    sys.exit()
-runtime = runtimes[0]
-devices = simctl("list", "devices", "available")["devices"].get(runtime["identifier"], [])
-phones = [d for d in devices if d["name"].startswith("iPhone")]
-if phones:
-    best = min(phones, key=lambda d: (rank(d["name"]), d["state"] != "Booted", -model(d["name"])))
-    print("device", best["udid"], best["name"])
-    sys.exit()
-types = [t for t in runtime.get("supportedDeviceTypes", []) if t["name"].startswith("iPhone")]
-if types:
-    best = min(types, key=lambda t: (rank(t["name"]), -model(t["name"])))
-    print("create", best["identifier"], runtime["identifier"], best["name"])
-    sys.exit()
-print("none")
-PY
-}
+# Prints "device <udid> <name>", "create <type> <runtime> <name>" or "none". The choice,
+# and the tests of it, are in sharing-simulator-device.mjs, which the share-sheet UI tests
+# use too: a standard phone model on any runtime of the version, not the first runtime's.
+pick_simulator() { node "$web_dir/scripts/sharing-simulator-device.mjs" pick "$target_ios"; }
 
 choice=$(pick_simulator)
 if [ "${choice%% *}" = none ] && [ -n "${LAUNCH_CHECK_IOS:-}" ]; then
@@ -255,18 +215,29 @@ keep_simulator_diagnostics() {
   echo "$facts" >"$diagnostics/app-facts.txt"
   xcrun simctl list devices >"$diagnostics/simulators.txt" 2>&1 || true
   xcrun simctl list runtimes >>"$diagnostics/simulators.txt" 2>&1 || true
+  # What bootstatus said while it waited names the stage that never finished.
+  cp "$bootstatus_log" "$diagnostics/bootstatus.log" 2>/dev/null || true
   tail -n 4000 "$HOME/Library/Logs/CoreSimulator/$udid/system.log" >"$diagnostics/simulator-boot.log" 2>/dev/null || true
+  # The host's own log of CoreSimulator and the simulator's launchd, which is where a
+  # simulator that came up as a device but never started its services shows why.
+  with_timeout 180 log show --last 45m --style compact \
+    --predicate 'subsystem BEGINSWITH "com.apple.CoreSimulator" OR process == "launchd_sim" OR process == "CoreSimulatorService"' \
+    2>/dev/null | tail -n 500 >"$diagnostics/coresimulator-host.log" || true
   find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -type f \( -name '*.ips' -o -name '*.crash' \) -newer "$started_marker" 2>/dev/null \
     | while IFS= read -r report; do mkdir -p "$diagnostics/crash-reports"; cp "$report" "$diagnostics/crash-reports/"; done
 }
 
 # The first boot of a runtime migrates its data, which the UI-test script gives ten
-# minutes; this allows fifteen, and no more, because a simulator that is going to boot
-# has by then.
-boot_seconds=${LAUNCH_CHECK_BOOT_SECONDS:-900}
+# minutes. A runtime downloaded a moment ago has never booted here, and the first
+# attempt on one, an iOS 26.0 simulator on the Xcode 27.2 image, did not finish in
+# fifteen with the device already reported Booted, so it is allowed forty.
+if [ -n "${LAUNCH_CHECK_IOS:-}" ]; then boot_default=2400; else boot_default=900; fi
+boot_seconds=${LAUNCH_CHECK_BOOT_SECONDS:-$boot_default}
+bootstatus_log="$noop_bin/bootstatus.log"
 touch "$started_marker"
 xcrun simctl boot "$udid" 2>/dev/null || true
-if ! with_timeout "$boot_seconds" xcrun simctl bootstatus "$udid" -b >/dev/null; then
+# bootstatus says which stage it is waiting for; that goes in the log and is kept.
+if ! with_timeout "$boot_seconds" xcrun simctl bootstatus "$udid" -b 2>&1 | tee "$bootstatus_log"; then
   keep_simulator_diagnostics
   die "the $sim_name simulator on iOS $target_ios did not finish booting within ${boot_seconds}s" 1
 fi
