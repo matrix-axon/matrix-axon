@@ -147,8 +147,9 @@ jobs:
 Each comment stands in for the real expression, which this page cannot spell out: the site's Jekyll build would read the expression delimiters as Liquid (`scripts/check-liquid.sh`).
 
 The caller passes the picker exactly one secret, by name, rather than `secrets: inherit`, which would hand it every repository secret.
-The App's ID is not a secret.
-It lives in the repository variable `RUNNER_PICKER_APP_ID`, which the called workflow reads directly.
+The App's client ID is not a secret.
+It lives in the repository variable `RUNNER_PICKER_CLIENT_ID`, which the called workflow reads directly.
+(This ADR first named the variable `RUNNER_PICKER_APP_ID`. `create-github-app-token` v3 deprecates the App ID in favour of the client ID, so the pilot stores that instead.)
 
 `outputs.linux` is either `["self-hosted","axon-linux"]` or the job's hosted Linux image.
 `outputs.macos` is either `["self-hosted","axon-macos"]` or the job's hosted macOS image.
@@ -189,8 +190,8 @@ Third-party actions that do this exist (for example `mikehardy/runner-fallback-a
 The App is installed on the org with read access to self-hosted runners (the "runners and runner groups" permission) and to this repository's Actions.
 The picker mints a one-hour token on each run with `actions/create-github-app-token`.
 The App's private key is the repository secret `RUNNER_PICKER_PRIVATE_KEY`, so fork PRs and Dependabot never see it.
-The App's ID is not secret and is the repository variable `RUNNER_PICKER_APP_ID` (decision 1).
-If the ID is stored as a secret instead, the variable is empty, the token cannot be minted, and every job falls back to hosted runners.
+The App's client ID is not secret and is the repository variable `RUNNER_PICKER_CLIENT_ID` (decision 1).
+If the client ID is stored as a secret instead, the variable is empty, the token cannot be minted, and every job falls back to hosted runners.
 
 We chose an App because, once it is set up, nobody has to maintain it.
 
@@ -211,7 +212,7 @@ What decided it is how the picker fails: when the token stops working, every job
 Nothing turns red, so an expired PAT would show up only as CI getting slower.
 A fine-grained PAT stays the fallback if the App ever cannot be used.
 
-Whatever the token, the picker emits a `::warning::` annotation when the runners API rejects it (401 or 403), or when the secret or the App ID variable is missing on an event that passed decision 1's check 2.
+Whatever the token, the picker emits a `::warning::` annotation when the runners API rejects it (401 or 403), or when the secret or the client ID variable is missing on an event that passed decision 1's check 2.
 Dependabot runs never reach that check (decision 1, check 2), so they cannot raise a false warning.
 A broken token then shows on every run's summary.
 An offline or busy runner is the normal case and gets no warning.
@@ -413,7 +414,8 @@ A dedicated machine or VM comes first if either of these ever changes:
    Builds compete with development work for the same CPU and memory, so the pilot also records whether that hurts either side.
    Run it for about a week.
    For each run, record which pool the picker chose, why, the queue time, and the job time.
-   The picker writes all of this to its step summary.
+   The picker writes its choice and the reason to its step summary.
+   The queue and job times come from the jobs API (`gh api .../actions/runs/<id>/jobs`), which also names the runner each job ran on.
 3. **The remaining jobs in decision 5**, in a few PRs grouped by the decision 6 changes they need:
    - jobs that need no Docker: `ios-sharing`, `desktop-build` `checks`, and `android-build` once the runner account has its SDK;
    - jobs that need Docker, after the runner account's rootless daemon is in place.

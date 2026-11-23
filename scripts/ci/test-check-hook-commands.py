@@ -330,6 +330,7 @@ class Agreement(unittest.TestCase):
             """\
             jobs:
               lint-and-test:
+                if: ${{ !cancelled() }}
                 steps:
                   - name: Check formatting
                     if: steps.rust-changed.outputs.changed == 'true'
@@ -575,6 +576,46 @@ class Agreement(unittest.TestCase):
             write_repo(root, config, {checker.CROSS: body})
             self.assertEqual(checker.check(root, spec), [])
             (root / checker.CROSS).write_text(body.replace(checker.CROSS_JOB_IF, "false"), encoding="utf-8")
+            found = checker.check(root, spec)
+        self.assertTrue(any("if: must be" in problem for problem in found), found)
+
+    def test_lint_job_if_must_not_skip_the_gate(self) -> None:
+        # lint-and-test needs the runner picker (ADR 0141). Only `!cancelled()`
+        # is allowed: no `if` at all would skip the gate whenever the picker job
+        # fails, and a skipped required check passes.
+        step = checker.Step(checker.LINT, checker.LINT_JOB, "Test")
+        spec = self.spec_for(runner={"cargo-test": checker.Run((step,))})
+        config = """\
+        repos:
+          - repo: local
+            hooks:
+              - id: cargo-test
+                entry: cargo test --all
+        """
+        body = workflow(
+            """\
+            jobs:
+              lint-and-test:
+                if: ${{ !cancelled() }}
+                steps:
+                  - name: Test
+                    if: steps.rust-changed.outputs.changed == 'true'
+                    run: python3 scripts/ci/run-hook-entry.py cargo-test
+            """
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_repo(root, config, {checker.LINT: body})
+            self.assertEqual(checker.check(root, spec), [])
+            for replacement in ("${{ false }}", "${{ success() }}"):
+                (root / checker.LINT).write_text(
+                    body.replace(checker.LINT_JOB_IF, replacement), encoding="utf-8"
+                )
+                found = checker.check(root, spec)
+                self.assertTrue(any("if: must be" in problem for problem in found), found)
+            (root / checker.LINT).write_text(
+                body.replace("    if: ${{ !cancelled() }}\n", ""), encoding="utf-8"
+            )
             found = checker.check(root, spec)
         self.assertTrue(any("if: must be" in problem for problem in found), found)
 

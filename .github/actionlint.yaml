@@ -1,4 +1,16 @@
 self-hosted-runner:
+  # The self-hosted runner pools of ADR 0141. Jobs reach them only through
+  # .github/workflows/pick-runner.yml's outputs.
   labels:
-    - "binary-builder"
-    - "api-builder"
+    - "axon-linux"
+    - "axon-macos"
+paths:
+  .github/workflows/pick-runner.yml:
+    ignore:
+      # actions/create-github-app-token@v3 takes `client-id` and deprecates
+      # `app-id`, but actionlint 1.7.12's copy of its inputs predates that.
+      # `app-id` would print a deprecation warning on every run, beside the
+      # picker's own "token broken" warning. Drop these once actionlint knows
+      # `client-id`.
+      - 'input "client-id" is not defined in action "actions/create-github-app-token@v3"'
+      - 'missing input "app-id" which is required by action "actions/create-github-app-token@v3"'

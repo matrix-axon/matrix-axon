@@ -6,6 +6,14 @@ inputs:
     description: "Also verify the runner's Docker daemon is reachable"
     required: false
     default: false
+  require-commands:
+    description: >-
+      Space-separated commands the job needs from the machine rather than from a
+      setup action. GitHub's hosted images ship them all; a self-hosted runner
+      must have them installed (ADR 0141, decision 6). The job fails at once with
+      the list of what is missing, instead of minutes later at the first use.
+    required: false
+    default: ""
 
 runs:
   using: "composite"
@@ -13,6 +21,22 @@ runs:
     - name: test environment
       shell: bash
       run: whoami
+
+    - name: Required commands
+      shell: bash
+      if: ${{ inputs.require-commands != '' }}
+      env:
+        REQUIRED: ${{ inputs.require-commands }}
+      run: |
+        missing=()
+        for c in $REQUIRED; do
+          command -v "$c" >/dev/null 2>&1 || missing+=("$c")
+        done
+        if ((${#missing[@]} > 0)); then
+          echo "::error title=Missing commands::this runner lacks: ${missing[*]}. A self-hosted runner needs them installed; see docs/self-hosted-runners.md."
+          exit 1
+        fi
+        echo "All required commands present: $REQUIRED"
 
     - name: Docker access check
       shell: bash
