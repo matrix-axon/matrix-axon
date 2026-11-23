@@ -27,8 +27,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ADR 0141 pilot: a self-hosted runner when one is free, otherwise ubuntu-latest.
+  # The picker never fails, and `!cancelled()` with the fallback in `runs-on` keeps
+  # this required job running on a hosted runner even if the picker job itself
+  # could not run.
+  pick:
+    uses: ./.github/workflows/pick-runner.yml
+    secrets:
+      RUNNER_PICKER_PRIVATE_KEY: ${{ secrets.RUNNER_PICKER_PRIVATE_KEY }}
+
   lint-and-test:
-    runs-on: ubuntu-latest
+    needs: pick
+    if: ${{ !cancelled() }}
+    runs-on: ${{ fromJSON(needs.pick.outputs.linux || '"ubuntu-latest"') }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -39,6 +50,13 @@ jobs:
 
       - name: check-environment
         uses: ./.github/actions/check-environment
+        with:
+          # What this job takes from the machine. node: bundle-version.sh.
+          # shellcheck: actionlint silently skips its run: checks without it.
+          # jq: the runner script tests. cc, c++, make, cmake, pkg-config: the
+          # native crates (aws-lc-sys, zstd-sys). git and curl: checkout and the
+          # Rust toolchain install.
+          require-commands: git curl jq shellcheck node cc c++ make cmake pkg-config
 
       # CI runs the *hooks*, not second copies of the same checks: the commands
       # and pinned versions are whatever .pre-commit-config.yaml says, so the
@@ -61,7 +79,10 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cache/pre-commit
-          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+          # runner.environment keeps the self-hosted runner's environments, built
+          # against its own Python and system libraries, apart from the hosted ones
+          # (ADR 0141, decision 6).
+          key: pre-commit-${{ runner.environment }}-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
 
       - name: Install pre-commit
         shell: bash
@@ -118,6 +139,15 @@ jobs:
         shell: bash
         run: python -I scripts/ci/test-changed-by-hook.py
 
+      # The runner picker and the self-hosted runners' hook and start check
+      # (ADR 0141). The hook is the fork-PR boundary, so it is tested like code.
+      - name: test runner scripts
+        shell: bash
+        run: |
+          scripts/ci/test-pick-runner.sh
+          scripts/ci/test-runner-job-started.sh
+          scripts/ci/test-runner-preflight.sh
+
       - name: rust-changed
         id: rust-changed
         shell: bash
@@ -141,8 +171,11 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: binary-builder-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: binary-builder-cargo-
+          # A target/ built against the self-hosted machine's system libraries must
+          # not be restored on ubuntu-latest, or the other way round (ADR 0141,
+          # decision 6).
+          key: cargo-${{ runner.environment }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.environment }}-${{ runner.os }}-
 
       # After the toolchain: the script asks cargo for the workspace version.
       # In this job, which is a required check, so a release PR whose
