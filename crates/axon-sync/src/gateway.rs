@@ -979,10 +979,11 @@ async fn send_with_previews_in_room(
         attachment.is_some(),
     )
     .map_err(preview_validation_error)?;
-    message_relates_to(message.relation)?; // Validate before any upload.
-                                           // The attachment too: a kind that does not match its type must fail
-                                           // before a preview image is uploaded, or each retry would upload
-                                           // another orphaned copy of it.
+    // Validate everything before any upload: the relation, and the
+    // attachment too. A kind that does not match its type must fail before a
+    // preview image is uploaded, or each retry would upload another orphaned
+    // copy of it.
+    message_relates_to(message.relation)?;
     let attachment = attachment
         .map(|attachment| {
             if attachment.filename.len() > 1024

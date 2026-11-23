@@ -1397,6 +1397,81 @@ mod tests {
         assert_eq!(sanitize_mime("; codecs=opus"), None);
     }
 
+    /// Whatever follows the first `;` is discarded, so no parameter text,
+    /// however hostile, changes what is served. The essence is everything
+    /// before the first `;`, and `split(';')` need not understand quoting: a
+    /// quote is not a token character, so one before the first `;` fails the
+    /// essence, and one after it is inside the discarded parameters. Every
+    /// combination of up to three hostile pieces is tried after each essence.
+    #[test]
+    fn hostile_parameter_text_never_changes_the_served_essence() {
+        const PIECES: [&str; 12] = [
+            ";",
+            "\"",
+            "\\",
+            "=",
+            " ",
+            "\r\n",
+            "\0",
+            "codecs=\"a;b\"",
+            "Set-Cookie: x",
+            "</script>",
+            "\u{202e}",
+            "é",
+        ];
+        let mut suffixes = vec![String::new()];
+        for _ in 0..3 {
+            let longer: Vec<String> = suffixes
+                .iter()
+                .flat_map(|s| PIECES.iter().map(move |p| format!("{s}{p}")))
+                .collect();
+            suffixes.extend(longer);
+        }
+        suffixes.sort();
+        suffixes.dedup();
+        assert!(suffixes.len() > 1_000, "{}", suffixes.len());
+
+        for (essence, served) in [
+            ("audio/ogg", "audio/ogg"),
+            ("Video/WebM", "video/webm"),
+            ("image/png", "image/png"),
+            ("text/html", "application/octet-stream"),
+            ("image/svg+xml", "application/octet-stream"),
+        ] {
+            for suffix in &suffixes {
+                let declared = format!("{essence};{suffix}");
+                assert_eq!(
+                    sanitize_mime(&declared).as_deref(),
+                    Some(essence.to_ascii_lowercase().as_str()),
+                    "{declared:?}"
+                );
+                let content = json!({
+                    "url": "mxc://example.org/x",
+                    "info": { "mimetype": declared },
+                });
+                assert_eq!(
+                    content_type_for_mxc(&content, "mxc://example.org/x"),
+                    served,
+                    "{declared:?}"
+                );
+            }
+        }
+
+        // A quote or control character inside the essence fails it as a
+        // whole. (Surrounding whitespace, a trailing CRLF included, is
+        // trimmed; only the validated token is ever served.)
+        for broken in [
+            "video/\"mp4\"; codecs=x",
+            "vid\"eo/mp4;x",
+            "video/m\r\np4; x",
+            "video /mp4; x",
+            "video/; x",
+            "/mp4; x",
+        ] {
+            assert_eq!(sanitize_mime(broken), None, "{broken:?}");
+        }
+    }
+
     /// A declared type with parameters, or in another case, is served as its
     /// lowercased essence, so parameterized audio and video stay playable and
     /// stream (ADR 0142 section 1). An unsafe type stays a download however
