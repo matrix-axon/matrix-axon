@@ -251,6 +251,7 @@ name = "axon"
 version = "0.1.0"
 dependencies = [
  "block2",
+ "gtk",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -269,6 +270,7 @@ dependencies = [
  "tauri-plugin-remote-push",
  "tauri-plugin-single-instance",
  "tauri-plugin-websocket",
+ "tokio",
  "webkit2gtk",
  "windows 0.62.2",
  "wry",

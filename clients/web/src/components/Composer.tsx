@@ -31,6 +31,12 @@ import { markdownCodeRanges } from '../markdown/markdown'
 import { MESSAGE_TOUCH_HOLD_MS } from '../gestures'
 import { SINGLE_PANE_QUERY, useMediaQuery } from '../layout'
 import { needsCameraCaptureButtons } from '../platform'
+import {
+  canFallBackToClipboardImage,
+  clipboardImageProblem,
+  readClipboardImage,
+  supportsNativeImagePaste,
+} from '../platform/clipboard-image'
 import { humanSize } from '../media/human-size'
 import {
   applyFormatEdit,
@@ -230,6 +236,7 @@ export function Composer({
   onDraftChange,
   onEditLast,
   attachments,
+  attachmentScope,
   onAttach,
   stickers,
   emoji,
@@ -300,6 +307,8 @@ export function Composer({
    * the edit-mode composer does — an edit replaces text, not media.
    */
   onAttach?(files: FileList | readonly File[]): void
+  /** Scope of the attachment staging bucket. Enables native image paste. */
+  attachmentScope?: string
   stickers?: StickerPickerOptions
   emoji?: Pick<StickerPickerOptions, 'api' | 'accountId' | 'roomId'>
   /** Focus this composer when it first mounts. */
@@ -397,6 +406,22 @@ export function Composer({
   /** The edit seed the cards were last reset with. */
   const syncedSeed = useRef(linkPreviews?.edit?.seed)
   const textarea = useRef<HTMLTextAreaElement>(null)
+  const clipboardPaste = useRef<Promise<File | null> | null>(null)
+  const [pastingImage, setPastingImage] = useState(false)
+  const [pasteProblem, setPasteProblem] = useState<string | null>(null)
+  const attachPastedImage = useRef(onAttach)
+  useLayoutEffect(() => {
+    attachPastedImage.current = onAttach
+  }, [onAttach])
+  const pasteScope = onAttach === undefined ? undefined : attachmentScope
+  // A read may survive a callback change within the same attachment scope.
+  useLayoutEffect(() => {
+    setPastingImage(false)
+    setPasteProblem(null)
+    return () => {
+      clipboardPaste.current = null
+    }
+  }, [pasteScope])
   const fileInput = useRef<HTMLInputElement>(null)
   const photoInput = useRef<HTMLInputElement>(null)
   const videoInput = useRef<HTMLInputElement>(null)
@@ -1045,8 +1070,33 @@ export function Composer({
     }
   }
 
+  const pasteNativeImage = () => {
+    if (clipboardPaste.current !== null) return
+
+    const pending = readClipboardImage()
+    clipboardPaste.current = pending
+    setPastingImage(true)
+    void pending
+      .then((file) => {
+        if (clipboardPaste.current === pending && file !== null) {
+          attachPastedImage.current?.([file])
+        }
+      })
+      .catch((error: unknown) => {
+        if (clipboardPaste.current === pending) {
+          setPasteProblem(clipboardImageProblem(error))
+        }
+      })
+      .finally(() => {
+        if (clipboardPaste.current === pending) {
+          clipboardPaste.current = null
+          setPastingImage(false)
+        }
+      })
+  }
+
   const submit = (allowUnmarked = false) => {
-    if (markerCheck.current) return
+    if (markerCheck.current || clipboardPaste.current !== null) return
     convertedEmoji.current = null
     if (stickerLookup.current !== null) {
       setStickerProblem(
@@ -1055,6 +1105,7 @@ export function Composer({
       return
     }
     setStickerProblem(null)
+    setPasteProblem(null)
     const body = draft.trim()
     // A staged file is itself a message: sending it bare, with no caption, is
     // the common case, so an empty draft is only inert when nothing is attached.
@@ -1698,25 +1749,33 @@ export function Composer({
             }}
             onPaste={(event) => {
               convertedEmoji.current = null
-              // A pasted screenshot arrives as a file on the clipboard. Claim
-              // the event *only* when one is actually there — an ordinary text
-              // paste must still land in the field.
-              //
-              // The whole list is handed over, N or 1. Measured in Chromium: a
-              // web-page multi-image copy delivers *no* files at all (ADR
-              // 0081), so this rarely sees more than one — but the staging
-              // hook takes whatever arrives and the caps live there.
-              const pastedFiles = event.clipboardData?.files
-              if (
-                pastedFiles !== undefined &&
-                pastedFiles.length > 0 &&
-                onAttach !== undefined
-              ) {
+              setPasteProblem(null)
+              const clipboard = event.clipboardData
+              const nativeImagePaste = supportsNativeImagePaste(event)
+              let files: FileList | File[] | undefined = clipboard?.files
+              if (nativeImagePaste && files?.length) {
+                // Some WebKitGTK versions expose an image placeholder with no
+                // bytes. Keep any usable files from the same paste.
+                files = Array.from(files).filter(
+                  (file) => file.size > 0 || !file.type.startsWith('image/'),
+                )
+              }
+              if (onAttach !== undefined && files?.length) {
                 event.preventDefault()
-                onAttach(pastedFiles)
+                onAttach(files)
                 return
               }
-              const pasted = event.clipboardData?.getData?.('text/plain') ?? ''
+              const pasted = clipboard?.getData?.('text/plain') ?? ''
+              if (
+                pasteScope !== undefined &&
+                nativeImagePaste &&
+                clipboard != null &&
+                canFallBackToClipboardImage(clipboard, pasted)
+              ) {
+                event.preventDefault()
+                pasteNativeImage()
+                return
+              }
               const start = event.currentTarget.selectionStart
               const end = event.currentTarget.selectionEnd
               if (start === end) {
@@ -2058,6 +2117,7 @@ export function Composer({
           title="Send"
           disabled={
             checkingSticker ||
+            pastingImage ||
             (draft.trim() === '' && (attachments?.items.length ?? 0) === 0)
           }
         >
@@ -2079,7 +2139,9 @@ export function Composer({
         </button>
       </form>
       {checkingSticker && <p role="status">Checking sticker packs…</p>}
+      {pastingImage && <p role="status">Reading clipboard image…</p>}
       {stickerProblem && <p role="alert">{stickerProblem}</p>}
+      {pasteProblem && <p role="alert">{pasteProblem}</p>}
     </div>
   )
 }

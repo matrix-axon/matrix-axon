@@ -23,6 +23,8 @@
 //! path it cannot open. This process takes the drag at the window instead and
 //! reads the bytes — see `read_dropped_file`.
 
+#[cfg(target_os = "linux")]
+mod clipboard_image;
 mod icon_badge;
 
 /// Wire up and run the shell.
@@ -72,7 +74,12 @@ pub fn run() {
 
     let builder = builder
         .manage(DroppedPaths::default())
-        .invoke_handler(tauri::generate_handler![read_dropped_file, set_icon_badge])
+        .invoke_handler(tauri::generate_handler![
+            read_dropped_file,
+            set_icon_badge,
+            #[cfg(target_os = "linux")]
+            clipboard_image::read_clipboard_image,
+        ])
         // Transport. Both are granted by capability files under
         // `capabilities/`, not here — what the page may reach is
         // security-relevant and belongs somewhere reviewable.

@@ -84,6 +84,9 @@ tauri = { version = "2", features = ["test"] }
 # the same ones `with_webview` hands back rather than a parallel copy.
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = { version = "2", features = ["v2_40"] }
+# Use the same GTK display and clipboard as the WebView.
+gtk = "0.18"
+tokio = { version = "1", features = ["sync", "time"] }
 
 # Reaching AppKit, for the text services a WKWebView app has to switch on
 # itself: spell checking while typing (which autocorrect depends on), and the

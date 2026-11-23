@@ -8,6 +8,7 @@ import {
 } from '@testing-library/preact'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Composer } from './Composer'
+import * as clipboardImage from '../platform/clipboard-image'
 
 const originalMatchMedia = Object.getOwnPropertyDescriptor(window, 'matchMedia')
 const originalTextareaScrollHeight = Object.getOwnPropertyDescriptor(
@@ -1288,6 +1289,123 @@ describe('Composer attachments (M-W8.5, ADR 0065; multi-image ADR 0081)', () => 
 
     expect(onAttach).not.toHaveBeenCalled()
     expect(textPaste.defaultPrevented).toBe(false)
+  })
+
+  describe('Linux clipboard image reads', () => {
+    function pasteImage(textarea: HTMLTextAreaElement) {
+      vi.spyOn(clipboardImage, 'supportsNativeImagePaste').mockReturnValue(true)
+      fireEvent.paste(textarea, {
+        clipboardData: { files: [], types: [], getData: () => '' },
+      })
+    }
+
+    function pendingImage() {
+      let finish!: (file: File) => void
+      vi.spyOn(clipboardImage, 'readClipboardImage').mockReturnValue(
+        new Promise((resolve) => {
+          finish = resolve
+        }),
+      )
+      return finish
+    }
+
+    it('holds the draft and stages the image after the attach callback changes', async () => {
+      const finish = pendingImage()
+      const originalAttach = vi.fn()
+      const onAttach = vi.fn()
+      const props = {
+        attachmentScope: 'room-a',
+        initialValue: 'Caption',
+        onSubmit: vi.fn(async () => true),
+        placeholder: 'Message',
+      }
+      const { getByRole, queryByRole, rerender } = render(
+        <Composer {...props} onAttach={originalAttach} />,
+      )
+      const textarea = getByRole('textbox') as HTMLTextAreaElement
+
+      pasteImage(textarea)
+      rerender(<Composer {...props} onAttach={onAttach} />)
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+      expect(props.onSubmit).not.toHaveBeenCalled()
+      expect(textarea.value).toBe('Caption')
+      expect(getByRole('status').textContent).toBe('Reading clipboard image…')
+      expect(
+        (getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled,
+      ).toBe(true)
+
+      const file = png()
+      await act(async () => finish(file))
+      expect(onAttach).toHaveBeenCalledWith([file])
+      expect(originalAttach).not.toHaveBeenCalled()
+      await waitFor(() => expect(queryByRole('status')).toBeNull())
+      expect(
+        (getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled,
+      ).toBe(false)
+    })
+
+    it('discards an old read after an attachment scope change', async () => {
+      const finish = pendingImage()
+      const onAttach = vi.fn()
+      const props = {
+        onAttach,
+        onSubmit: vi.fn(async () => true),
+        placeholder: 'Message',
+      }
+      const { getByRole, queryByRole, rerender } = render(
+        <Composer {...props} attachmentScope="room-a" />,
+      )
+
+      pasteImage(getByRole('textbox') as HTMLTextAreaElement)
+      expect(getByRole('status')).toBeTruthy()
+      rerender(<Composer {...props} attachmentScope="room-b" />)
+      rerender(<Composer {...props} attachmentScope="room-a" />)
+      await act(async () => finish(png()))
+
+      expect(onAttach).not.toHaveBeenCalled()
+      expect(queryByRole('status')).toBeNull()
+      expect(queryByRole('alert')).toBeNull()
+    })
+
+    it.each([
+      ['clipboard_busy', 'The clipboard is still busy. Try pasting again.'],
+      [
+        'clipboard_too_large',
+        'The clipboard image exceeds the attachment size limit.',
+      ],
+      [
+        'clipboard_timed_out',
+        'Reading the clipboard image timed out. Try pasting again.',
+      ],
+      [
+        new Error('IPC failed'),
+        'Could not read the clipboard image. Try pasting again.',
+      ],
+    ])(
+      'explains a failed clipboard read (%s) and clears the error on retry',
+      async (error, message) => {
+        const read = vi
+          .spyOn(clipboardImage, 'readClipboardImage')
+          .mockRejectedValueOnce(error)
+          .mockResolvedValueOnce(png())
+        const onAttach = vi.fn()
+        const { textarea, findByRole, queryByRole } = renderComposer({
+          attachmentScope: 'room-a',
+          initialValue: 'Caption',
+          onAttach,
+        })
+
+        pasteImage(textarea)
+        expect((await findByRole('alert')).textContent).toBe(message)
+        expect(textarea.value).toBe('Caption')
+        expect(onAttach).not.toHaveBeenCalled()
+
+        pasteImage(textarea)
+        await waitFor(() => expect(onAttach).toHaveBeenCalledOnce())
+        expect(read).toHaveBeenCalledTimes(2)
+        expect(queryByRole('alert')).toBeNull()
+      },
+    )
   })
 
   it('submits an attachment with an empty draft — a bare file is a message', () => {

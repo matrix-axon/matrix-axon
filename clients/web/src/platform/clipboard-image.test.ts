@@ -1,0 +1,126 @@
+import { invoke } from '@tauri-apps/api/core'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  canFallBackToClipboardImage,
+  readClipboardImage,
+  supportsNativeImagePaste,
+} from './clipboard-image'
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.resetAllMocks()
+})
+
+describe('Linux clipboard image fallback', () => {
+  it('requires a trusted paste in the Linux desktop shell', () => {
+    vi.stubGlobal('__AXON_TAURI_PLATFORM__', 'linux')
+    expect(supportsNativeImagePaste({ isTrusted: true })).toBe(false)
+    vi.stubGlobal('__TAURI_INTERNALS__', {})
+    expect(supportsNativeImagePaste({ isTrusted: true })).toBe(true)
+    expect(supportsNativeImagePaste({ isTrusted: false })).toBe(false)
+    vi.stubGlobal('__AXON_TAURI_PLATFORM__', 'macos')
+    expect(supportsNativeImagePaste({ isTrusted: true })).toBe(false)
+  })
+
+  it.each([
+    { types: [], text: '', expected: true },
+    { types: ['Files', 'image/png'], text: '', expected: true },
+    { types: [], text: 'plain text', expected: false },
+    { types: [], text: 'https://example.org', expected: false },
+    { types: ['text/html', 'Files'], text: '', expected: false },
+    { types: ['text/uri-list'], text: '', expected: false },
+  ])('checks both offered types and actual text ($types, $text)', (entry) => {
+    expect(
+      canFallBackToClipboardImage(
+        { types: entry.types, getData: () => '' },
+        entry.text,
+      ),
+    ).toBe(entry.expected)
+  })
+
+  const blobUrl = 'blob:axon://localhost/707f6ff3-488c-4739-abc9-65a47e5dad86'
+  const imageUrl = 'https://example.org/image.png'
+
+  it.each([
+    {
+      name: 'an image whose blob src WebKit stripped',
+      uri: blobUrl,
+      html: '<img class="media-image">',
+      text: '',
+      expected: true,
+    },
+    {
+      name: 'a copied image with its address also exposed as plain text',
+      uri: imageUrl,
+      html: `<img src="${imageUrl}">`,
+      text: imageUrl,
+      expected: true,
+    },
+    {
+      name: 'Copy Image Address',
+      uri: blobUrl,
+      html: `<a>${blobUrl}</a>`,
+      text: blobUrl,
+      expected: false,
+    },
+    {
+      name: 'a rich selection with an image and a caption',
+      uri: blobUrl,
+      html: '<img class="media-image">Caption',
+      text: '',
+      expected: false,
+    },
+    {
+      name: 'an image offered alongside independent plain text',
+      uri: blobUrl,
+      html: '<img class="media-image">',
+      text: 'Caption',
+      expected: false,
+    },
+    {
+      name: 'an image fragment with a different source URL',
+      uri: blobUrl,
+      html: `<img src="${imageUrl}">`,
+      text: blobUrl,
+      expected: false,
+    },
+  ])('handles $name', ({ uri, html, text, expected }) => {
+    const data: Record<string, string> = {
+      'text/uri-list': uri,
+      'text/html': html,
+    }
+    const types = Object.keys(data)
+    if (text !== '') types.push('text/plain')
+
+    expect(
+      canFallBackToClipboardImage(
+        { types, getData: (type) => data[type] ?? '' },
+        text,
+      ),
+    ).toBe(expected)
+  })
+
+  it('turns raw clipboard bytes into a correctly typed attachment', async () => {
+    const bytes = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
+    vi.mocked(invoke).mockResolvedValue(bytes.buffer)
+
+    const file = await readClipboardImage()
+    expect(invoke).toHaveBeenCalledWith('read_clipboard_image')
+    expect(file).toMatchObject({
+      name: 'clipboard.png',
+      type: 'image/png',
+      size: bytes.length,
+    })
+    expect(await file?.arrayBuffer()).toEqual(bytes.buffer)
+  })
+
+  it.each([[], [0x01, 0x02, 0x03]])(
+    'ignores an empty or unrecognized response (%j)',
+    async (...bytes) => {
+      vi.mocked(invoke).mockResolvedValue(Uint8Array.from(bytes).buffer)
+      expect(await readClipboardImage()).toBeNull()
+    },
+  )
+})
