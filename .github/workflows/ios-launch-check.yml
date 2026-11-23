@@ -1,0 +1,132 @@
+# Builds the iOS app for the simulator and launches it, to find out whether a build
+# made with a given Xcode starts on the iOS that Xcode ships.
+#
+# Why it exists: iOS 27 stops an app that does not adopt the scene lifecycle at launch,
+# and the first Xcode 27 build of the real app declared no scene manifest. Nothing else
+# runs the real app in CI (ios-sharing runs a test host, not Axon), and the Mac that
+# builds it for the team cannot run Xcode 27. See scripts/ci/ios-launch-check.sh.
+#
+# Manual only, and it takes about as long as the store build, so it is not a gate. It
+# needs no signing material: the simulator build is unsigned.
+
+name: iOS launch check
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner image, which fixes the Xcode and the iOS simulator it ships"
+        type: choice
+        options:
+          - xcode-27
+          - macos-26
+        default: xcode-27
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-launch-check
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_TERM_COLOR: always
+
+jobs:
+  launch:
+    name: Build and launch the app in the iOS simulator
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Keep temporary files under the runner's temp directory
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      - name: check-environment
+        uses: ./.github/actions/check-environment
+
+      - name: Check the script parses under this runner's bash
+        run: scripts/ci/check-bash-syntax.sh scripts/ci/ios-launch-check.sh
+
+      # One Xcode for every process, as in the store build: the Tauri build starts its
+      # own xcodebuild, which ignores DEVELOPER_DIR.
+      - name: Select an Xcode with the iOS 26 SDK, system-wide as well
+        run: scripts/ci/store-credentials.sh xcode --min-sdk 26
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim
+
+      # See apple-store-build.yml: the toolchain action's `targets:` has been seen to
+      # leave a target out, and rust-toolchain.toml makes the pinned toolchain, not
+      # `stable`, the one that compiles.
+      - name: Ensure the simulator target is present
+        run: |
+          rustup target add aarch64-apple-ios-sim
+          rustup target list --installed
+
+      # swift-rs needs it on Xcode 27; see apple-store-build.yml.
+      - name: Add llvm-tools, which swift-rs needs on Xcode 27
+        run: |
+          rustup component add llvm-tools
+          objcopy="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-objcopy"
+          test -x "$objcopy" || { echo "::error::$objcopy is missing after adding llvm-tools"; exit 1; }
+          echo "using $objcopy for $(rustc --version)"
+
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: clients/web/package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: clients/web/pnpm-lock.yaml
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            clients/web/src-tauri/target
+          key: ios-launch-cargo-${{ inputs.runner }}-${{ hashFiles('clients/web/src-tauri/Cargo.lock') }}
+          restore-keys: ios-launch-cargo-${{ inputs.runner }}-
+
+      - name: Install web dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: clients/web
+
+      # See apple-store-build.yml: the Xcode build phase runs pnpm in a scrubbed
+      # environment, where its dependency check judges the install stale and aborts.
+      - name: Stop pnpm re-checking dependencies inside the Xcode build phase
+        run: |
+          printf '\nverifyDepsBeforeRun: false\n' >> pnpm-workspace.yaml
+        working-directory: clients/web
+
+      - name: Install the iOS build tooling
+        run: brew install xcodegen cocoapods libimobiledevice
+
+      - name: Pin the build id to the commit
+        run: echo "VITE_AXON_WEB_VERSION=${VITE_AXON_WEB_VERSION:-$(git rev-parse --short=12 HEAD)}" >> "$GITHUB_ENV"
+
+      # Fails if the app is not running after it settles, or wrote a crash report. The
+      # facts about the built app (minimum iOS, SDK, scene manifest) go in the summary
+      # whichever way it ends.
+      - name: Build, install and launch the app
+        env:
+          AXON_LAUNCH_DIAGNOSTICS: ${{ runner.temp }}/ios-launch-diagnostics
+        run: scripts/ci/ios-launch-check.sh
+
+      - name: Keep the launch results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-launch-check
+          path: ${{ runner.temp }}/ios-launch-diagnostics
+          if-no-files-found: ignore
+          retention-days: 7
