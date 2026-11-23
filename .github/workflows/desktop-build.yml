@@ -121,6 +121,10 @@ jobs:
             build-essential \
             file
 
+      - name: Test the Debian desktop launcher
+        if: runner.os == 'Linux'
+        run: sh clients/web/src-tauri/bundle/test-deb.sh
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -332,7 +336,9 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p dist-desktop
-          cp clients/web/src-tauri/target/release/bundle/deb/*.deb dist-desktop/
+          for deb in clients/web/src-tauri/target/release/bundle/deb/*.deb; do
+            clients/web/src-tauri/bundle/finalize-deb.sh "$deb" "dist-desktop/${deb##*/}"
+          done
           cp clients/web/src-tauri/target/release/bundle/appimage/*.AppImage dist-desktop/
           ls -l dist-desktop
 
