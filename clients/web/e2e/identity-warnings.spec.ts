@@ -82,7 +82,84 @@ test('identity warnings leave room sending available and the review dialog fits'
   await expect(review.last()).toBeFocused()
 })
 
-test('own-identity warning links directly to this account’s recovery form', async ({
+test('a failed acknowledgment keeps focus and ignores duplicate activation', async ({
+  page,
+}) => {
+  let fingerprint = 'a'.repeat(64)
+  let attempts = 0
+  const pending = Promise.withResolvers<void>()
+  await page.route('**/v1/accounts/*/rooms/*/info', (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          identity_changes: [
+            { user_id: '@member:hs', kind: 'pin_violation', fingerprint },
+          ],
+        },
+      },
+    }),
+  )
+  await page.route(
+    '**/v1/accounts/*/users/*/identity/accept',
+    async (route) => {
+      attempts += 1
+      await pending.promise
+      fingerprint = 'b'.repeat(64)
+      await route.fulfill({
+        status: 409,
+        json: {
+          error: {
+            code: 'conflict',
+            message: 'The identity warning changed. Review it again.',
+          },
+        },
+      })
+    },
+  )
+
+  await signIn(page)
+  await page.goto(ROOM_URL)
+  await expectRoomReady(page)
+  await page
+    .getByRole('button', { name: 'Review identity changes' })
+    .last()
+    .click()
+  const dialog = page.getByRole('dialog', { name: 'Review identity changes' })
+  const action = dialog.getByRole('button', {
+    name: 'Accept new identity for @member:hs',
+  })
+  const click = await action.elementHandle()
+  try {
+    await action.press('Enter')
+    await expect.poll(() => attempts).toBe(1)
+    await expect(action).toBeDisabled()
+    await expect(action).toBeFocused()
+    await page.keyboard.press('Enter')
+    const refreshed = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'GET' &&
+        response.url().endsWith('/info'),
+    )
+    pending.resolve()
+    await expect(dialog.getByRole('alert')).toContainText(
+      'The identity warning changed',
+    )
+    const response = await refreshed
+    expect((await response.json()).data.identity_changes[0].fingerprint).toBe(
+      fingerprint,
+    )
+    await expect(action).toBeEnabled()
+    await expect(action).toBeFocused()
+    expect(
+      await click?.evaluate((button) => button === document.activeElement),
+    ).toBe(true)
+    expect(attempts).toBe(1)
+  } finally {
+    pending.resolve()
+  }
+})
+
+test('own-identity recovery opens in place and keeps the room draft', async ({
   page,
 }) => {
   await page.route('**/v1/accounts', async (route) => {
@@ -106,9 +183,27 @@ test('own-identity warning links directly to this account’s recovery form', as
   await expect(
     warning.getByRole('button', { name: 'Verify this device' }),
   ).toBeVisible()
+  const draft = 'Draft before opening account recovery'
+  await page.getByRole('textbox', { name: /^Message/ }).fill(draft)
+  await page.evaluate(() => {
+    document.documentElement.dataset.identityReviewTest = 'same-document'
+  })
   await warning.getByRole('link', { name: 'Recover keys' }).click()
   await expect(page).toHaveURL(new RegExp(`/accounts\\?recover=${ACCOUNT_ID}$`))
   const recoveryKey = page.getByLabel('Recovery key', { exact: true })
   await expect(recoveryKey).toHaveCount(1)
   await expect(recoveryKey).toBeFocused()
+  await expect(page.locator('html')).toHaveAttribute(
+    'data-identity-review-test',
+    'same-document',
+  )
+
+  await page.evaluate(() => history.back())
+  await expect(page.getByRole('textbox', { name: /^Message/ })).toHaveValue(
+    draft,
+  )
+  await expect(page.locator('html')).toHaveAttribute(
+    'data-identity-review-test',
+    'same-document',
+  )
 })

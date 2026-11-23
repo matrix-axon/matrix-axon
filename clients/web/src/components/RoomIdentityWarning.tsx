@@ -53,6 +53,7 @@ export function RoomIdentityReview({
   const closeButton = useRef<HTMLButtonElement>(null)
   const actionList = useRef<HTMLUListElement>(null)
   const nextActionIndex = useRef<number | null>(null)
+  const latestWarnings = useRef(warnings)
   const { containerRef } = useModalFocus<HTMLDivElement>({ restoreTo })
   const inFlight = useRef(false)
   const [busy, setBusy] = useState(false)
@@ -60,7 +61,10 @@ export function RoomIdentityReview({
     error: boolean
     message: string
   } | null>(null)
-  const [acknowledged, setAcknowledged] = useState<IdentityChange[]>([])
+  const [acknowledged, setAcknowledged] = useState<{
+    snapshot: readonly IdentityChange[]
+    warnings: readonly IdentityChange[]
+  } | null>(null)
 
   useShortcuts(
     {
@@ -73,6 +77,7 @@ export function RoomIdentityReview({
   )
 
   useLayoutEffect(() => {
+    latestWarnings.current = warnings
     const index = nextActionIndex.current
     if (busy || index === null) return
     nextActionIndex.current = null
@@ -82,7 +87,7 @@ export function RoomIdentityReview({
     const target =
       actions?.[Math.min(index, actions.length - 1)] ?? closeButton.current
     target?.focus()
-  }, [acknowledged, busy])
+  }, [acknowledged, busy, warnings])
 
   const acknowledge = async (warning: IdentityChange, index: number) => {
     if (inFlight.current) return
@@ -102,7 +107,14 @@ export function RoomIdentityReview({
       )
       if (response.ok) {
         nextActionIndex.current = index
-        setAcknowledged((current) => [...current, warning])
+        const snapshot = latestWarnings.current
+        setAcknowledged((current) => ({
+          snapshot,
+          warnings: [
+            ...(current?.snapshot === snapshot ? current.warnings : []),
+            warning,
+          ],
+        }))
         setFeedback({
           error: false,
           message: withdraw
@@ -126,15 +138,20 @@ export function RoomIdentityReview({
     }
   }
 
-  const remaining = warnings.filter(
-    (warning) =>
-      !acknowledged.some(
-        (resolved) =>
-          resolved.user_id === warning.user_id &&
-          resolved.kind === warning.kind &&
-          resolved.fingerprint === warning.fingerprint,
-      ),
-  )
+  // Optimistic removal applies to the snapshot on screen at success.
+  // Every new server snapshot decides which warnings need review again.
+  const remaining =
+    acknowledged?.snapshot === warnings
+      ? warnings.filter(
+          (warning) =>
+            !acknowledged.warnings.some(
+              (resolved) =>
+                resolved.user_id === warning.user_id &&
+                resolved.kind === warning.kind &&
+                resolved.fingerprint === warning.fingerprint,
+            ),
+        )
+      : warnings
 
   return (
     <BodyPortal>
@@ -175,13 +192,7 @@ export function RoomIdentityReview({
                   ? 'Withdraw verification'
                   : 'Accept new identity'
                 return (
-                  <li
-                    key={JSON.stringify([
-                      warning.user_id,
-                      warning.kind,
-                      warning.fingerprint,
-                    ])}
-                  >
+                  <li key={warning.user_id}>
                     <strong>{warning.user_id}</strong>
                     <p>
                       {withdraw
@@ -190,7 +201,7 @@ export function RoomIdentityReview({
                     </p>
                     <button
                       type="button"
-                      disabled={busy}
+                      aria-disabled={busy}
                       aria-label={`${action} for ${warning.user_id}`}
                       onClick={() => void acknowledge(warning, index)}
                     >

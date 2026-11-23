@@ -5622,7 +5622,8 @@ a.button-link {
   text-decoration: none;
 }
 
-button:disabled {
+button:disabled,
+.room-identity-review button[aria-disabled='true'] {
   opacity: 0.5;
   cursor: default;
 }

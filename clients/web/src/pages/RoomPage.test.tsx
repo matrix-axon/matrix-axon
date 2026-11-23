@@ -1299,14 +1299,13 @@ describe('RoomPage', () => {
     ])
     const close = dialog.getByRole('button', { name: 'Close' })
     expect(document.activeElement).toBe(close)
-    fireEvent.click(close)
-    expect(composer.value).toBe('Keep my draft')
-
     services.live.start()
     const socket = services.sockets[0]
     onTestFinished(() => services.live.stop())
     socket.emitOpen()
-    changes = [first]
+    // A later snapshot can report the same warning again. It should be
+    // reviewable in the dialog that acknowledged the earlier occurrence.
+    changes = [second]
     socket.emitMessage(
       JSON.stringify({
         type: 'room_details.changed',
@@ -1315,8 +1314,15 @@ describe('RoomPage', () => {
       }),
     )
     expect(
+      await dialog.findByRole('button', {
+        name: 'Withdraw verification for @bob:hs',
+      }),
+    ).toBeTruthy()
+    expect(
       await findAllByRole('button', { name: 'Review identity changes' }),
     ).toHaveLength(2)
+    fireEvent.click(close)
+    expect(composer.value).toBe('Keep my draft')
   })
 
   it('loads the destination timeline after clicking a room hyperlink', async () => {

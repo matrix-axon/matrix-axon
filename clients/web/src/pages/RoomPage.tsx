@@ -1522,14 +1522,17 @@ export function RoomPage() {
     setIdentityReviewRoom(null)
   }, [roomDetails, watchIdentity, accountId, roomId])
   const details = roomDetails.state.value
-  const identityChanges =
-    watchIdentity && details.key === detailsKey
-      ? details.identityChanges.filter(
-          (warning) =>
-            warning.kind === 'pin_violation' ||
-            warning.kind === 'verification_violation',
-        )
-      : []
+  const identityChanges = useMemo(
+    () =>
+      watchIdentity && details.key === detailsKey
+        ? details.identityChanges.filter(
+            (warning) =>
+              warning.kind === 'pin_violation' ||
+              warning.kind === 'verification_violation',
+          )
+        : [],
+    [details.identityChanges, details.key, detailsKey, watchIdentity],
+  )
   const openIdentityReview = (opener: HTMLButtonElement) => {
     identityReviewOpener.current = opener
     setIdentityReviewRoom(detailsKey)
