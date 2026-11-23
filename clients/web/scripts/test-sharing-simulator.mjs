@@ -122,6 +122,25 @@ const project = {
     ShareSource: {
       type: 'application',
       platform: 'iOS',
+      // iOS 27 stops an app that has no scene manifest at launch, so the host
+      // declares one; Source.swift's SourceSceneDelegate makes its window.
+      info: {
+        path: 'ShareSource.plist',
+        properties: {
+          UIApplicationSceneManifest: {
+            UIApplicationSupportsMultipleScenes: false,
+            UISceneConfigurations: {
+              UIWindowSceneSessionRoleApplication: [
+                {
+                  UISceneConfigurationName: 'Default',
+                  UISceneDelegateClassName:
+                    '$(PRODUCT_MODULE_NAME).SourceSceneDelegate',
+                },
+              ],
+            },
+          },
+        },
+      },
       sources: [
         join(source, '../share-extension-tests/Source.swift'),
         join(source, '../share-extension/ShareViewController.swift'),
