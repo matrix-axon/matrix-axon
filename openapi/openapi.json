@@ -6022,7 +6022,7 @@
           "messages"
         ],
         "summary": "Send media",
-        "description": "Send a staged media upload to a room.",
+        "description": "Send a staged media upload to a room, as the event its staged kind names,\nwith optional `info` and a thumbnail (`thumbnail_upload_id`). A send with a\n`txn_id` already in flight or sent within 10 minutes in this room returns\nthat send's event id and sends nothing (ADR 0142 section 4).\n\nThe send runs in a task of its own, which settles every upload it\nclaimed even if the client disconnects: consumed when the event is sent,\nreleased when it fails. Each step is bounded: the thumbnail's preparation\n(5 s), the original's upload (`media.upstream_upload_timeout_secs`), the\nthumbnail's upload (10 s) and the event (`sync.send_mutation_timeout_secs`),\nabout 105 s with the defaults.",
         "operationId": "send_media",
         "parameters": [
           {
@@ -6057,7 +6057,7 @@
         },
         "responses": {
           "200": {
-            "description": "Media sent",
+            "description": "Media sent, or the event id of the earlier send this txn_id names",
             "content": {
               "application/json": {
                 "schema": {
@@ -6067,7 +6067,7 @@
             }
           },
           "400": {
-            "description": "Malformed request",
+            "description": "Malformed request: invalid info or txn_id, a field or thumbnail the upload's kind cannot carry, or a thumbnail that is not a valid image. Every claimed upload is released.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6145,7 +6145,7 @@
             }
           },
           "504": {
-            "description": "Preview-aware send deadline exceeded: outcome unknown; do not automatically resend",
+            "description": "Send deadline exceeded: outcome unknown. Resend only with the same txn_id, which joins or returns the earlier send.",
             "content": {
               "application/json": {
                 "schema": {
@@ -11314,6 +11314,10 @@
                   "$ref": "#/components/schemas/MediaUploadKindDto"
                 },
                 "description": "The kinds `POST …/media/uploads` accepts (ADR 0142 section 1). A server\nwithout this field accepts only `image` and `file`, and rejects any\nother kind when staging, so a client stages a video or audio file as\n`video` or `audio` only when it is listed here, and as `file` otherwise.\nThis server always sends it; the schema marks it optional because a\nserver that predates it answers without it."
+              },
+              "send_media_thumbnails": {
+                "type": "boolean",
+                "description": "`send-media` accepts and applies `info`, `thumbnail_upload_id` and\n`txn_id` (ADR 0142 section 1). A server without this field ignores all\nthree, so a client sends a thumbnail only when this is true, and relies\non `txn_id` deduplication only then. The schema marks it optional\nbecause a server that predates it answers without it."
               }
             }
           }
@@ -14994,6 +14998,10 @@
               "$ref": "#/components/schemas/MediaUploadKindDto"
             },
             "description": "The kinds `POST …/media/uploads` accepts (ADR 0142 section 1). A server\nwithout this field accepts only `image` and `file`, and rejects any\nother kind when staging, so a client stages a video or audio file as\n`video` or `audio` only when it is listed here, and as `file` otherwise.\nThis server always sends it; the schema marks it optional because a\nserver that predates it answers without it."
+          },
+          "send_media_thumbnails": {
+            "type": "boolean",
+            "description": "`send-media` accepts and applies `info`, `thumbnail_upload_id` and\n`txn_id` (ADR 0142 section 1). A server without this field ignores all\nthree, so a client sends a thumbnail only when this is true, and relies\non `txn_id` deduplication only then. The schema marks it optional\nbecause a server that predates it answers without it."
           }
         }
       },
@@ -18467,6 +18475,39 @@
           "oldest"
         ]
       },
+      "SendMediaInfo": {
+        "type": "object",
+        "description": "`info` of a [`SendMediaRequest`] (ADR 0142 section 4). Each field is\noptional, and each value must be at least 1 and at most 2^53 − 1.\n`width` and `height` come together, and are accepted for `image` and\n`video`; `duration_ms` is accepted for `video` and `audio`. Anything else\nis a `400`. For an image whose header the server can read, the dimensions\nit reads win.",
+        "properties": {
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "maximum": 9007199254740991,
+            "minimum": 1
+          },
+          "height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "maximum": 9007199254740991,
+            "minimum": 1
+          },
+          "width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "maximum": 9007199254740991,
+            "minimum": 1
+          }
+        }
+      },
       "SendMediaRequest": {
         "type": "object",
         "description": "Request body for sending a staged media upload into a room\n(`POST …/rooms/{room_id}/send-media`). The `upload_id` must refer to an\nunsent staged upload owned by the path account.",
@@ -18495,6 +18536,17 @@
             ],
             "description": "The caption rendered as HTML. Must be paired with `format`; `caption` is\nits plain-text fallback."
           },
+          "info": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SendMediaInfo",
+                "description": "What the event's `info` declares besides the size and type (ADR 0142\nsection 4). Send it only to a server whose `GET /v1/capabilities` has\n`send_media_thumbnails`; an older one ignores it."
+              }
+            ]
+          },
           "reply_to": {
             "type": [
               "string",
@@ -18508,6 +18560,24 @@
               "null"
             ],
             "description": "Send into this thread, identified by its root event id\n(`rel_type: m.thread`). Optional; when set with `reply_to`, the reply\nis scoped to the thread. Without `reply_to`, this is a thread member,\nnot a reply."
+          },
+          "thumbnail_upload_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "A second staged upload, staged with kind `image`, to send as this\nmedia's thumbnail or poster: PNG, JPEG or WebP, at most 2 MiB and\n4,000,000 pixels, with a type matching its bytes. Accepted for\n`image`, `video` and `file`, and refused for `audio`. The server\nre-encodes it to fit inside 800 × 600, upright, as JPEG or (for real\ntransparency) PNG. It is consumed when the event is sent and released\nwhen the send fails, whether or not it made it into the event: a\nthumbnail is best-effort, and never fails a send that would succeed\nwithout it. An invalid one is a `400`. Send it only when\n`send_media_thumbnails` is advertised: an older server ignores it and\nleaves it staged until it expires."
+          },
+          "txn_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The client's id for this send, kept across its retries (ADR 0142\nsection 4). A retry with the same id in the same room joins the send\nstill in flight, or, within 10 minutes of its success, gets its event\nid without sending again; the retry's own staged uploads are then\ndeleted. It is also the Matrix transaction id, so the homeserver\ndeduplicates too. Deduplication holds only against a server that\nadvertises `send_media_thumbnails`.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._~-]+$"
           },
           "upload_id": {
             "type": "string",

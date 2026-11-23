@@ -12,7 +12,7 @@ use axon_store::Store;
 use axum::extract::State;
 use uuid::Uuid;
 
-use axon_core::{Formatted, MediaAttachment, Relation};
+use axon_core::{Formatted, Relation};
 
 use crate::dto::{
     EditRequest, ReactRequest, RedactQuery, SendMediaRequest, SendMessageRequest, SendResultDto,
@@ -21,6 +21,8 @@ use crate::extract::{Json, Path, Query};
 use crate::response::{ApiError, ApiResponse};
 use crate::sender::MessageSender;
 use crate::uploads::StagedUploadService;
+
+use super::media_send::{self, MediaFields};
 
 /// The only `format` Matrix defines for `formatted_body`.
 const HTML_FORMAT: &str = "org.matrix.custom.html";
@@ -126,8 +128,15 @@ pub async fn send_message(
     Json(req): Json<SendMessageRequest>,
 ) -> Result<ApiResponse<SendResultDto>, ApiError> {
     if req.url_previews.is_some() {
-        return super::bundled_previews::send(sender, uploads, account_id, room_id, req.into())
-            .await;
+        return super::bundled_previews::send(
+            sender,
+            uploads,
+            account_id,
+            room_id,
+            req.into(),
+            None,
+        )
+        .await;
     }
     let fmt = formatted(&req.format, &req.formatted_body)?;
     let relation = Relation {
@@ -142,7 +151,17 @@ pub async fn send_message(
 
 /// Send media
 ///
-/// Send a staged media upload to a room.
+/// Send a staged media upload to a room, as the event its staged kind names,
+/// with optional `info` and a thumbnail (`thumbnail_upload_id`). A send with a
+/// `txn_id` already in flight or sent within 10 minutes in this room returns
+/// that send's event id and sends nothing (ADR 0142 section 4).
+///
+/// The send runs in a task of its own, which settles every upload it
+/// claimed even if the client disconnects: consumed when the event is sent,
+/// released when it fails. Each step is bounded: the thumbnail's preparation
+/// (5 s), the original's upload (`media.upstream_upload_timeout_secs`), the
+/// thumbnail's upload (10 s) and the event (`sync.send_mutation_timeout_secs`),
+/// about 105 s with the defaults.
 #[utoipa::path(
     post,
     path = "/v1/accounts/{account_id}/rooms/{room_id}/send-media",
@@ -152,10 +171,10 @@ pub async fn send_message(
     ),
     request_body = SendMediaRequest,
     responses(
-        (status = 200, description = "Media sent", body = ApiResponse<SendResultDto>),
-        (status = 400, description = "Malformed request", body = crate::response::ErrorResponse),
+        (status = 200, description = "Media sent, or the event id of the earlier send this txn_id names", body = ApiResponse<SendResultDto>),
+        (status = 400, description = "Malformed request: invalid info or txn_id, a field or thumbnail the upload's kind cannot carry, or a thumbnail that is not a valid image. Every claimed upload is released.", body = crate::response::ErrorResponse),
         (status = 413, description = "Definite event_too_large, preview_too_large or payload_too_large validation rejection; preview-aware content uses a 40960-byte budget including 12288 bytes reserved for media fields. No preflight upload claims or event dispatch.", body = crate::response::ErrorResponse),
-        (status = 504, description = "Preview-aware send deadline exceeded: outcome unknown; do not automatically resend", body = crate::response::ErrorResponse),
+        (status = 504, description = "Send deadline exceeded: outcome unknown. Resend only with the same txn_id, which joins or returns the earlier send.", body = crate::response::ErrorResponse),
         (status = 403, description = "Operation not permitted", body = crate::response::ErrorResponse),
         (status = 404, description = "Account, room, or upload not found", body = crate::response::ErrorResponse),
         (status = 502, description = "Upstream homeserver error", body = crate::response::ErrorResponse),
@@ -169,90 +188,119 @@ pub async fn send_media(
     Path((account_id, room_id)): Path<(Uuid, String)>,
     Json(req): Json<SendMediaRequest>,
 ) -> Result<ApiResponse<SendResultDto>, ApiError> {
+    // Validate before claiming: a malformed request must not consume an upload.
+    let fields = MediaFields::from(&req);
+    fields.validate()?;
     if req.url_previews.is_some() {
-        return super::bundled_previews::send(sender, uploads, account_id, room_id, req.into())
-            .await;
+        let request = super::bundled_previews::Request::from(req);
+        request.validate()?;
+        let task_uploads = uploads.clone();
+        return media_send::deduplicated(&*uploads, account_id, &room_id, &fields, |txn| {
+            super::bundled_previews::send(
+                sender,
+                task_uploads,
+                account_id,
+                room_id.clone(),
+                request,
+                txn,
+            )
+        })
+        .await;
     }
-    // Validate before claiming: a malformed request must not consume the upload.
-    let fmt = formatted(&req.format, &req.formatted_body)?;
+    formatted(&req.format, &req.formatted_body)?;
     // An empty caption is no caption, as on the edit path (`set_media_caption`
     // in `axon-sync`): the filename stays the event body. Formatting without a
     // caption has nothing to format, so it is rejected rather than sent as an
     // empty-but-formatted body.
-    let caption = req.caption.as_deref().filter(|caption| !caption.is_empty());
-    if fmt.is_some() && caption.is_none() {
+    let caption = req.caption.filter(|caption| !caption.is_empty());
+    if req.formatted_body.is_some() && caption.is_none() {
         return Err(ApiError::bad_request(
             "format and formatted_body require a caption",
         ));
     }
-    let relation = Relation {
-        reply_to: req.reply_to.as_deref(),
-        thread_root: req.thread_root.as_deref(),
-    };
-    let started_at = std::time::Instant::now();
-    tracing::debug!(
-        account_id = %account_id,
-        room_id = %room_id,
-        upload_id = %req.upload_id,
-        "send_media: claiming staged upload"
-    );
-    let upload = uploads.claim_upload(account_id, req.upload_id).await?;
-    tracing::debug!(
-        account_id = %account_id,
-        upload_id = %req.upload_id,
-        size_bytes = upload.size_bytes,
-        claim_elapsed_ms = started_at.elapsed().as_millis(),
-        "send_media: upload claimed, handing off to the SDK attachment send"
-    );
-    let attachment: MediaAttachment = upload.into();
-
-    let send_started_at = std::time::Instant::now();
-    let send_result = sender
-        .send_media(
-            account_id, &room_id, attachment, caption, fmt, relation, None,
-        )
-        .await;
-    match send_result {
-        Ok(event_id) => {
-            tracing::info!(
-                account_id = %account_id,
-                room_id = %room_id,
-                upload_id = %req.upload_id,
-                event_id = %event_id,
-                send_elapsed_ms = send_started_at.elapsed().as_millis(),
-                total_elapsed_ms = started_at.elapsed().as_millis(),
-                "send_media completed"
-            );
-            if let Err(err) = uploads.complete_upload(account_id, req.upload_id).await {
-                tracing::warn!(
-                    account_id = %account_id,
-                    upload_id = %req.upload_id,
-                    error = ?err,
-                    "sent media but failed to consume staged upload"
+    let formatted_body = req.formatted_body;
+    let (reply_to, thread_root) = (req.reply_to, req.thread_root);
+    let task_uploads = uploads.clone();
+    let task_room = room_id.clone();
+    let task_fields = fields.clone();
+    media_send::deduplicated(&*uploads, account_id, &room_id, &fields, |txn| async move {
+        let (uploads, room_id, fields) = (task_uploads, task_room, task_fields);
+        // One task owns every claim, the send and the settlement, so a client
+        // that disconnects cannot strand an upload as `sending` (ADR 0142
+        // section 4). The request only waits for it.
+        tokio::spawn(async move {
+            let started_at = std::time::Instant::now();
+            let mut claimed = Vec::new();
+            let result = async {
+                let attachment =
+                    media_send::claim_attachment(&*uploads, account_id, &fields, &mut claimed)
+                        .await?;
+                tracing::debug!(
+                    %account_id,
+                    upload_id = %fields.upload_id,
+                    size_bytes = attachment.size_bytes,
+                    thumbnail = attachment.thumbnail.is_some(),
+                    claim_elapsed_ms = started_at.elapsed().as_millis(),
+                    "send_media: claimed, handing off to the media send"
                 );
+                let relation = Relation {
+                    reply_to: reply_to.as_deref(),
+                    thread_root: thread_root.as_deref(),
+                };
+                let fmt = formatted_body.as_deref().map(|body| Formatted {
+                    format: HTML_FORMAT,
+                    body,
+                });
+                sender
+                    .send_media(
+                        account_id,
+                        &room_id,
+                        attachment,
+                        caption.as_deref(),
+                        fmt,
+                        relation,
+                        fields.txn_id.as_deref(),
+                    )
+                    .await
+                    .map_err(ApiError::from)
             }
-            Ok(ApiResponse::new(SendResultDto { event_id }))
-        }
-        Err(err) => {
-            tracing::warn!(
-                account_id = %account_id,
-                room_id = %room_id,
-                upload_id = %req.upload_id,
-                send_elapsed_ms = send_started_at.elapsed().as_millis(),
-                error = ?err,
-                "send_media: SDK attachment send failed"
-            );
-            if let Err(release_err) = uploads.release_upload(account_id, req.upload_id).await {
-                tracing::warn!(
-                    account_id = %account_id,
-                    upload_id = %req.upload_id,
-                    error = ?release_err,
-                    "failed to release staged upload after media send failure"
-                );
+            .await;
+            let sent = result.is_ok();
+            media_send::settle_claims(&*uploads, account_id, &room_id, claimed, sent).await;
+            if let Some(txn) = txn {
+                txn.settle(&result);
             }
-            Err(err.into())
-        }
-    }
+            match result {
+                Ok(event_id) => {
+                    tracing::info!(
+                        %account_id,
+                        %room_id,
+                        upload_id = %fields.upload_id,
+                        %event_id,
+                        total_elapsed_ms = started_at.elapsed().as_millis(),
+                        "send_media completed"
+                    );
+                    Ok(ApiResponse::new(SendResultDto { event_id }))
+                }
+                Err(error) => {
+                    let (status, code) = error.diagnostics();
+                    tracing::warn!(
+                        %account_id,
+                        %room_id,
+                        upload_id = %fields.upload_id,
+                        elapsed_ms = started_at.elapsed().as_millis(),
+                        status,
+                        code,
+                        "send_media failed; uploads released"
+                    );
+                    Err(error)
+                }
+            }
+        })
+        .await
+        .map_err(|_| ApiError::internal())?
+    })
+    .await
 }
 
 /// Edit a message

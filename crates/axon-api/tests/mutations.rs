@@ -472,9 +472,10 @@ async fn previews_changed_is_a_409_that_releases_the_uploads() {
     assert!(uploads.completes().is_empty());
 }
 
-/// `GET /v1/capabilities` tells a client that edits keep previews (ADR 0132)
-/// and which upload kinds staging accepts (ADR 0142 section 1); an older
-/// server's 404, or a missing field, means it does not.
+/// `GET /v1/capabilities` tells a client that edits keep previews (ADR 0132),
+/// which upload kinds staging accepts, and that `send-media` takes `info`,
+/// `thumbnail_upload_id` and `txn_id` (ADR 0142 section 1); an older server's
+/// 404, or a missing field, means it does not.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn capabilities_report_edit_url_previews_and_media_upload_kinds() {
@@ -486,6 +487,7 @@ async fn capabilities_report_edit_url_previews_and_media_upload_kinds() {
         json!({"data": {
             "edit_url_previews": true,
             "media_upload_kinds": ["image", "file", "video", "audio"],
+            "send_media_thumbnails": true,
         }})
     );
 }
@@ -1099,4 +1101,362 @@ async fn stickers_validate_and_forward_metadata_and_relations() {
         );
     }
     assert_eq!(sender.calls().len(), 2);
+}
+
+fn media_uri(account_id: Uuid, room: &str) -> String {
+    format!("/v1/accounts/{account_id}/rooms/{room}/send-media")
+}
+
+/// ADR 0142 section 4: `info` and a client thumbnail reach the sender on the
+/// attachment, the thumbnail is claimed after the original, and both are
+/// consumed with the send; the `txn_id` is passed through.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn send_media_carries_info_and_a_thumbnail_and_consumes_both() {
+    let sender = Arc::new(StubSender::ok("$video:localhost"));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store().await, sender.clone(), uploads.clone());
+    let (account_id, upload_id, thumb_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    uploads.set_kind(upload_id, axon_api::MediaUploadKindDto::Video);
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        &media_uri(account_id, "!room:localhost"),
+        Some(json!({
+            "upload_id": upload_id,
+            "info": {"width": 1920, "height": 1080, "duration_ms": 31250},
+            "thumbnail_upload_id": thumb_id,
+            "txn_id": "c0ffee",
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["event_id"], "$video:localhost");
+    assert_eq!(
+        uploads.claims(),
+        vec![(account_id, upload_id), (account_id, thumb_id)]
+    );
+    assert_eq!(
+        uploads.completes(),
+        vec![(account_id, upload_id), (account_id, thumb_id)]
+    );
+    assert!(uploads.releases().is_empty());
+    let [Call::SendMedia { attachment, .. }] = &sender.calls()[..] else {
+        panic!("one media send: {:?}", sender.calls());
+    };
+    assert_eq!(attachment.kind, MediaSendKind::Video);
+    assert_eq!(
+        (attachment.width, attachment.height, attachment.duration_ms),
+        (Some(1920), Some(1080), Some(31250))
+    );
+    assert_eq!(attachment.thumbnail, Some(common::stub_thumbnail()));
+    assert_eq!(sender.txn_ids(), vec![Some("c0ffee".to_owned())]);
+}
+
+/// A malformed `info`, `txn_id` or a thumbnail that is the original is a
+/// `400` before anything is claimed.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn send_media_rejects_malformed_fields_before_any_claim() {
+    let sender = Arc::new(StubSender::ok("$unused"));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store().await, sender.clone(), uploads.clone());
+    let account_id = Uuid::new_v4();
+    let upload_id = Uuid::new_v4();
+    for extra in [
+        json!({"info": {"width": 10}}),
+        json!({"info": {"width": 0, "height": 10}}),
+        json!({"info": {"duration_ms": 9007199254740992_u64}}),
+        json!({"txn_id": ""}),
+        json!({"txn_id": "has space"}),
+        json!({"txn_id": "x".repeat(65)}),
+        json!({"thumbnail_upload_id": upload_id}),
+        json!({"thumbnail_upload_id": upload_id, "caption": "https://e.org",
+               "url_previews": [{"matched_url": "https://e.org"}]}),
+    ] {
+        let mut body = json!({"upload_id": upload_id});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let (status, _) = send(
+            &app,
+            "POST",
+            &media_uri(account_id, "!r:localhost"),
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{extra}");
+    }
+    assert!(uploads.claims().is_empty());
+    assert!(sender.calls().is_empty());
+}
+
+/// A field or thumbnail the upload's kind cannot carry, or a thumbnail that
+/// fails validation, is a `400` that releases everything claimed and sends
+/// nothing (ADR 0142 section 4).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn send_media_kind_mismatch_or_invalid_thumbnail_releases_every_claim() {
+    use axon_api::MediaUploadKindDto::{Audio, Image};
+    let sender = Arc::new(StubSender::ok("$unused"));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store().await, sender.clone(), uploads.clone());
+    let account_id = Uuid::new_v4();
+    for (kind, extra, thumbnail) in [
+        (Audio, json!({"thumbnail_upload_id": Uuid::new_v4()}), None),
+        (Audio, json!({"info": {"width": 2, "height": 2}}), None),
+        (Image, json!({"info": {"duration_ms": 5}}), None),
+        (
+            Image,
+            json!({"thumbnail_upload_id": Uuid::new_v4()}),
+            Some(common::StubThumbnail::Invalid),
+        ),
+    ] {
+        uploads.set_thumbnail(thumbnail.unwrap_or(common::StubThumbnail::Ready));
+        let upload_id = Uuid::new_v4();
+        uploads.set_kind(upload_id, kind);
+        let mut body = json!({"upload_id": upload_id});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let (status, _) = send(
+            &app,
+            "POST",
+            &media_uri(account_id, "!r:localhost"),
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{kind:?} {extra}");
+    }
+    let mut claims = uploads.claims();
+    let mut releases = uploads.releases();
+    claims.sort();
+    releases.sort();
+    assert_eq!(claims, releases, "everything claimed was released");
+    assert_eq!(claims.len(), 5, "4 originals, 1 invalid thumbnail");
+    assert!(uploads.completes().is_empty());
+    assert!(sender.calls().is_empty());
+}
+
+/// A thumbnail the decoder could not finish in time is not the client's
+/// fault: the media goes without it, and the thumbnail is still consumed
+/// with the send. A failed send releases both.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn send_media_skipped_thumbnail_sends_without_it_and_failure_releases_both() {
+    let sender = Arc::new(StubSender::ok("$img:localhost"));
+    let uploads = Arc::new(StubUploads::ok());
+    uploads.set_thumbnail(common::StubThumbnail::Skipped);
+    let app = app_with_uploads(store().await, sender.clone(), uploads.clone());
+    let (account_id, upload_id, thumb_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let body = json!({"upload_id": upload_id, "thumbnail_upload_id": thumb_id});
+    let (status, _) = send(
+        &app,
+        "POST",
+        &media_uri(account_id, "!r:localhost"),
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let [Call::SendMedia { attachment, .. }] = &sender.calls()[..] else {
+        panic!();
+    };
+    assert_eq!(attachment.thumbnail, None);
+    assert_eq!(
+        uploads.completes(),
+        vec![(account_id, upload_id), (account_id, thumb_id)]
+    );
+
+    let sender = Arc::new(StubSender::failing(Outcome::Upstream("hs".into())));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store().await, sender, uploads.clone());
+    let (status, _) = send(
+        &app,
+        "POST",
+        &media_uri(account_id, "!r:localhost"),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        uploads.releases(),
+        vec![(account_id, upload_id), (account_id, thumb_id)]
+    );
+    assert!(uploads.completes().is_empty());
+}
+
+/// ADR 0142 section 4: a retry with the `txn_id` of a send that succeeded
+/// gets its event id, sends nothing and deletes the retry's own staged
+/// uploads. The same id in another room, or after a failed send, is a new
+/// send.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn send_media_retry_with_a_sent_txn_id_returns_the_first_event() {
+    let sender = Arc::new(StubSender::ok("$first:localhost"));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store().await, sender.clone(), uploads.clone());
+    let account_id = Uuid::new_v4();
+    let request = |txn: &str| json!({"upload_id": Uuid::new_v4(), "thumbnail_upload_id": Uuid::new_v4(), "txn_id": txn});
+    let (status, _) = send(
+        &app,
+        "POST",
+        &media_uri(account_id, "!a:localhost"),
+        Some(request("t1")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(uploads.claims().len(), 2);
+
+    let retry = request("t1");
+    let (status, body) = send(
+        &app,
+        "POST",
+        &media_uri(account_id, "!a:localhost"),
+        Some(retry.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["event_id"], "$first:localhost");
+    assert_eq!(sender.calls().len(), 1, "the retry sent nothing");
+    assert_eq!(uploads.claims().len(), 2, "and claimed nothing");
+    let ids = |v: &Value, field: &str| {
+        (
+            account_id,
+            v[field].as_str().unwrap().parse::<Uuid>().unwrap(),
+        )
+    };
+    assert_eq!(
+        uploads.deletes(),
+        vec![ids(&retry, "upload_id"), ids(&retry, "thumbnail_upload_id")]
+    );
+
+    let (status, _) = send(
+        &app,
+        "POST",
+        &media_uri(account_id, "!b:localhost"),
+        Some(request("t1")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(sender.calls().len(), 2, "another room is another send");
+
+    let sender = Arc::new(StubSender::failing(Outcome::Upstream("hs".into())));
+    let app = app_with_uploads(store().await, sender.clone(), Arc::new(StubUploads::ok()));
+    let other = Uuid::new_v4();
+    for _ in 0..2 {
+        let (status, _) = send(
+            &app,
+            "POST",
+            &media_uri(other, "!a:localhost"),
+            Some(request("t2")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+    }
+    assert_eq!(sender.txn_ids().len(), 2, "a failed send is not remembered");
+}
+
+/// A retry whose `txn_id` is still in flight waits for that send and gets
+/// its event id, and a client that disconnects mid-send does not strand its
+/// claims: the task settles them anyway (ADR 0142 section 4).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn send_media_retry_joins_an_in_flight_send_and_a_disconnect_still_settles() {
+    let gate = Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+    let sender = Arc::new(StubSender::ok("$slow:localhost").with_preview_gate(gate.clone()));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store().await, sender.clone(), uploads.clone());
+    let account_id = Uuid::new_v4();
+    let first_upload = Uuid::new_v4();
+    let uri = media_uri(account_id, "!a:localhost");
+
+    let first = {
+        let (app, uri) = (app.clone(), uri.clone());
+        tokio::spawn(async move {
+            send(
+                &app,
+                "POST",
+                &uri,
+                Some(json!({"upload_id": first_upload, "txn_id": "t"})),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), gate.0.notified())
+        .await
+        .expect("the first send reached the sender");
+    // The client gives up: dropping the request must not cancel the send.
+    first.abort();
+    let retry = {
+        let (app, uri) = (app.clone(), uri.clone());
+        tokio::spawn(async move {
+            send(
+                &app,
+                "POST",
+                &uri,
+                Some(json!({"upload_id": Uuid::new_v4(), "txn_id": "t"})),
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !retry.is_finished(),
+        "the retry waits for the send in flight"
+    );
+    gate.1.notify_waiters();
+    let (status, body) = tokio::time::timeout(std::time::Duration::from_secs(5), retry)
+        .await
+        .expect("the retry is answered once the first send ends")
+        .unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["event_id"], "$slow:localhost");
+    assert_eq!(sender.txn_ids(), vec![Some("t".to_owned())], "sent once");
+    assert_eq!(
+        uploads.completes(),
+        vec![(account_id, first_upload)],
+        "the abandoned request's upload was still consumed"
+    );
+}
+
+/// The preview-aware path takes the same fields: the thumbnail rides on the
+/// attachment and the `txn_id` reaches the sender.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn send_media_with_previews_takes_info_thumbnail_and_txn_id() {
+    let sender = Arc::new(StubSender::ok("$p:localhost"));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store().await, sender.clone(), uploads.clone());
+    let (account_id, upload_id, thumb_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (status, body) = send(
+        &app,
+        "POST",
+        &media_uri(account_id, "!r:localhost"),
+        Some(json!({
+            "upload_id": upload_id,
+            "caption": "https://example.org",
+            "url_previews": [{"matched_url": "https://example.org"}],
+            "info": {"width": 4, "height": 3},
+            "thumbnail_upload_id": thumb_id,
+            "txn_id": "p1",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let [Call::SendPreviews {
+        attachment: Some(attachment),
+        ..
+    }] = &sender.calls()[..]
+    else {
+        panic!("{:?}", sender.calls());
+    };
+    assert_eq!((attachment.width, attachment.height), (Some(4), Some(3)));
+    assert_eq!(attachment.thumbnail, Some(common::stub_thumbnail()));
+    assert_eq!(sender.txn_ids(), vec![Some("p1".to_owned())]);
+    assert_eq!(
+        uploads.completes(),
+        vec![(account_id, upload_id), (account_id, thumb_id)]
+    );
 }
