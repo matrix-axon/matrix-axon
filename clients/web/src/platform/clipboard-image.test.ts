@@ -32,8 +32,73 @@ describe('Linux clipboard image fallback', () => {
     { types: ['text/uri-list'], text: '', expected: false },
   ])('checks both offered types and actual text ($types, $text)', (entry) => {
     expect(
-      canFallBackToClipboardImage({ types: entry.types }, entry.text),
+      canFallBackToClipboardImage(
+        { types: entry.types, getData: () => '' },
+        entry.text,
+      ),
     ).toBe(entry.expected)
+  })
+
+  const blobUrl = 'blob:axon://localhost/707f6ff3-488c-4739-abc9-65a47e5dad86'
+  const imageUrl = 'https://example.org/image.png'
+
+  it.each([
+    {
+      name: 'an image whose blob src WebKit stripped',
+      uri: blobUrl,
+      html: '<img class="media-image">',
+      text: '',
+      expected: true,
+    },
+    {
+      name: 'a copied image with its address also exposed as plain text',
+      uri: imageUrl,
+      html: `<img src="${imageUrl}">`,
+      text: imageUrl,
+      expected: true,
+    },
+    {
+      name: 'Copy Image Address',
+      uri: blobUrl,
+      html: `<a>${blobUrl}</a>`,
+      text: blobUrl,
+      expected: false,
+    },
+    {
+      name: 'a rich selection with an image and a caption',
+      uri: blobUrl,
+      html: '<img class="media-image">Caption',
+      text: '',
+      expected: false,
+    },
+    {
+      name: 'an image offered alongside independent plain text',
+      uri: blobUrl,
+      html: '<img class="media-image">',
+      text: 'Caption',
+      expected: false,
+    },
+    {
+      name: 'an image fragment with a different source URL',
+      uri: blobUrl,
+      html: `<img src="${imageUrl}">`,
+      text: blobUrl,
+      expected: false,
+    },
+  ])('handles $name', ({ uri, html, text, expected }) => {
+    const data: Record<string, string> = {
+      'text/uri-list': uri,
+      'text/html': html,
+    }
+    const types = Object.keys(data)
+    if (text !== '') types.push('text/plain')
+
+    expect(
+      canFallBackToClipboardImage(
+        { types, getData: (type) => data[type] ?? '' },
+        text,
+      ),
+    ).toBe(expected)
   })
 
   it('turns raw clipboard bytes into a correctly typed attachment', async () => {
