@@ -1080,7 +1080,7 @@ async fn send_with_previews_in_room(
                 ));
             }
             let mut send = room.send_raw("m.room.message", content);
-            let txn_id = txn_id.map(media_transaction_id);
+            let txn_id = txn_id.map(|txn_id| media_transaction_id(room.room_id(), txn_id));
             if let Some(txn_id) = &txn_id {
                 send = send.with_transaction_id(txn_id);
             }
@@ -1162,11 +1162,20 @@ impl MediaClock {
     }
 }
 
-/// The Matrix transaction id for a client's `txn_id` (ADR 0142 section 4).
-/// Every Axon client of an account shares one Matrix device, so the prefix
-/// keeps these apart from the SDK's own random ids.
-fn media_transaction_id(txn_id: &str) -> OwnedTransactionId {
-    OwnedTransactionId::from(format!("axon-media-{txn_id}"))
+/// The Matrix transaction id for a client's `txn_id` in `room` (ADR 0142
+/// section 4). Every Axon client of an account shares one Matrix device, so
+/// the prefix keeps these apart from the SDK's own random ids.
+///
+/// The spec scopes a transaction id to the device and the endpoint, and the
+/// endpoint names the room, which is how Axon's own retry map is keyed too.
+/// A homeserver that keyed on the device alone could answer a send to room B
+/// with room A's event, so the id also carries a stable hash of the room id:
+/// the same `txn_id` in two rooms is two transactions everywhere.
+fn media_transaction_id(room_id: &RoomId, txn_id: &str) -> OwnedTransactionId {
+    use sha2::{Digest, Sha256};
+    let room = Sha256::digest(room_id.as_bytes());
+    let room: String = room[..8].iter().map(|b| format!("{b:02x}")).collect();
+    OwnedTransactionId::from(format!("axon-media-{room}-{txn_id}"))
 }
 
 /// Upload a thumbnail on a best-effort basis (ADR 0142 section 6): a
@@ -1237,7 +1246,12 @@ async fn upload_media(
         .await?;
     // `m.audio` has no thumbnail; the API refuses one, so this only guards.
     let thumbnail = match thumbnail.filter(|_| kind != MediaSendKind::Audio) {
-        Some(thumbnail) => clock.thumbnail(room, thumbnail, encrypted).await,
+        Some(thumbnail) => clock
+            .thumbnail(room, thumbnail, encrypted)
+            .await
+            // As on the preview path: an odd URI from the homeserver costs the
+            // thumbnail, not the send.
+            .filter(|(source, _)| validate_preview_media_source(source).is_ok()),
         None => None,
     };
     Ok(media_message_type(
@@ -1308,7 +1322,7 @@ async fn send_media_in_room(
                     .await?;
             let mut send = room.send(content);
             if let Some(txn_id) = txn_id {
-                send = send.with_transaction_id(media_transaction_id(txn_id));
+                send = send.with_transaction_id(media_transaction_id(room.room_id(), txn_id));
             }
             let resp = send.await.map_err(map_sdk_err)?;
             Ok(resp.response.event_id.to_string())
@@ -3782,6 +3796,31 @@ mod tests {
         server.abort();
     }
 
+    /// The #1241 review: the Matrix transaction id carries a stable hash of
+    /// the room, so the same `txn_id` in two rooms is two transactions even
+    /// on a homeserver that keys on the device alone.
+    #[test]
+    fn media_transaction_ids_are_stable_and_per_room() {
+        let a = matrix_sdk::ruma::room_id!("!a:example.org");
+        let b = matrix_sdk::ruma::room_id!("!b:example.org");
+        let id = super::media_transaction_id(a, "t-1");
+        assert_eq!(id, super::media_transaction_id(a, "t-1"), "stable");
+        assert_ne!(id, super::media_transaction_id(b, "t-1"), "per room");
+        assert_ne!(id, super::media_transaction_id(a, "t-2"), "per txn_id");
+        let id = id.to_string();
+        assert!(
+            id.starts_with("axon-media-") && id.ends_with("-t-1"),
+            "{id}"
+        );
+        // The longest client id still fits Matrix's 255-byte limit.
+        assert!(
+            super::media_transaction_id(a, &"x".repeat(64))
+                .as_str()
+                .len()
+                <= 255
+        );
+    }
+
     /// How the thumbnail test's homeserver treats an upload of
     /// [`THUMB_LEN`] bytes, which only the thumbnail has.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -3789,6 +3828,8 @@ mod tests {
         Accept,
         Reject,
         Slow,
+        /// Accept it, but answer with a URI too long to embed.
+        OddUri,
     }
 
     const THUMB_LEN: usize = 7;
@@ -3845,6 +3886,10 @@ mod tests {
                     }
                     ThumbUpload::Slow => {
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await
+                    }
+                    ThumbUpload::OddUri => {
+                        let uri = format!("mxc://localhost/{}", "a".repeat(4096));
+                        return Json(json!({"content_uri": uri})).into_response();
                     }
                 }
                 return Json(json!({"content_uri":"mxc://localhost/thumb"})).into_response();
@@ -3941,7 +3986,10 @@ mod tests {
                 "{kind:?}: the original, then the thumbnail"
             );
             assert!(
-                path.ends_with("/send/m.room.message/axon-media-abc-123"),
+                path.ends_with(&format!(
+                    "/send/m.room.message/{}",
+                    super::media_transaction_id(room.room_id(), "abc-123")
+                )),
                 "{path}"
             );
             assert_eq!(content["msgtype"], msgtype);
@@ -3992,6 +4040,23 @@ mod tests {
             }
         }
 
+        // A thumbnail URI the homeserver answers with that could not be
+        // embedded costs the thumbnail, not the send, on the plain path too.
+        seen.lock().unwrap().mode = Some(ThumbUpload::OddUri);
+        super::send_media_in_room(
+            &room,
+            with_thumbnail(MediaSendKind::Image, "image/png"),
+            None,
+            None,
+            Relation::default(),
+            None,
+            super::MediaClock::start(TEST_BOUNDS),
+        )
+        .await
+        .expect("an odd thumbnail URI does not fail the send");
+        let (_, _, content) = take(&seen);
+        assert!(content["info"].get("thumbnail_url").is_none(), "{content}");
+
         // `m.audio` has no thumbnail in the spec: none is uploaded.
         seen.lock().unwrap().mode = Some(ThumbUpload::Accept);
         super::send_media_in_room(
@@ -4035,7 +4100,10 @@ mod tests {
         let (uploads, path, content) = take(&seen);
         assert_eq!(uploads.len(), 2);
         assert!(
-            path.ends_with("/send/m.room.message/axon-media-p-1"),
+            path.ends_with(&format!(
+                "/send/m.room.message/{}",
+                super::media_transaction_id(room.room_id(), "p-1")
+            )),
             "{path}"
         );
         assert_eq!(content["info"]["thumbnail_url"], "mxc://localhost/thumb");

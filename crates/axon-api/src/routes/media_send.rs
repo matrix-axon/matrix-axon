@@ -25,6 +25,12 @@ const CLIENT_THUMBNAIL_BUDGET: Duration = Duration::from_secs(5);
 const TXN_REMEMBERED_FOR: Duration = Duration::from_secs(10 * 60);
 /// The most `txn_id`s remembered per account.
 const TXNS_PER_ACCOUNT: usize = 256;
+/// The longest a retry waits for the send its `txn_id` names. Each step of
+/// that send is bounded (60 s for the send, plus 5 s and 10 s for a
+/// thumbnail), but its claims read the database and local disk untimed, so
+/// the wait gets a bound of its own: a retry that hits it gets a `504`, and
+/// the next one joins again or gets the event.
+const JOIN_WAIT: Duration = Duration::from_secs(120);
 
 /// The fields ADR 0142 adds to `send-media`, shared by both send paths.
 #[derive(Debug, Clone, Default)]
@@ -33,15 +39,41 @@ pub(super) struct MediaFields {
     pub info: Option<SendMediaInfo>,
     pub thumbnail_upload_id: Option<Uuid>,
     pub txn_id: Option<String>,
+    /// What the request asks to send, apart from upload ids, which change
+    /// when a client stages the file again for a retry. A `txn_id` hit with a
+    /// different fingerprint is another message reusing the id.
+    pub fingerprint: u64,
 }
 
 impl From<&SendMediaRequest> for MediaFields {
     fn from(r: &SendMediaRequest) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        r.caption
+            .as_deref()
+            .filter(|c| !c.is_empty())
+            .hash(&mut hasher);
+        (&r.format, &r.formatted_body, &r.reply_to, &r.thread_root).hash(&mut hasher);
+        r.info
+            .as_ref()
+            .map(|i| (i.width, i.height, i.duration_ms))
+            .hash(&mut hasher);
+        r.thumbnail_upload_id.is_some().hash(&mut hasher);
+        r.url_previews
+            .as_ref()
+            .map(|previews| {
+                previews
+                    .iter()
+                    .map(|p| (&p.matched_url, &p.title, &p.description, &p.site_name))
+                    .collect::<Vec<_>>()
+            })
+            .hash(&mut hasher);
         Self {
             upload_id: r.upload_id,
             info: r.info.clone(),
             thumbnail_upload_id: r.thumbnail_upload_id,
             txn_id: r.txn_id.clone(),
+            fingerprint: hasher.finish(),
         }
     }
 }
@@ -188,7 +220,16 @@ pub(super) async fn settle_claims(
 
 type TxnKey = (String, String);
 
-enum TxnEntry {
+struct TxnEntry {
+    state: TxnState,
+    /// The send's [`MediaFields::fingerprint`].
+    fingerprint: u64,
+    /// The uploads the send named. A joined retry never deletes these: they
+    /// belong to the send, which claims and settles them itself.
+    uploads: Vec<Uuid>,
+}
+
+enum TxnState {
     /// The owner's task sends the event id here when it succeeds, and drops
     /// the sender without one when it fails.
     InFlight(watch::Receiver<Option<String>>),
@@ -196,6 +237,12 @@ enum TxnEntry {
         event_id: String,
         at: Instant,
     },
+}
+
+impl TxnEntry {
+    fn expired(&self, now: Instant) -> bool {
+        matches!(self.state, TxnState::Sent { at, .. } if now.duration_since(at) >= TXN_REMEMBERED_FOR)
+    }
 }
 
 /// Recent `txn_id`s per account (ADR 0142 section 4), in memory only: after
@@ -212,30 +259,47 @@ enum Begin {
     /// No send holds this id: this request sends, and settles the id through
     /// the guard. `None` when the account's map is full of sends in flight.
     Owner(Option<TxnGuard>),
-    Wait(watch::Receiver<Option<String>>),
-    Sent(String),
+    /// The send holding the id, and the uploads it named.
+    Wait(watch::Receiver<Option<String>>, Vec<Uuid>),
+    Sent(String, Vec<Uuid>),
+    /// The id belongs to a different message.
+    Mismatch,
 }
 
 impl MediaTxns {
-    fn begin(&'static self, account_id: Uuid, key: TxnKey) -> Begin {
+    fn begin(
+        &'static self,
+        account_id: Uuid,
+        key: TxnKey,
+        fingerprint: u64,
+        uploads: Vec<Uuid>,
+    ) -> Begin {
         let mut accounts = self.accounts.lock().unwrap();
-        let txns = accounts.entry(account_id).or_default();
+        // Expire every account's old successes, not only this one's, so an
+        // account that stops sending media does not keep its entries.
         let now = Instant::now();
-        txns.retain(|_, entry| match entry {
-            TxnEntry::InFlight(_) => true,
-            TxnEntry::Sent { at, .. } => now.duration_since(*at) < TXN_REMEMBERED_FOR,
+        accounts.retain(|_, txns| {
+            txns.retain(|_, entry| !entry.expired(now));
+            !txns.is_empty()
         });
-        match txns.get(&key) {
-            Some(TxnEntry::Sent { event_id, .. }) => return Begin::Sent(event_id.clone()),
-            Some(TxnEntry::InFlight(rx)) => return Begin::Wait(rx.clone()),
-            None => {}
+        let txns = accounts.entry(account_id).or_default();
+        if let Some(entry) = txns.get(&key) {
+            if entry.fingerprint != fingerprint {
+                return Begin::Mismatch;
+            }
+            return match &entry.state {
+                TxnState::Sent { event_id, .. } => {
+                    Begin::Sent(event_id.clone(), entry.uploads.clone())
+                }
+                TxnState::InFlight(rx) => Begin::Wait(rx.clone(), entry.uploads.clone()),
+            };
         }
         if txns.len() >= TXNS_PER_ACCOUNT {
             let oldest = txns
                 .iter()
-                .filter_map(|(key, entry)| match entry {
-                    TxnEntry::Sent { at, .. } => Some((*at, key.clone())),
-                    TxnEntry::InFlight(_) => None,
+                .filter_map(|(key, entry)| match entry.state {
+                    TxnState::Sent { at, .. } => Some((at, key.clone())),
+                    TxnState::InFlight(_) => None,
                 })
                 .min();
             match oldest {
@@ -246,7 +310,14 @@ impl MediaTxns {
             }
         }
         let (tx, rx) = watch::channel(None);
-        txns.insert(key.clone(), TxnEntry::InFlight(rx));
+        txns.insert(
+            key.clone(),
+            TxnEntry {
+                state: TxnState::InFlight(rx),
+                fingerprint,
+                uploads,
+            },
+        );
         Begin::Owner(Some(TxnGuard {
             txns: self,
             account_id,
@@ -279,13 +350,12 @@ impl TxnGuard {
         };
         match result {
             Ok(event_id) => {
-                txns.insert(
-                    self.key.clone(),
-                    TxnEntry::Sent {
+                if let Some(entry) = txns.get_mut(&self.key) {
+                    entry.state = TxnState::Sent {
                         event_id: event_id.clone(),
                         at: Instant::now(),
-                    },
-                );
+                    };
+                }
                 self.tx.send_replace(Some(event_id.clone()));
             }
             Err(_) => {
@@ -316,10 +386,17 @@ impl Drop for TxnGuard {
 /// Run `send` once per `txn_id` in a room (ADR 0142 section 4).
 ///
 /// Without a `txn_id`, `send` just runs. With one, a retry whose id is in
-/// flight waits for that send, and one whose id succeeded recently gets its
-/// event id back; either way it sends nothing, and the staged uploads it
-/// named are deleted. A failed send is not remembered, so a retry after it,
-/// or one that was waiting on it, sends anew.
+/// flight waits for that send (up to [`JOIN_WAIT`]), and one whose id
+/// succeeded recently gets its event id back; either way it sends nothing,
+/// and the staged uploads it named are deleted, except those the earlier send
+/// named itself. A retry whose request differs from the earlier send's is a
+/// `409`, and its uploads are kept.
+///
+/// A failed send is not remembered, and that includes a `504`, whose outcome
+/// Axon cannot learn once it stops waiting. So a retry after it, or one that
+/// was waiting on it, sends anew. What keeps that from posting twice is the
+/// Matrix transaction id the `txn_id` becomes: a homeserver that did complete
+/// the first send returns that event for the same id in the same room.
 ///
 /// `send` receives the guard for the id, and must settle it in the task that
 /// owns the send, so a client that disconnects cannot leave the id stuck.
@@ -338,21 +415,34 @@ where
         return send(None).await;
     };
     let key = (room_id.to_owned(), txn_id.clone());
+    let own: Vec<Uuid> = fields.upload_ids().collect();
     loop {
-        let event_id = match MEDIA_TXNS.begin(account_id, key.clone()) {
+        let begin = MEDIA_TXNS.begin(account_id, key.clone(), fields.fingerprint, own.clone());
+        let (event_id, theirs) = match begin {
             Begin::Owner(guard) => return send(guard).await,
-            Begin::Sent(event_id) => event_id,
-            Begin::Wait(mut rx) => {
-                // No bound of its own: each step of the first send is bounded.
-                match rx.wait_for(Option::is_some).await {
-                    Ok(event_id) => event_id.clone().unwrap_or_default(),
+            Begin::Mismatch => {
+                return Err(ApiError::conflict(
+                    "txn_id was already used for a different send in this room",
+                ))
+            }
+            Begin::Sent(event_id, theirs) => (event_id, theirs),
+            Begin::Wait(mut rx, theirs) => {
+                match tokio::time::timeout(JOIN_WAIT, rx.wait_for(Option::is_some)).await {
+                    Ok(Ok(event_id)) => (event_id.clone().unwrap_or_default(), theirs),
                     // The first send failed and was forgotten: try again.
-                    Err(_) => continue,
+                    Ok(Err(_)) => continue,
+                    Err(_) => {
+                        return Err(ApiError::gateway_timeout(
+                            "the earlier send with this txn_id is still running",
+                        ))
+                    }
                 }
             }
         };
         tracing::info!(%account_id, %room_id, %event_id, "send-media retry joined an earlier send");
-        for id in fields.upload_ids() {
+        // Uploads the earlier send named are its own to claim and settle;
+        // deleting one could fail that send before it claims it.
+        for id in own.into_iter().filter(|id| !theirs.contains(id)) {
             match uploads.delete_upload(account_id, id).await {
                 Ok(()) | Err(crate::uploads::StageUploadError::NotFound(_)) => {}
                 Err(error) => {
@@ -367,6 +457,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `begin` with fingerprint 0 and no uploads.
+    fn begin(account: Uuid, key: TxnKey) -> Begin {
+        MEDIA_TXNS.begin(account, key, 0, Vec::new())
+    }
 
     fn fields() -> MediaFields {
         MediaFields {
@@ -454,42 +549,39 @@ mod tests {
     fn a_txn_is_joined_while_in_flight_remembered_on_success_and_forgotten_on_failure() {
         let account = Uuid::new_v4();
         let key = |txn: &str| ("!room:x".to_owned(), txn.to_owned());
-        let Begin::Owner(Some(guard)) = MEDIA_TXNS.begin(account, key("a")) else {
+        let Begin::Owner(Some(guard)) = begin(account, key("a")) else {
             panic!("the first send owns the id");
         };
-        let Begin::Wait(rx) = MEDIA_TXNS.begin(account, key("a")) else {
+        let Begin::Wait(rx, _) = begin(account, key("a")) else {
             panic!("a retry waits");
         };
         assert!(
             matches!(
-                MEDIA_TXNS.begin(account, ("!other:x".into(), "a".into())),
+                begin(account, ("!other:x".into(), "a".into())),
                 Begin::Owner(Some(_))
             ),
             "the same id in another room is another send"
         );
         guard.settle::<()>(&Ok("$e".into()));
         assert_eq!(rx.borrow().as_deref(), Some("$e"));
-        assert!(matches!(MEDIA_TXNS.begin(account, key("a")), Begin::Sent(e) if e == "$e"));
+        assert!(matches!(begin(account, key("a")), Begin::Sent(e, _) if e == "$e"));
 
-        let Begin::Owner(Some(guard)) = MEDIA_TXNS.begin(account, key("b")) else {
+        let Begin::Owner(Some(guard)) = begin(account, key("b")) else {
             panic!();
         };
-        let Begin::Wait(rx) = MEDIA_TXNS.begin(account, key("b")) else {
+        let Begin::Wait(rx, _) = begin(account, key("b")) else {
             panic!();
         };
         guard.settle(&Err(()));
         assert!(rx.has_changed().is_err(), "the waiter sees the failure");
-        assert!(matches!(
-            MEDIA_TXNS.begin(account, key("b")),
-            Begin::Owner(Some(_))
-        ));
+        assert!(matches!(begin(account, key("b")), Begin::Owner(Some(_))));
 
-        let Begin::Owner(Some(guard)) = MEDIA_TXNS.begin(account, key("c")) else {
+        let Begin::Owner(Some(guard)) = begin(account, key("c")) else {
             panic!();
         };
         drop(guard);
         assert!(
-            matches!(MEDIA_TXNS.begin(account, key("c")), Begin::Owner(Some(_))),
+            matches!(begin(account, key("c")), Begin::Owner(Some(_))),
             "a task that never settled does not pin the id"
         );
     }
@@ -499,18 +591,62 @@ mod tests {
         let account = Uuid::new_v4();
         let key = |i: usize| ("!room:x".to_owned(), format!("t{i}"));
         for i in 0..TXNS_PER_ACCOUNT {
-            let Begin::Owner(Some(guard)) = MEDIA_TXNS.begin(account, key(i)) else {
+            let Begin::Owner(Some(guard)) = begin(account, key(i)) else {
                 panic!();
             };
             guard.settle::<()>(&Ok(format!("$e{i}")));
         }
-        let Begin::Owner(Some(_new)) = MEDIA_TXNS.begin(account, key(9999)) else {
+        let Begin::Owner(Some(_new)) = begin(account, key(9999)) else {
             panic!("a full map evicts the oldest success");
         };
+        assert!(matches!(begin(account, key(0)), Begin::Owner(Some(_))));
+        assert!(matches!(begin(account, key(5)), Begin::Sent(..)));
+    }
+
+    /// A hit with another fingerprint is another message reusing the id; a
+    /// hit reports the uploads the earlier send named, so a retry leaves them
+    /// alone; and every account's expired entries go, not only the caller's.
+    #[test]
+    fn a_hit_checks_the_fingerprint_reports_the_owners_uploads_and_expiry_spans_accounts() {
+        let account = Uuid::new_v4();
+        let key = ("!room:x".to_owned(), "f".to_owned());
+        let mine = vec![Uuid::new_v4(), Uuid::new_v4()];
+        let Begin::Owner(Some(guard)) = MEDIA_TXNS.begin(account, key.clone(), 7, mine.clone())
+        else {
+            panic!();
+        };
         assert!(matches!(
-            MEDIA_TXNS.begin(account, key(0)),
-            Begin::Owner(Some(_))
+            MEDIA_TXNS.begin(account, key.clone(), 8, Vec::new()),
+            Begin::Mismatch
         ));
-        assert!(matches!(MEDIA_TXNS.begin(account, key(5)), Begin::Sent(_)));
+        assert!(
+            matches!(MEDIA_TXNS.begin(account, key.clone(), 7, Vec::new()), Begin::Wait(_, ref ids) if *ids == mine)
+        );
+        guard.settle::<()>(&Ok("$f".into()));
+        assert!(
+            matches!(MEDIA_TXNS.begin(account, key.clone(), 7, Vec::new()), Begin::Sent(ref e, ref ids) if e == "$f" && *ids == mine)
+        );
+        assert!(matches!(
+            MEDIA_TXNS.begin(account, key.clone(), 8, Vec::new()),
+            Begin::Mismatch
+        ));
+
+        // Age the success past the window, then touch another account.
+        {
+            let mut accounts = MEDIA_TXNS.accounts.lock().unwrap();
+            let entry = accounts.get_mut(&account).unwrap().get_mut(&key).unwrap();
+            if let TxnState::Sent { at, .. } = &mut entry.state {
+                *at -= TXN_REMEMBERED_FOR;
+            }
+        }
+        let other = Uuid::new_v4();
+        let Begin::Owner(Some(guard)) = begin(other, key.clone()) else {
+            panic!();
+        };
+        guard.settle::<()>(&Err(()));
+        assert!(
+            !MEDIA_TXNS.accounts.lock().unwrap().contains_key(&account),
+            "an idle account's expired entries were dropped"
+        );
     }
 }

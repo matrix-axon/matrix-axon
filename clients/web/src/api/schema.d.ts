@@ -6726,9 +6726,16 @@ export interface components {
              *     section 4). A retry with the same id in the same room joins the send
              *     still in flight, or, within 10 minutes of its success, gets its event
              *     id without sending again; the retry's own staged uploads are then
-             *     deleted. It is also the Matrix transaction id, so the homeserver
-             *     deduplicates too. Deduplication holds only against a server that
-             *     advertises `send_media_thumbnails`.
+             *     deleted. A retry whose caption, relation, `info`, thumbnail or
+             *     previews differ from the first send's is a `409`, and keeps its
+             *     uploads.
+             *
+             *     A send that failed, a `504` included, is not remembered: Axon cannot
+             *     learn the outcome of a call it stopped waiting for. Its retry uploads
+             *     and sends again, under the same Matrix transaction id, so a homeserver
+             *     that completed the first send returns that event instead of posting
+             *     another. Deduplication holds only against a server that advertises
+             *     `send_media_thumbnails`.
              */
             txn_id?: string | null;
             /**
@@ -11655,6 +11662,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description txn_id was already used for a different send in this room. Nothing was sent and the request's uploads are kept. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             /** @description Definite event_too_large, preview_too_large or payload_too_large validation rejection; preview-aware content uses a 40960-byte budget including 12288 bytes reserved for media fields. No preflight upload claims or event dispatch. */
             413: {
                 headers: {
@@ -11682,7 +11698,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Send deadline exceeded: outcome unknown. Resend only with the same txn_id, which joins or returns the earlier send. */
+            /** @description Send deadline exceeded: outcome unknown, or a retry waited too long for the earlier send with its txn_id. Resend only with the same txn_id: Axon does not remember a timed-out send, so the retry uploads again, but it reuses the Matrix transaction id, so a homeserver that completed the first send returns that event instead of posting another. */
             504: {
                 headers: {
                     [name: string]: unknown;

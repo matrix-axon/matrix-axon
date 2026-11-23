@@ -1460,3 +1460,45 @@ async fn send_media_with_previews_takes_info_thumbnail_and_txn_id() {
         vec![(account_id, upload_id), (account_id, thumb_id)]
     );
 }
+
+/// The #1241 review: a `txn_id` reused for a different message is a `409`
+/// that keeps the new message's uploads, and a retry never deletes an upload
+/// the earlier send named itself.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn send_media_txn_id_reuse_is_409_and_a_retry_keeps_the_senders_uploads() {
+    let sender = Arc::new(StubSender::ok("$first:localhost"));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store().await, sender.clone(), uploads.clone());
+    let account_id = Uuid::new_v4();
+    let uri = media_uri(account_id, "!a:localhost");
+    let upload_id = Uuid::new_v4();
+    let first = json!({"upload_id": upload_id, "caption": "one", "txn_id": "r1"});
+    assert_eq!(
+        send(&app, "POST", &uri, Some(first.clone())).await.0,
+        StatusCode::OK
+    );
+
+    // Same id, different caption: another message.
+    let other = Uuid::new_v4();
+    let (status, body) = send(
+        &app,
+        "POST",
+        &uri,
+        Some(json!({"upload_id": other, "caption": "two", "txn_id": "r1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        uploads.deletes().is_empty(),
+        "the other message's upload is kept"
+    );
+
+    // The same request again, naming the first send's own upload: answered
+    // from the map, and that upload is not the retry's to delete.
+    let (status, body) = send(&app, "POST", &uri, Some(first)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["event_id"], "$first:localhost");
+    assert!(uploads.deletes().is_empty(), "{:?}", uploads.deletes());
+    assert_eq!(sender.calls().len(), 1);
+}

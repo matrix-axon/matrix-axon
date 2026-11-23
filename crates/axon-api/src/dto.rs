@@ -1277,9 +1277,16 @@ pub struct SendMediaRequest {
     /// section 4). A retry with the same id in the same room joins the send
     /// still in flight, or, within 10 minutes of its success, gets its event
     /// id without sending again; the retry's own staged uploads are then
-    /// deleted. It is also the Matrix transaction id, so the homeserver
-    /// deduplicates too. Deduplication holds only against a server that
-    /// advertises `send_media_thumbnails`.
+    /// deleted. A retry whose caption, relation, `info`, thumbnail or
+    /// previews differ from the first send's is a `409`, and keeps its
+    /// uploads.
+    ///
+    /// A send that failed, a `504` included, is not remembered: Axon cannot
+    /// learn the outcome of a call it stopped waiting for. Its retry uploads
+    /// and sends again, under the same Matrix transaction id, so a homeserver
+    /// that completed the first send returns that event instead of posting
+    /// another. Deduplication holds only against a server that advertises
+    /// `send_media_thumbnails`.
     #[serde(default)]
     #[schema(min_length = 1, max_length = 64, pattern = "^[A-Za-z0-9._~-]+$")]
     pub txn_id: Option<String>,
