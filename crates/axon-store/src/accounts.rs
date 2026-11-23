@@ -153,6 +153,8 @@ pub struct Account {
     /// Whether Axon's device still needs to be cross-signed after a master-key
     /// replacement (ADR 0136).
     pub own_identity_changed: bool,
+    /// Whether this account excludes devices that have not been cross-signed (ADR 0136).
+    pub exclude_insecure_devices: bool,
     /// Durable intent that a megolm backup enable/export is in flight (ADR 0098).
     /// Set true before `recovery().enable_backup()`; cleared only after
     /// `export_secrets` succeeds. Crash-resume uses this plus this device's
@@ -181,6 +183,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for Account {
             state: AccountState::from_db(&state)?,
             verified: row.try_get("verified")?,
             own_identity_changed: row.try_get("own_identity_changed")?,
+            exclude_insecure_devices: row.try_get("exclude_insecure_devices")?,
             backup_enable_intent: row.try_get("backup_enable_intent")?,
             sync_token: row.try_get("sync_token")?,
             created_at: row.try_get("created_at")?,
@@ -191,7 +194,8 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for Account {
 
 /// Columns selected for an [`Account`] (no encrypted token).
 pub(crate) const ACCOUNT_COLUMNS: &str = "account_id, user_id, homeserver_url, device_id, \
-    auth_kind, state, verified, own_identity_changed, backup_enable_intent, sync_token, \
+    auth_kind, state, verified, own_identity_changed, exclude_insecure_devices, \
+    backup_enable_intent, sync_token, \
     created_at, updated_at";
 
 const ACCOUNT_VERIFICATION_DIFF: &str = "verified IS DISTINCT FROM $2 \
@@ -347,6 +351,22 @@ impl Store {
             .bind(state.as_str())
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    /// Persist the account's MSC4153 setting without changing its session or archive.
+    pub async fn set_exclude_insecure_devices(
+        &self,
+        account_id: Uuid,
+        enabled: bool,
+    ) -> Result<(), StoreError> {
+        sqlx_core::query::query(
+            "UPDATE accounts SET exclude_insecure_devices = $2 WHERE account_id = $1",
+        )
+        .bind(account_id)
+        .bind(enabled)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 

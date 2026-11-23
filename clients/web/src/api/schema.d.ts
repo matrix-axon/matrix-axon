@@ -489,6 +489,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/accounts/{account_id}/exclude_insecure_devices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set insecure device exclusion
+         * @description Enabling requires Axon's own device to be cross-signed and an acknowledgement
+         *     of the current impact. Disabling needs only a valid bearer. A changed
+         *     setting on an active account restarts its SDK session with the persisted
+         *     policy. Previously decrypted history is preserved.
+         */
+        put: operations["set_exclude_insecure_devices"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/accounts/{account_id}/exclude_insecure_devices/impact": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the impact of insecure device exclusion
+         * @description Lists joined encrypted rooms and the members with affected devices known to
+         *     Axon. Devices that have not uploaded identity keys are absent from the list.
+         *     A lazy membership roster may need to sync before this read succeeds.
+         */
+        get: operations["insecure_devices_impact"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/accounts/{account_id}/link-previews/generate": {
         parameters: {
             query?: never;
@@ -2670,6 +2715,11 @@ export interface components {
             created_at: string;
             /** @description Device ID of axon's current session, once it has logged in. */
             device_id?: string | null;
+            /**
+             * @description Whether this account excludes devices that have not been cross-signed (ADR 0136).
+             *     Current servers always send this field. Treat it as false when absent on an older server.
+             */
+            exclude_insecure_devices?: boolean;
             /** @description Homeserver base URL. */
             homeserver_url: string;
             /**
@@ -2760,6 +2810,11 @@ export interface components {
                 created_at: string;
                 /** @description Device ID of axon's current session, once it has logged in. */
                 device_id?: string | null;
+                /**
+                 * @description Whether this account excludes devices that have not been cross-signed (ADR 0136).
+                 *     Current servers always send this field. Treat it as false when absent on an older server.
+                 */
+                exclude_insecure_devices?: boolean;
                 /** @description Homeserver base URL. */
                 homeserver_url: string;
                 /**
@@ -3108,6 +3163,20 @@ export interface components {
                  */
                 status: components["schemas"]["PreviewGenerationStatus"];
                 thumbnail_status: components["schemas"]["PreviewThumbnailStatus"];
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_InsecureDeviceImpactDto: {
+            data: {
+                /** @description Pass this value back with the enable request, even if the list is empty. */
+                acknowledgement_token: string;
+                rooms: components["schemas"]["InsecureDeviceRoomDto"][];
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_InsecureDevicesSettingDto: {
+            data: {
+                enabled: boolean;
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -3779,6 +3848,11 @@ export interface components {
                 created_at: string;
                 /** @description Device ID of axon's current session, once it has logged in. */
                 device_id?: string | null;
+                /**
+                 * @description Whether this account excludes devices that have not been cross-signed (ADR 0136).
+                 *     Current servers always send this field. Treat it as false when absent on an older server.
+                 */
+                exclude_insecure_devices?: boolean;
                 /** @description Homeserver base URL. */
                 homeserver_url: string;
                 /**
@@ -5446,6 +5520,23 @@ export interface components {
          * @enum {string}
          */
         InfinitePowerLevel: "infinite";
+        InsecureDeviceImpactDto: {
+            /** @description Pass this value back with the enable request, even if the list is empty. */
+            acknowledgement_token: string;
+            rooms: components["schemas"]["InsecureDeviceRoomDto"][];
+        };
+        InsecureDeviceRoomDto: {
+            /** @description Members with at least one known device that is not cross-signed. */
+            member_user_ids: string[];
+            room_id: string;
+        };
+        InsecureDevicesConflictResponse: {
+            error: components["schemas"]["ErrorBody"];
+            impact?: null | components["schemas"]["InsecureDeviceImpactDto"];
+        };
+        InsecureDevicesSettingDto: {
+            enabled: boolean;
+        };
         /**
          * @description A pending room invite (`GET /v1/invites`, ADR 0091). Identity is
          *     `(account_id, room_id)` — the same room invited to two accounts appears
@@ -6874,6 +6965,11 @@ export interface components {
          */
         SetDisplayNameRequest: {
             display_name: string;
+        };
+        SetInsecureDevicesRequest: {
+            /** @description Required when switching from off to on. Use the current impact token. */
+            acknowledgement_token?: string | null;
+            enabled: boolean;
         };
         /**
          * @description Request body for setting a room's avatar (`PUT …/rooms/{room_id}/avatar`;
@@ -8528,6 +8624,159 @@ export interface operations {
             };
             /** @description Upstream error reading the sender's keys */
             502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    set_exclude_insecure_devices: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetInsecureDevicesRequest"];
+            };
+        };
+        responses: {
+            /** @description The persisted setting */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_InsecureDevicesSettingDto"];
+                };
+            };
+            /** @description Malformed request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account state conflict, own device not cross-signed, or missing or stale acknowledgement. For impact_acknowledgement_required, review the returned impact before retrying. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InsecureDevicesConflictResponse"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The account or its room rosters are not ready */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    insecure_devices_impact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current impact and acknowledgement token */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_InsecureDeviceImpactDto"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account is inactive or being deleted */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The account or its room rosters are not ready */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

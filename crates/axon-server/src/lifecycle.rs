@@ -7,12 +7,13 @@
 
 use async_trait::async_trait;
 use axon_api::{
-    AccountLifecycle, BackupAction, DeleteError, LoginError, LogoutError, RecoverError,
-    RecoverResult, RedecryptUtdsError, RedecryptUtdsStats,
+    AccountLifecycle, BackupAction, DeleteError, InsecureDevicesError, LoginError, LogoutError,
+    RecoverError, RecoverResult, RedecryptUtdsError, RedecryptUtdsStats,
 };
+use axon_core::insecure_devices::InsecureDeviceImpact;
 use axon_sync::{
-    AccountLifecycle as SyncLifecycle, BackupAction as SyncBackupAction, LifecycleError,
-    RedecryptSummary,
+    AccountLifecycle as SyncLifecycle, BackupAction as SyncBackupAction,
+    InsecureDevicesError as SyncInsecureDevicesError, LifecycleError, RedecryptSummary,
 };
 use uuid::Uuid;
 
@@ -221,6 +222,33 @@ fn map_backup_action(action: SyncBackupAction) -> BackupAction {
     }
 }
 
+fn map_insecure_devices_err(error: SyncInsecureDevicesError) -> InsecureDevicesError {
+    match error {
+        SyncInsecureDevicesError::OwnDeviceNotCrossSigned => {
+            InsecureDevicesError::OwnDeviceNotCrossSigned
+        }
+        SyncInsecureDevicesError::AcknowledgementRequired(impact) => {
+            InsecureDevicesError::AcknowledgementRequired(impact)
+        }
+        SyncInsecureDevicesError::ImpactUnavailable
+        | SyncInsecureDevicesError::Lifecycle(LifecycleError::Upstream(_)) => {
+            InsecureDevicesError::Unavailable
+        }
+        SyncInsecureDevicesError::Lifecycle(LifecycleError::NotFound(id)) => {
+            InsecureDevicesError::NotFound(format!("account {id} not found"))
+        }
+        SyncInsecureDevicesError::Lifecycle(
+            error @ (LifecycleError::NotActive(_)
+            | LifecycleError::BeingDeleted(_)
+            | LifecycleError::Draining(_)),
+        ) => InsecureDevicesError::Conflict(error.to_string()),
+        SyncInsecureDevicesError::Lifecycle(error) => {
+            tracing::error!(%error, "MSC4153 account lifecycle operation failed");
+            InsecureDevicesError::Internal
+        }
+    }
+}
+
 #[async_trait]
 impl AccountLifecycle for LifecycleAdapter {
     async fn login(
@@ -250,6 +278,28 @@ impl AccountLifecycle for LifecycleAdapter {
 
     async fn logout(&self, account_id: Uuid) -> Result<(), LogoutError> {
         self.0.logout(account_id).await.map_err(map_logout_err)
+    }
+
+    async fn insecure_devices_impact(
+        &self,
+        account_id: Uuid,
+    ) -> Result<InsecureDeviceImpact, InsecureDevicesError> {
+        self.0
+            .insecure_devices_impact(account_id)
+            .await
+            .map_err(map_insecure_devices_err)
+    }
+
+    async fn set_exclude_insecure_devices(
+        &self,
+        account_id: Uuid,
+        enabled: bool,
+        acknowledgement_token: Option<&str>,
+    ) -> Result<(), InsecureDevicesError> {
+        self.0
+            .set_exclude_insecure_devices(account_id, enabled, acknowledgement_token)
+            .await
+            .map_err(map_insecure_devices_err)
     }
 
     async fn delete(&self, account_id: Uuid) -> Result<(), DeleteError> {

@@ -32,6 +32,8 @@ use matrix_sdk::{
     Client, ClientBuildError, ClientBuilder, SessionMeta, SessionTokens, SqliteStoreConfig,
 };
 
+use matrix_sdk_base::crypto::{CollectStrategy, DecryptionSettings, TrustRequirement};
+
 use crate::error::{sdk_err, SyncError};
 
 /// Apply the [`ClientBuilder`] settings shared by every production client.
@@ -108,11 +110,24 @@ pub(crate) fn preview_http_client() -> Result<reqwest::Client, reqwest::Error> {
         .build()
 }
 
-fn configure_client_builder(builder: ClientBuilder, handle_refresh_tokens: bool) -> ClientBuilder {
+fn configure_client_builder(
+    builder: ClientBuilder,
+    handle_refresh_tokens: bool,
+    exclude_insecure_devices: bool,
+) -> ClientBuilder {
     let builder = builder
         .user_agent(user_agent())
         .with_encryption_settings(production_encryption_settings())
         .cross_process_store_config(CrossProcessLockConfig::SingleProcess);
+    let builder = if exclude_insecure_devices {
+        builder
+            .with_room_key_recipient_strategy(CollectStrategy::IdentityBasedStrategy)
+            .with_decryption_settings(DecryptionSettings {
+                sender_device_trust_requirement: TrustRequirement::CrossSignedOrLegacy,
+            })
+    } else {
+        builder
+    };
     if handle_refresh_tokens {
         builder.handle_refresh_tokens()
     } else {
@@ -137,10 +152,15 @@ fn configure_client_builder(builder: ClientBuilder, handle_refresh_tokens: bool)
 /// process on the same directory is unsupported regardless — and on a spinning
 /// disk that lease renewal is a continuous stream of tiny fsync'd writes (~43
 /// KB/s, ~3.7 GB/day) with the server completely idle.
-fn client_builder(homeserver_url: &str, handle_refresh_tokens: bool) -> ClientBuilder {
+fn client_builder(
+    homeserver_url: &str,
+    handle_refresh_tokens: bool,
+    exclude_insecure_devices: bool,
+) -> ClientBuilder {
     configure_client_builder(
         Client::builder().homeserver_url(homeserver_url),
         handle_refresh_tokens,
+        exclude_insecure_devices,
     )
 }
 
@@ -226,6 +246,7 @@ async fn restore_account_client(
     let client = client_builder(
         &account.homeserver_url,
         account.auth_kind == AccountAuthKind::OAuth,
+        account.exclude_insecure_devices,
     )
     .sqlite_store_with_config_and_cache_path(sqlite_config(&data_dir, store_key), None::<&Path>)
     .build()
@@ -267,14 +288,15 @@ pub(crate) async fn login_new_device(
     let backup = config.data_dir.join(format!("{}.prev", account.account_id));
 
     with_staged_store_dir(&data_dir, &backup, || async {
-        let client = client_builder(&account.homeserver_url, false)
-            .sqlite_store_with_config_and_cache_path(
-                sqlite_config(&data_dir, store_key),
-                None::<&Path>,
-            )
-            .build()
-            .await
-            .map_err(sdk_err)?;
+        let client = client_builder(
+            &account.homeserver_url,
+            false,
+            account.exclude_insecure_devices,
+        )
+        .sqlite_store_with_config_and_cache_path(sqlite_config(&data_dir, store_key), None::<&Path>)
+        .build()
+        .await
+        .map_err(sdk_err)?;
 
         let response = client
             .matrix_auth()
@@ -366,14 +388,15 @@ pub(crate) async fn import_token_new_device(
     let backup = config.data_dir.join(format!("{}.prev", account.account_id));
 
     with_staged_store_dir(&data_dir, &backup, || async {
-        let client = client_builder(&account.homeserver_url, false)
-            .sqlite_store_with_config_and_cache_path(
-                sqlite_config(&data_dir, store_key),
-                None::<&Path>,
-            )
-            .build()
-            .await
-            .map_err(sdk_err)?;
+        let client = client_builder(
+            &account.homeserver_url,
+            false,
+            account.exclude_insecure_devices,
+        )
+        .sqlite_store_with_config_and_cache_path(sqlite_config(&data_dir, store_key), None::<&Path>)
+        .build()
+        .await
+        .map_err(sdk_err)?;
 
         // `restore` reads the device id off the `Account` it's given (not the
         // DB row, which has none yet for a fresh identity) — supply it via a
@@ -516,6 +539,7 @@ pub(crate) async fn build_matrix_oauth_acquire_client(
     config: &SyncConfig,
     staging_dir_name: &str,
     server_name_or_url: &str,
+    exclude_insecure_devices: bool,
 ) -> Result<Client, MatrixOAuthAcquireClientError> {
     let store_key = config
         .store_key
@@ -533,6 +557,7 @@ pub(crate) async fn build_matrix_oauth_acquire_client(
     configure_client_builder(
         Client::builder().server_name_or_homeserver_url(server_name_or_url),
         true,
+        exclude_insecure_devices,
     )
     .request_config(RequestConfig::new().timeout(timeout))
     .sqlite_store_with_config_and_cache_path(sqlite_config(&staging, store_key), None::<&Path>)
@@ -841,6 +866,7 @@ mod tests {
             state: AccountState::Active,
             verified: false,
             own_identity_changed: false,
+            exclude_insecure_devices: false,
             backup_enable_intent: false,
             sync_token: None,
             created_at: Utc::now(),
@@ -959,14 +985,18 @@ mod tests {
             .await
             .unwrap();
 
-        let acquisition_client = client_builder(&account.homeserver_url, true)
-            .sqlite_store_with_config_and_cache_path(
-                sqlite_config(&staging, config.store_key.as_deref().unwrap()),
-                None::<&std::path::Path>,
-            )
-            .build()
-            .await
-            .unwrap();
+        let acquisition_client = client_builder(
+            &account.homeserver_url,
+            true,
+            account.exclude_insecure_devices,
+        )
+        .sqlite_store_with_config_and_cache_path(
+            sqlite_config(&staging, config.store_key.as_deref().unwrap()),
+            None::<&std::path::Path>,
+        )
+        .build()
+        .await
+        .unwrap();
         restore(
             &acquisition_client,
             &account,
@@ -1052,8 +1082,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn account_policy_configures_both_sdk_trust_rules() {
+        use matrix_sdk_base::crypto::TrustRequirement;
+        for (enabled, collect) in [(false, "AllDevices"), (true, "IdentityBasedStrategy")] {
+            let builder = client_builder("https://example.org/", false, enabled);
+            // The SDK exposes the built decryption settings, but its room-key
+            // strategy is only observable via the builder's Debug output.
+            let settings = format!("{builder:?}");
+            assert!(settings.contains(&format!("room_key_recipient_strategy: {collect}")));
+            assert!(settings.contains("backup_download_strategy: AfterDecryptionFailure"));
+            let client = builder.build().await.unwrap();
+            assert!(matches!(
+                (
+                    enabled,
+                    &client.decryption_settings().sender_device_trust_requirement
+                ),
+                (true, TrustRequirement::CrossSignedOrLegacy)
+                    | (false, TrustRequirement::Untrusted)
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn restores_legacy_matrix_session_without_refresh_token() {
-        let client = client_builder("https://example.org/", false)
+        let client = client_builder("https://example.org/", false, false)
             .build()
             .await
             .unwrap();
@@ -1074,7 +1126,7 @@ mod tests {
 
     #[tokio::test]
     async fn restores_oauth_session_with_rotating_refresh_state() {
-        let client = client_builder("https://example.org/", true)
+        let client = client_builder("https://example.org/", true, false)
             .build()
             .await
             .unwrap();

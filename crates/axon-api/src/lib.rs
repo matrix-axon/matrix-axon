@@ -64,8 +64,8 @@ pub use homeserver_status::{
     HomeserverBreakerSnapshot, HomeserverGateSnapshot, HomeserverStatusProvider,
 };
 pub use lifecycle::{
-    AccountLifecycle, BackupAction, DeleteError, LoginError, LogoutError, RecoverError,
-    RecoverResult, RedecryptUtdsError, RedecryptUtdsStats,
+    AccountLifecycle, BackupAction, DeleteError, InsecureDevicesError, LoginError, LogoutError,
+    RecoverError, RecoverResult, RedecryptUtdsError, RedecryptUtdsStats,
 };
 pub use linked_events::{FetchedEvent, KeptMedia, LinkedEventError, LinkedEventSource};
 pub use matrix_oauth_acquire::{
@@ -259,6 +259,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}",
             get(routes::accounts::get_account).delete(routes::accounts::delete_account),
+        )
+        .route(
+            "/v1/accounts/{account_id}/exclude_insecure_devices",
+            put(routes::insecure_devices::set),
+        )
+        .route(
+            "/v1/accounts/{account_id}/exclude_insecure_devices/impact",
+            get(routes::insecure_devices::impact),
         )
         // Interactive SAS verification: start/list on one path, per-flow read +
         // confirm/cancel below.

@@ -134,6 +134,25 @@ On `/v1/ws`, `account.own_identity_changed` carries the account ID in the envelo
 `identity_replaced` is true when this update observed a replacement key, including when the device is already cross-signed by that identity.
 Clients can re-read the account on reconnect to recover its pending warning.
 
+## Excluding devices that are not cross-signed
+
+Axon can restrict encrypted message exchange to devices their owners have cross-signed ([ADR 0136](adr/0136-exclude-insecure-devices-msc4153.md)).
+The setting defaults to off and is stored per Axon account.
+When enabled, Axon shares new room keys with cross-signed devices and decrypts messages from cross-signed devices or legacy sessions.
+Previously decrypted messages remain available.
+Encrypted bridges and bots can lose access to new messages, and bridged messages can become unreadable.
+
+Read `GET /v1/accounts/{account_id}/exclude_insecure_devices/impact` to see joined encrypted rooms and members with affected devices known to Axon.
+This reads device data from the local crypto store.
+Axon may sync a lazy room roster before returning the impact, and returns 503 if it cannot finish the read.
+Axon's own device must be cross-signed before you can enable the setting.
+Send `PUT /v1/accounts/{account_id}/exclude_insecure_devices` with `enabled: true` and the returned `acknowledgement_token`, including when the list is empty.
+If the acknowledgement is missing or stale, the server returns 409 with code `impact_acknowledgement_required` and the current `impact` so you can review it again.
+To disable, send `enabled: false`.
+Both routes accept an Axon bearer token.
+A change restarts sync for the active account using the same Matrix session.
+Read `exclude_insecure_devices` on the account to check the persisted setting.
+
 ## Managing the server from a client
 
 A signed-in client can administer the server through the management API under `/v1/management/` (ADR 0109), so the common jobs do not need a shell on the machine.

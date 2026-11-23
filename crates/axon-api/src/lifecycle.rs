@@ -11,6 +11,7 @@
 //! [`response`](crate::response).
 
 use async_trait::async_trait;
+use axon_core::insecure_devices::InsecureDeviceImpact;
 use uuid::Uuid;
 
 /// What can go wrong logging an account in. Deliberately small and HTTP-shaped:
@@ -48,6 +49,17 @@ pub enum LogoutError {
     /// There is deliberately no upstream/502 variant: the backend invalidates the
     /// device token upstream best-effort and never fails logout over it, so such
     /// a variant would be unreachable API surface.
+    Internal,
+}
+
+/// Failures reading or changing the account's MSC4153 policy.
+#[derive(Debug)]
+pub enum InsecureDevicesError {
+    NotFound(String),
+    Conflict(String),
+    OwnDeviceNotCrossSigned,
+    AcknowledgementRequired(InsecureDeviceImpact),
+    Unavailable,
     Internal,
 }
 
@@ -215,6 +227,20 @@ pub trait AccountLifecycle: Send + Sync {
         &self,
         account_id: Uuid,
     ) -> Result<RedecryptUtdsStats, RedecryptUtdsError>;
+
+    /// Read which encrypted rooms and members would be affected by MSC4153.
+    async fn insecure_devices_impact(
+        &self,
+        account_id: Uuid,
+    ) -> Result<InsecureDeviceImpact, InsecureDevicesError>;
+
+    /// Set the persisted MSC4153 policy and restart the active account when it changes.
+    async fn set_exclude_insecure_devices(
+        &self,
+        account_id: Uuid,
+        enabled: bool,
+        acknowledgement_token: Option<&str>,
+    ) -> Result<(), InsecureDevicesError>;
 
     /// Permanently delete the account `account_id` and every trace of it — an
     /// ordered, crash-recoverable teardown (the Postgres archive via cascade, the

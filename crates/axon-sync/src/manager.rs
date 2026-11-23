@@ -22,7 +22,7 @@ use axon_core::SyncConfig;
 use axon_store::{Account, AccountState, Store};
 use matrix_sdk::ruma::{OwnedRoomId, RoomId};
 use matrix_sdk::Client;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use uuid::Uuid;
 
 use crate::client::{
@@ -38,7 +38,15 @@ use crate::homeserver_gate::{HomeserverGate, HomeserverGates};
 /// freshly cached client instead of starting their own connect. `None` means
 /// "not connected yet"; `Some` caches the live client (clones are cheap — the
 /// SDK client is Arc-backed).
-type Slot = Arc<AsyncMutex<Option<Client>>>;
+type Slot = Arc<ClientSlot>;
+
+#[derive(Default)]
+struct ClientSlot {
+    client: AsyncMutex<Option<Client>>,
+    /// Operations that may share keys hold a reader across their use of the
+    /// client. Changing the policy holds the writer across the restart.
+    encryption_policy: Arc<RwLock<()>>,
+}
 
 /// Rooms the homeserver has positively denied knowing (ADR 0094), keyed by the
 /// account that asked. Shared between the gateway — which learns it from a
@@ -211,7 +219,7 @@ impl ClientManager {
     /// reads. `None` if nothing is cached or the slot is currently locked.
     pub fn cached(&self, account_id: Uuid) -> Option<Client> {
         let slot = self.slot(account_id);
-        slot.try_lock().ok().and_then(|guard| guard.clone())
+        slot.client.try_lock().ok().and_then(|guard| guard.clone())
     }
 
     /// Return the cached client for `account_id`, building and authenticating one
@@ -224,7 +232,7 @@ impl ClientManager {
     /// store error) is [`GatewayError::NotConnected`] — retryable.
     pub async fn get_or_connect(&self, account_id: Uuid) -> Result<Client, GatewayError> {
         let slot = self.slot(account_id);
-        let mut guard = slot.lock().await;
+        let mut guard = slot.client.lock().await;
         if let Some(client) = guard.as_ref() {
             let client = client.clone();
             drop(guard);
@@ -270,7 +278,7 @@ impl ClientManager {
     /// first (a reactivated row may carry a stale slot from a prior session).
     pub async fn login(&self, account: &Account, password: &str) -> Result<Client, SyncError> {
         let slot = self.slot(account.account_id);
-        let mut guard = slot.lock().await;
+        let mut guard = slot.client.lock().await;
         *guard = None;
         let client = login_new_device(&self.store, account, &self.config, password).await?;
         *guard = Some(client.clone());
@@ -288,7 +296,7 @@ impl ClientManager {
         device_id: &str,
     ) -> Result<Client, SyncError> {
         let slot = self.slot(account.account_id);
-        let mut guard = slot.lock().await;
+        let mut guard = slot.client.lock().await;
         *guard = None;
         let client =
             import_token_new_device(&self.store, account, &self.config, access_token, device_id)
@@ -320,7 +328,7 @@ impl ClientManager {
         acquisition_client: Client,
     ) -> Result<(), SyncError> {
         let slot = self.slot(account.account_id);
-        let mut guard = slot.lock().await;
+        let mut guard = slot.client.lock().await;
         *guard = None;
         drop(acquisition_client);
 
@@ -347,6 +355,44 @@ impl ClientManager {
         Ok(())
     }
 
+    pub(crate) async fn lock_encrypted_send(&self, account_id: Uuid) -> OwnedRwLockReadGuard<()> {
+        self.slot(account_id)
+            .encryption_policy
+            .clone()
+            .read_owned()
+            .await
+    }
+
+    pub(crate) async fn lock_encryption_policy(
+        &self,
+        account_id: Uuid,
+    ) -> OwnedRwLockWriteGuard<()> {
+        self.slot(account_id)
+            .encryption_policy
+            .clone()
+            .write_owned()
+            .await
+    }
+
+    /// Publish the policy and invalidate the old client under the same slot
+    /// lock used by cold connects. The lifecycle caller has drained the old
+    /// supervisor and holds the identity lock. The next connect reads the
+    /// committed policy, even after an ambiguous database error.
+    pub(crate) async fn set_exclude_insecure_devices(
+        &self,
+        account_id: Uuid,
+        enabled: bool,
+    ) -> Result<(), axon_store::StoreError> {
+        let slot = self.slot(account_id);
+        let mut client = slot.client.lock().await;
+        let result = self
+            .store
+            .set_exclude_insecure_devices(account_id, enabled)
+            .await;
+        *client = None;
+        result
+    }
+
     /// Take the cached client for `account_id` out of its slot, returning it (or
     /// `None` if nothing is cached). This both *yields* the client — so the caller
     /// can do one last thing with it, e.g. invalidate the device token upstream on
@@ -356,7 +402,7 @@ impl ClientManager {
     /// this one returns it.
     pub async fn take(&self, account_id: Uuid) -> Option<Client> {
         let slot = self.slot(account_id);
-        let mut guard = slot.lock().await;
+        let mut guard = slot.client.lock().await;
         guard.take()
     }
 
@@ -366,7 +412,7 @@ impl ClientManager {
     #[cfg(test)]
     pub(crate) async fn inject_for_test(&self, account_id: Uuid, client: Client) {
         let slot = self.slot(account_id);
-        *slot.lock().await = Some(client);
+        *slot.client.lock().await = Some(client);
     }
 
     /// Drop the cached client for `account_id` so the next
@@ -391,7 +437,7 @@ impl ClientManager {
             map.get(&account_id).cloned()
         };
         if let Some(slot) = slot {
-            *slot.lock().await = None;
+            *slot.client.lock().await = None;
         }
         self.dead_rooms
             .lock()
@@ -402,7 +448,7 @@ impl ClientManager {
     /// Expose an account's raw connection slot, so a test can hold its lock
     /// itself to simulate a concurrent `get_or_connect`/`login` in flight.
     #[cfg(test)]
-    pub(crate) fn slot_for_test(&self, account_id: Uuid) -> Slot {
+    fn slot_for_test(&self, account_id: Uuid) -> Slot {
         self.slot(account_id)
     }
 }
@@ -456,7 +502,7 @@ mod tests {
 
         // Simulate a concurrent `get_or_connect` holding the slot lock.
         let slot = manager.slot_for_test(account_id);
-        let guard = slot.lock().await;
+        let guard = slot.client.lock().await;
 
         let evicting_manager = manager.clone();
         let evict = tokio::spawn(async move {

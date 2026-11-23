@@ -1666,6 +1666,7 @@ impl SdkGateway {
         // The budget starts before the room is resolved, as the adapter's
         // single timeout did.
         let clock = MediaClock::start(bounds);
+        let _policy = self.manager.lock_encrypted_send(account_id).await;
         let room = clock.run(self.room(account_id, room_id)).await?;
         // Boxed as a trait object: the send future is deep enough that,
         // nested once more inside the server's adapter, proving it `Send`
@@ -1683,6 +1684,7 @@ impl SdkGateway {
         formatted: Option<Formatted<'_>>,
         relation: Relation<'_>,
     ) -> Result<String, GatewayError> {
+        let _policy = self.manager.lock_encrypted_send(account_id).await;
         let room = self.room(account_id, room_id).await?;
 
         // Plain, unrelated message: use the typed constructor. `format` is
@@ -1718,6 +1720,7 @@ impl SdkGateway {
         relation: Relation<'_>,
     ) -> Result<String, GatewayError> {
         let content = sticker_content(sticker, relation)?;
+        let _policy = self.manager.lock_encrypted_send(account_id).await;
         let room = self.room(account_id, room_id).await?;
         let response = room
             .send_raw("m.sticker", content)
@@ -1755,6 +1758,7 @@ impl SdkGateway {
     ) -> Result<String, GatewayError> {
         use futures_util::FutureExt;
         let clock = MediaClock::start(bounds);
+        let _policy = self.manager.lock_encrypted_send(account_id).await;
         let room = clock.run(self.room(account_id, room_id)).await?;
         // Boxed for the same reason as `send_with_previews`.
         send_media_in_room(
@@ -1794,6 +1798,7 @@ impl SdkGateway {
         use axon_core::edit_preview::{self as previews, EditPreview};
         use futures_util::{FutureExt, StreamExt, TryStreamExt};
         let (body, formatted) = (edit.body, edit.formatted);
+        let _policy = self.manager.lock_encrypted_send(account_id).await;
         let room = self.room(account_id, room_id).await?;
         // Validate the target id up front so a bad id is a clean 400, not a 502.
         let target_id = parse_event_id(event_id)?;
@@ -2205,6 +2210,7 @@ impl SdkGateway {
         room_id: &str,
         user_id: &str,
     ) -> Result<(), GatewayError> {
+        let _policy = self.manager.lock_encrypted_send(account_id).await;
         let room = self.room(account_id, room_id).await?;
         let user_id = parse_user_id(user_id)?;
         room.invite_user_by_id(&user_id).await.map_err(map_sdk_err)
