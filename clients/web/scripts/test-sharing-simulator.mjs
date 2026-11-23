@@ -5,6 +5,7 @@ import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { collectDiagnostics } from './sharing-diagnostics.mjs'
+import { pickPhone } from './sharing-simulator-device.mjs'
 
 // Run the real shared-module XCTest suite under iOS, without installing or
 // changing Axon itself. Signing and physical Keychain acceptance stay separate.
@@ -67,10 +68,10 @@ const matching = phones.filter(
 )
 const device = requested
   ? devices.find((device) => device.udid === requested)
-  : (matching.find((device) => device.state === 'Booted') ??
-    matching[0] ??
-    phones.find((device) => device.state === 'Booted') ??
-    phones[0])
+  : (pickPhone(matching) ?? pickPhone(phones))
+console.log(
+  `iPhone simulators on SDK ${sdk}: ${matching.map((device) => device.name).join(', ') || '(none)'}`,
+)
 if (device === undefined)
   throw new Error(
     'No available iPhone simulator. Install an iOS runtime in Xcode; optionally set AXON_SHARING_SIMULATOR to its UDID.',

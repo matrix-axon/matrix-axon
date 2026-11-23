@@ -16,6 +16,8 @@ on:
       - clients/web/scripts/test-sharing-simulator.mjs
       - clients/web/scripts/sharing-diagnostics.mjs
       - clients/web/scripts/test-sharing-diagnostics.mjs
+      - clients/web/scripts/sharing-simulator-device.mjs
+      - clients/web/scripts/test-sharing-simulator-device.mjs
       - openapi/openapi.json
       - crates/axon-core/src/link_preview.rs
       - crates/axon-api/tests/fixtures/*preview*.json
@@ -49,7 +51,7 @@ jobs:
       - name: Install generator dependencies
         run: pnpm --dir clients/web install --frozen-lockfile
       - name: Check archive and export signing selection
-        run: node --test clients/web/scripts/test-ios-sharing-signing.mjs clients/web/scripts/test-sharing-diagnostics.mjs
+        run: node --test clients/web/scripts/test-ios-sharing-signing.mjs clients/web/scripts/test-sharing-diagnostics.mjs clients/web/scripts/test-sharing-simulator-device.mjs
       - name: Swift ownership, recovery, and portable server contracts
         run: swift test --package-path clients/web/src-tauri/incoming-share
       - name: Install simulator test project generator
