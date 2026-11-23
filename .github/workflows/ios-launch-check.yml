@@ -6,8 +6,11 @@
 # runs the real app in CI (ios-sharing runs a test host, not Axon), and the Mac that
 # builds it for the team cannot run Xcode 27. See scripts/ci/ios-launch-check.sh.
 #
-# Manual only, and it takes about as long as the store build, so it is not a gate. It
-# needs no signing material: the simulator build is unsigned.
+# It takes about as long as the store build and is not a gate. It runs by hand, and on a
+# pull request that changes this workflow or its script, once on each runner so the
+# newer Xcode has an older one to be compared with. (GitHub dispatches only workflows
+# that exist on the default branch, so the pull request is how a new one first runs.)
+# It needs no signing material: the simulator build is unsigned.
 
 name: iOS launch check
 
@@ -21,13 +24,17 @@ on:
           - xcode-27
           - macos-26
         default: xcode-27
+  pull_request:
+    paths:
+      - scripts/ci/ios-launch-check.sh
+      - .github/workflows/ios-launch-check.yml
 
 permissions:
   contents: read
 
 concurrency:
-  group: ios-launch-check
-  cancel-in-progress: false
+  group: ios-launch-check-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -35,8 +42,15 @@ env:
 
 jobs:
   launch:
-    name: Build and launch the app in the iOS simulator
-    runs-on: ${{ inputs.runner }}
+    name: Build and launch the app in the iOS simulator (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: >-
+          ${{ github.event_name == 'workflow_dispatch'
+          && fromJson(format('["{0}"]', inputs.runner))
+          || fromJson('["xcode-27","macos-26"]') }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
       - name: Checkout repository
@@ -94,8 +108,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             clients/web/src-tauri/target
-          key: ios-launch-cargo-${{ inputs.runner }}-${{ hashFiles('clients/web/src-tauri/Cargo.lock') }}
-          restore-keys: ios-launch-cargo-${{ inputs.runner }}-
+          key: ios-launch-cargo-${{ matrix.runner }}-${{ hashFiles('clients/web/src-tauri/Cargo.lock') }}
+          restore-keys: ios-launch-cargo-${{ matrix.runner }}-
 
       - name: Install web dependencies
         run: pnpm install --frozen-lockfile
@@ -126,7 +140,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: ios-launch-check
+          name: ios-launch-check-${{ matrix.runner }}
           path: ${{ runner.temp }}/ios-launch-diagnostics
           if-no-files-found: ignore
           retention-days: 7
