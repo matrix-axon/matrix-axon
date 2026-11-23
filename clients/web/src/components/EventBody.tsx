@@ -4,6 +4,8 @@ import { hasEmojiCandidate } from '../emoji'
 import { stateEventNotice } from '../state-event-notice'
 import type { TimelineEvent } from '../stores/timeline'
 import { useServices } from '../services'
+import type { components } from '../api/schema'
+import { AccountTrustActions } from './AccountTrustActions'
 import { FormattedBody } from './FormattedBody'
 import { MediaAttachment } from './MediaAttachment'
 import { MediaImage } from './MediaImage'
@@ -59,17 +61,91 @@ function unsupportedEventLabel(event: TimelineEvent): string {
 export const UTD_RECOVER_HINT =
   'This device does not have the megolm key for this message. Recover keys on the Accounts page if you have a recovery key. Messages stay undecryptable if those session keys were never uploaded to backup.'
 
-function UtdPlaceholder() {
+const WITHHELD_REASON: Record<string, string> = {
+  'm.unverified': 'The sender withheld the key from an unverified device.',
+  'm.blacklisted': 'The sender blocked this device from receiving the key.',
+  'm.unauthorised': 'The sender did not authorize sharing the key.',
+  'm.unavailable': 'The sender reported that the key was unavailable.',
+  'm.no_olm':
+    'The sender could not establish a secure session to share the key.',
+  'm.history_not_shared': 'The room history was not shared with this device.',
+}
+
+const TRUST_LEVEL: Record<
+  components['schemas']['VerificationLevelDto'],
+  string
+> = {
+  unverified_identity: 'the sender’s identity was unverified',
+  verification_violation: 'the sender’s verified identity changed',
+  unsigned_device: 'the sender’s device was not signed',
+  missing_device: 'the sender’s device was unknown',
+  insecure_source: 'the key came from an untrusted source',
+  mismatched_sender: 'the key did not match the sender',
+}
+
+function utdExplanation(
+  reason: TimelineEvent['utd_reason'],
+): string | undefined {
+  switch (reason?.kind) {
+    case 'missing_key':
+      return 'Axon is missing the key for this message.'
+    case 'withheld': {
+      const code = reason.withheld_code ?? ''
+      return Object.hasOwn(WITHHELD_REASON, code)
+        ? WITHHELD_REASON[code]
+        : 'The sender withheld the key.'
+    }
+    case 'sender_not_trusted': {
+      const level = reason.verification_level
+      return level && Object.hasOwn(TRUST_LEVEL, level)
+        ? `Axon could not trust the sender because ${TRUST_LEVEL[level]}.`
+        : 'Axon could not trust the sender’s device.'
+    }
+    case 'other':
+      return 'Axon could not decrypt the message with the information available.'
+  }
+}
+
+function UtdPlaceholder({ event }: { event: TimelineEvent }) {
+  const { accounts } = useServices()
+  const account = accounts.accounts.value.find(
+    (row) => row.account_id === event.account_id,
+  )
+  const reason = event.utd_reason
+  const needsVerification =
+    reason?.kind === 'withheld' &&
+    reason.withheld_code === 'm.unverified' &&
+    account?.state === 'active' &&
+    account.verified === false
+  const explanation = needsVerification
+    ? 'The sender’s app does not share keys with unverified devices. Verify this Axon device to read new messages.'
+    : utdExplanation(reason)
+
   return (
     <span class="utd-placeholder">
       <span class="muted placeholder">unable to decrypt</span>
-      <span class="muted" aria-hidden="true">
-        {' '}
-        ·{' '}
-      </span>
-      <a href="/accounts" class="utd-recover" title={UTD_RECOVER_HINT}>
-        Recover keys
-      </a>
+      {explanation !== undefined && <span class="muted"> · {explanation}</span>}
+      {needsVerification ? (
+        <AccountTrustActions account={account} />
+      ) : (
+        <>
+          <span class="muted" aria-hidden="true">
+            {' '}
+            ·{' '}
+          </span>
+          <a
+            href="/accounts"
+            class="utd-recover"
+            title={
+              reason == null || reason.kind === 'missing_key'
+                ? UTD_RECOVER_HINT
+                : undefined
+            }
+          >
+            Recover keys
+          </a>
+        </>
+      )}
     </span>
   )
 }
@@ -147,7 +223,7 @@ export function EventBody({
   }
   if (event.content === null || event.content === undefined) {
     // The decrypted content never reached the store — a UTD (ADR 0015).
-    return <UtdPlaceholder />
+    return <UtdPlaceholder event={event} />
   }
 
   // Bundled previews, then the cards this client builds for the message's

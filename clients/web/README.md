@@ -236,6 +236,19 @@ Received inline images use the authenticated media proxy and stay at text-line s
 Custom images remain accessible through sent messages even after their pack changes when the server supports durable inline-media references.
 On older servers, availability can depend on the current pack or the media being referenced by another supported event.
 
+### Decryption and identity warnings
+
+The room and thread timelines show the reason Axon could not decrypt a message when the server provides it (ADR 0136).
+If a sender withholds keys from Axon's unverified device, use **Verify this device** or **Recover keys** for that Matrix account.
+Verification can help with new messages.
+Recovering older messages depends on whether their keys are available in backup.
+
+When a room member's identity changes, **Review identity changes** is available above the room and beside the room and thread composers.
+Accept a new identity for a member you had not verified, or withdraw your previous verification for a verified member whose identity changed.
+After a successful action, keyboard focus moves to the next remaining action or to **Close** when the list is empty.
+You can keep sending while a warning is pending.
+The room and the affected card on **Accounts** also warn when your own Matrix identity changes and point you to device verification and key recovery.
+
 ## Prerequisites
 
 - **Node.js 24 (LTS)** — recommended, and what CI uses. The hard floor is

@@ -1,13 +1,21 @@
 /**
- * `/metadata` and `/homeserver_details` fixtures (ADR 0133). The defaults
+ * `/info`, `/metadata` and `/homeserver_details` fixtures. The defaults
  * describe an ordinary encrypted, invite-only room whose every snapshot is
  * cached; tests override one snapshot or detail at a time.
  */
+import { HttpResponse, http } from 'msw'
 import type { components } from '../api/schema'
 
 type Schemas = components['schemas']
 export type RoomMetadataDto = Schemas['RoomMetadataDto']
 export type RoomHomeserverDetailsDto = Schemas['RoomHomeserverDetailsDto']
+
+/** A room with no identity warnings or additional room info to render. */
+export function emptyRoomInfoHandler(baseUrl: string) {
+  return http.get(`${baseUrl}/v1/accounts/:accountId/rooms/:roomId/info`, () =>
+    HttpResponse.json({ data: {} }),
+  )
+}
 
 const IDLE = { state: 'idle' as const }
 

@@ -149,6 +149,22 @@ function renderPage(
   return { services, ...utils }
 }
 
+it('opens only the linked account’s recovery form and shows its own-identity warning', async () => {
+  window.history.replaceState(null, '', `/accounts?recover=${ALICE.account_id}`)
+  const { findByLabelText, getAllByLabelText, getByText } = renderPage([
+    { ...ALICE, own_identity_changed: true, verified: false },
+    { ...BOB, state: 'active' },
+  ])
+
+  const input = await findByLabelText('Recovery key')
+  expect(getAllByLabelText('Recovery key')).toHaveLength(1)
+  expect(input.closest('li')?.textContent).toContain(ALICE.user_id)
+  expect(getByText(/Your Matrix identity changed/).closest('li')).toBe(
+    input.closest('li'),
+  )
+  await waitFor(() => expect(document.activeElement).toBe(input))
+})
+
 describe('AccountsPage', () => {
   it('lists accounts with state and verification badges', async () => {
     const { findByText, getByText } = renderPage()
@@ -1734,7 +1750,9 @@ describe('AccountsPage', () => {
     const services = testServices()
     const { findByRole, getByRole, queryByRole } = render(
       <ServicesContext.Provider value={services}>
-        <AccountsPage />
+        <LocationProvider>
+          <AccountsPage />
+        </LocationProvider>
       </ServicesContext.Provider>,
     )
 

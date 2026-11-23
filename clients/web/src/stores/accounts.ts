@@ -100,7 +100,29 @@ export function createAccountsStore(
   const error = signal<string | null>(null)
   const pending = signal<PendingAction | null>(null)
 
-  async function refresh(): Promise<void> {
+  let inFlight: Promise<void> | null = null
+  let queued: Promise<void> | null = null
+
+  function refresh(): Promise<void> {
+    if (queued !== null) return queued
+    if (inFlight === null) return startRefresh()
+    // A refresh requested during a read must see data from after that read
+    // started, e.g. when a mutation or WebSocket invalidation races it.
+    queued = inFlight.then(() => {
+      queued = null
+      return startRefresh()
+    })
+    return queued
+  }
+
+  function startRefresh(): Promise<void> {
+    inFlight = fetchAccounts().finally(() => {
+      inFlight = null
+    })
+    return inFlight
+  }
+
+  async function fetchAccounts(): Promise<void> {
     try {
       const { data, error: apiError } = await api.GET('/v1/accounts')
       if (apiError !== undefined) {

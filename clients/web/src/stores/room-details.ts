@@ -1,7 +1,7 @@
 /**
  * The typed room-detail reads behind Room Information (ADR 0133 decision 1):
  * `/metadata`, `/homeserver_details` and `/info`, for the one room the panel
- * shows.
+ * shows. The room timeline keeps just `/info` live for identity warnings.
  *
  * Freshness story (AGENTS.md rule 8, ADR 0133 decision 2): each read repeats
  * only on a `room_details.changed` frame for this account and room naming its
@@ -64,6 +64,7 @@ type RoomMetadataDto = components['schemas']['RoomMetadataDto']
 type RoomHomeserverDetailsDto =
   components['schemas']['RoomHomeserverDetailsDto']
 type RoomInfoDto = components['schemas']['RoomInfoDto']
+type RoomIdentityChangeDto = components['schemas']['RoomIdentityChangeDto']
 type RoomDiscoveryDto = components['schemas']['RoomDiscoveryDto']
 
 /** The three reads this store owns. */
@@ -73,6 +74,7 @@ export type RoomDetailsRead = 'metadata' | 'homeserverDetails' | 'info'
 const READ_FOR_SOURCE: Partial<Record<RoomDetailSource, RoomDetailsRead>> = {
   metadata: 'metadata',
   member_counts: 'info',
+  identity_changes: 'info',
   homeserver_details: 'homeserverDetails',
 }
 
@@ -95,7 +97,10 @@ export interface RoomDetailsState {
   key: string | null
   metadata: RoomDetailsSlot<RoomMetadataDto>
   homeserverDetails: RoomDetailsSlot<RoomHomeserverDetailsDto>
+  /** Panel answers start fresh on open. */
   info: RoomDetailsSlot<RoomInfoDto>
+  /** The last successful room warning snapshot, also refreshed by the timeline. */
+  identityChanges: readonly RoomIdentityChangeDto[]
   /** The space's loaded children; never requested for a room that is not a space. */
   hierarchy: HierarchySlot
   /**
@@ -146,6 +151,10 @@ export interface RoomDetailsStore {
    * Showing `null` then the same room again is a reopen, and re-reads.
    */
   show(target: RoomDetailsTarget | null): void
+  /** Keep /info live for the joined room shown in the timeline. */
+  watchInfo(target: RoomDetailsTarget | null): void
+  /** Refresh the active room after an identity acknowledgement or conflict. */
+  refreshInfo(accountId: string, roomId: string): void
   /**
    * Read the shown space's next page of children ("Load more"), never with
    * `enrich`. Queued behind a re-read in flight; a no-op at the end.
@@ -210,6 +219,7 @@ export function emptyRoomDetails(
     metadata: emptySlot(),
     homeserverDetails: emptySlot(),
     info: emptySlot(),
+    identityChanges: [],
     hierarchy: emptyHierarchy(),
     now,
   }
@@ -336,6 +346,7 @@ interface HierarchySession {
 interface Session {
   key: string
   target: RoomDetailsTarget
+  panelOpen: boolean
   controller: AbortController
   inFlight: Set<RoomDetailsRead>
   /** A frame arrived mid-read: exactly one more read follows the current one. */
@@ -371,6 +382,8 @@ export function createRoomDetailsStore(
 ): RoomDetailsStore {
   const state = signal<RoomDetailsState>(emptyRoomDetails(null))
   let session: Session | null = null
+  let panelTarget: RoomDetailsTarget | null = null
+  let timelineTarget: RoomDetailsTarget | null = null
   let clockTimer: ReturnType<typeof setTimeout> | null = null
 
   function stopClock(): void {
@@ -477,12 +490,26 @@ export function createRoomDetailsStore(
           owner.dirty.delete(which)
           return
         }
-        const slot = state.value[which]
+        const current = state.value
+        const identityChanges =
+          which === 'info' && result.ok
+            ? ((result.value as RoomInfoDto).identity_changes ?? [])
+            : current.identityChanges
+        // While the panel is closed, /info is read only for identity warnings.
+        // Publishing its member counts would make them visible on the panel's
+        // first render, before the open effect starts its own refresh.
+        const panelResult =
+          which !== 'info' || owner.panelOpen
+            ? {
+                [which]: result.ok
+                  ? { value: result.value, error: null, requested: true }
+                  : { ...current[which], error: result.message },
+              }
+            : {}
         state.value = {
-          ...state.value,
-          [which]: result.ok
-            ? { value: result.value, error: null, requested: true }
-            : { ...slot, error: result.message },
+          ...current,
+          ...panelResult,
+          identityChanges,
           now: Date.now(),
         }
         armClock()
@@ -728,9 +755,26 @@ export function createRoomDetailsStore(
   }
 
   function show(target: RoomDetailsTarget | null): void {
+    panelTarget = target
+    reconcile()
+  }
+
+  function watchInfo(target: RoomDetailsTarget | null): void {
+    timelineTarget = target
+    reconcile()
+  }
+
+  function reconcile(): void {
+    const target = panelTarget ?? timelineTarget
+    const panelOpen = panelTarget !== null
     const key =
       target === null ? null : roomDetailsKey(target.accountId, target.roomId)
-    if (session !== null && key === session.key && target !== null) {
+    if (
+      session !== null &&
+      key === session.key &&
+      panelOpen === session.panelOpen &&
+      target !== null
+    ) {
       const becameJoined = target.joined && !session.target.joined
       const left = !target.joined && session.target.joined
       const becameSpace = target.space === true && session.target.space !== true
@@ -768,13 +812,18 @@ export function createRoomDetailsStore(
       session.controller.abort()
       stopCrawlRetry(session)
     }
+    const initial = emptyRoomDetails(key, Date.now())
+    if (key !== null && key === session?.key) {
+      initial.identityChanges = state.value.identityChanges
+    }
     session = null
     stopClock()
-    state.value = emptyRoomDetails(key, Date.now())
+    state.value = initial
     if (target === null || key === null) return
     const owner: Session = {
       key,
       target,
+      panelOpen,
       controller: new AbortController(),
       inFlight: new Set(),
       dirty: new Set(),
@@ -790,8 +839,9 @@ export function createRoomDetailsStore(
       },
     }
     session = owner
-    read(owner, 'metadata')
     read(owner, 'info')
+    if (!panelOpen) return
+    read(owner, 'metadata')
     if (target.joined) read(owner, 'homeserverDetails')
     reread(owner, rereadFor('open', 'reconnect', false))
   }
@@ -954,12 +1004,17 @@ export function createRoomDetailsStore(
     ) {
       return
     }
-    for (const source of change.sources) {
-      if (source === 'space_hierarchy') {
-        reread(owner, rereadFor('frame', 'frame', false))
-        continue
-      }
-      const which = READ_FOR_SOURCE[source]
+    if (!owner.panelOpen) {
+      if (change.sources.has('identity_changes')) read(owner, 'info')
+      return
+    }
+    if (change.sources.has('space_hierarchy')) {
+      reread(owner, rereadFor('frame', 'frame', false))
+    }
+    const reads = new Set(
+      Array.from(change.sources, (source) => READ_FOR_SOURCE[source]),
+    )
+    for (const which of reads) {
       if (which === undefined) continue
       if (which === 'homeserverDetails' && !owner.target.joined) continue
       read(owner, which)
@@ -1009,6 +1064,7 @@ export function createRoomDetailsStore(
   }
 
   function dispose(): void {
+    timelineTarget = null
     show(null)
     previewSession?.controller.abort()
     previewSession = null
@@ -1023,6 +1079,11 @@ export function createRoomDetailsStore(
     state,
     preview,
     show,
+    watchInfo,
+    refreshInfo: (accountId, roomId) => {
+      const owner = session
+      if (owner?.key === roomDetailsKey(accountId, roomId)) read(owner, 'info')
+    },
     loadMore,
     retry,
     showPreview,

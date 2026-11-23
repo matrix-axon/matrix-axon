@@ -3174,6 +3174,28 @@ a.utd-recover:hover {
   text-decoration: underline;
 }
 
+.trust-warning {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.65rem;
+  padding: 0.35rem 0.65rem;
+  border-inline-start: 0.2rem solid var(--warn);
+  background: var(--bg-raised);
+  color: var(--fg);
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+.account-trust-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.6rem;
+  margin-inline-start: 0.4rem;
+}
+
 .event-inspector {
   margin-top: 0.35rem;
   border: 1px solid var(--border);
@@ -5097,6 +5119,19 @@ span.composer-attachment-thumb {
   overflow-y: auto;
 }
 
+.room-identity-review {
+  max-width: 28rem;
+  overflow-wrap: anywhere;
+}
+
+.room-identity-review ul {
+  padding-inline-start: 1.25rem;
+}
+
+.room-identity-review li + li {
+  margin-block-start: 0.75rem;
+}
+
 .jump-dialog {
   display: grid;
   gap: 0.8rem;
@@ -5587,7 +5622,8 @@ a.button-link {
   text-decoration: none;
 }
 
-button:disabled {
+button:disabled,
+.room-identity-review button[aria-disabled='true'] {
   opacity: 0.5;
   cursor: default;
 }
