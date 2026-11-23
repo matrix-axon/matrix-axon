@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { pickPhone, rankDevice } from './sharing-simulator-device.mjs'
+import {
+  createStandardPhone,
+  pickPhone,
+  rankDevice,
+} from './sharing-simulator-device.mjs'
 
 const device = (name, state = 'Shutdown') => ({
   name,
@@ -61,4 +65,89 @@ test('the order the devices arrive in does not matter', () => {
   const names = ['iPhone Duo', 'iPhone 17', 'iPhone Air', 'iPhone 17 Pro']
   for (const order of [names, [...names].reverse()])
     assert.equal(pickPhone(order.map((n) => device(n))).name, 'iPhone 17 Pro')
+})
+
+const quiet = { log: () => {}, warn: () => {} }
+const runtimeId = 'com.apple.CoreSimulator.SimRuntime.iOS-27-1'
+const listing = (names) =>
+  JSON.stringify({
+    runtimes: [
+      {
+        identifier: 'com.apple.CoreSimulator.SimRuntime.iOS-26-5',
+        supportedDeviceTypes: [
+          { name: 'iPhone 17 Pro', identifier: 'type.wrong-runtime' },
+        ],
+      },
+      {
+        identifier: runtimeId,
+        supportedDeviceTypes: names.map((name) => ({
+          name,
+          identifier: `type.${name.replaceAll(' ', '-')}`,
+        })),
+      },
+    ],
+  })
+
+test('creates the most standard model the runtime supports, on that runtime', () => {
+  const calls = []
+  const made = createStandardPhone({
+    runtime: runtimeId,
+    log: quiet,
+    exec: (args) => {
+      calls.push(args)
+      return args[0] === 'list'
+        ? listing(['iPhone Duo', 'iPhone 17', 'iPhone 17 Pro', 'iPad Pro'])
+        : 'NEW-UDID\n'
+    },
+  })
+  assert.deepEqual(calls[1], [
+    'create',
+    'Axon share tests (iPhone 17 Pro)',
+    'type.iPhone-17-Pro',
+    runtimeId,
+  ])
+  assert.deepEqual(made, {
+    name: 'iPhone 17 Pro',
+    udid: 'NEW-UDID',
+    state: 'Shutdown',
+    runtime: runtimeId,
+  })
+})
+
+test('creates nothing when the runtime supports only unfamiliar models', () => {
+  const calls = []
+  const made = createStandardPhone({
+    runtime: runtimeId,
+    log: quiet,
+    exec: (args) => {
+      calls.push(args[0])
+      return listing(['iPhone Duo'])
+    },
+  })
+  assert.equal(made, undefined)
+  assert.deepEqual(calls, ['list'])
+})
+
+test('a simctl that refuses to create, or to list, leaves the caller its own device', () => {
+  const warned = []
+  const refusing = createStandardPhone({
+    runtime: runtimeId,
+    log: { log: () => {}, warn: (message) => warned.push(message) },
+    exec: (args) => {
+      if (args[0] === 'create') throw new Error('Invalid device type')
+      return listing(['iPhone 17 Pro'])
+    },
+  })
+  assert.equal(refusing, undefined)
+  assert.match(warned[0], /Invalid device type/)
+  assert.equal(
+    createStandardPhone({
+      runtime: runtimeId,
+      log: quiet,
+      exec: () => {
+        throw new Error('no simctl')
+      },
+    }),
+    undefined,
+  )
 })

@@ -31,3 +31,37 @@ export const pickPhone = (candidates) =>
       modelNumber(b.name) - modelNumber(a.name) ||
       a.name.localeCompare(b.name),
   )[0]
+
+/**
+ * A new simulator of the most standard iPhone model the runtime supports, for when
+ * the runtime ships only models the tests were not made for (the Xcode 27 runtime
+ * ships "iPhone Duo" and nothing else). `exec(args)` runs `xcrun simctl <args>` and
+ * returns its output. Returns { name, udid, state, runtime } or undefined: no
+ * standard model is supported, or simctl would not create one, and the caller
+ * keeps what it had.
+ */
+export const createStandardPhone = ({ runtime, exec, log = console }) => {
+  try {
+    const listed = JSON.parse(exec(['list', 'runtimes', '-j'])).runtimes
+    const types = (
+      listed.find((entry) => entry.identifier === runtime)
+        ?.supportedDeviceTypes ?? []
+    ).filter((type) => type.name.startsWith('iPhone'))
+    log.log(
+      `Device types on ${runtime}: ${types.map((type) => type.name).join(', ') || '(none)'}`,
+    )
+    const type = pickPhone(types)
+    if (type === undefined || rankDevice(type.name) >= 3) return undefined
+    const udid = exec([
+      'create',
+      `Axon share tests (${type.name})`,
+      type.identifier,
+      runtime,
+    ]).trim()
+    if (!udid) return undefined
+    return { name: type.name, udid, state: 'Shutdown', runtime }
+  } catch (error) {
+    log.warn(`Could not create a standard iPhone simulator: ${error.message}`)
+    return undefined
+  }
+}

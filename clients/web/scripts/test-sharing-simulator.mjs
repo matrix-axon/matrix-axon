@@ -5,7 +5,11 @@ import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { collectDiagnostics } from './sharing-diagnostics.mjs'
-import { pickPhone } from './sharing-simulator-device.mjs'
+import {
+  createStandardPhone,
+  pickPhone,
+  rankDevice,
+} from './sharing-simulator-device.mjs'
 
 // Run the real shared-module XCTest suite under iOS, without installing or
 // changing Axon itself. Signing and physical Keychain acceptance stay separate.
@@ -66,7 +70,7 @@ const matching = phones.filter(
     device.runtime.split('.iOS-')[1]?.split('-').slice(0, 2).join('.') ===
     sdk.split('.').slice(0, 2).join('.'),
 )
-const device = requested
+let device = requested
   ? devices.find((device) => device.udid === requested)
   : (pickPhone(matching) ?? pickPhone(phones))
 console.log(
@@ -76,6 +80,26 @@ if (device === undefined)
   throw new Error(
     'No available iPhone simulator. Install an iOS runtime in Xcode; optionally set AXON_SHARING_SIMULATOR to its UDID.',
   )
+// The Xcode 27 runtime ships only "iPhone Duo", a screen these tests were not made for.
+// When nothing standard is installed, make a standard one from the runtime's supported
+// device types, and remove it afterwards; if that cannot be done the Duo is used.
+let created
+if (!requested && rankDevice(device.name) >= 3) {
+  created = createStandardPhone({
+    runtime: device.runtime,
+    exec: (args) =>
+      execFileSync('xcrun', ['simctl', ...args], {
+        encoding: 'utf8',
+        timeout: 60_000,
+      }),
+  })
+  if (created) {
+    console.log(
+      `Created ${created.name} (${created.udid}) instead of ${device.name}.`,
+    )
+    device = created
+  }
+}
 console.log(
   `Simulator SDK ${sdk}; selected ${device.name} (${device.runtime}).`,
 )
@@ -251,20 +275,27 @@ console.log(
   `Testing on ${device.name}. Results: ${join(output, 'results.xcresult')}`,
 )
 try {
-  run('xcodebuild', [
-    'test',
-    '-project',
-    join(output, 'SharingFoundationTests.xcodeproj'),
-    '-scheme',
-    'FoundationTests',
-    '-destination',
-    `platform=iOS Simulator,id=${device.udid}`,
-    '-derivedDataPath',
-    join(output, 'DerivedData'),
-    '-resultBundlePath',
-    join(output, 'results.xcresult'),
-    'CODE_SIGNING_ALLOWED=NO',
-  ])
+  // Build plus the unit tests took well under ten minutes on Xcode 26 and, on a slow
+  // Xcode 27 runner, ten minutes and two seconds with tests still passing as the
+  // cap killed it. The UI phase below has the same allowance for the same reason.
+  run(
+    'xcodebuild',
+    [
+      'test',
+      '-project',
+      join(output, 'SharingFoundationTests.xcodeproj'),
+      '-scheme',
+      'FoundationTests',
+      '-destination',
+      `platform=iOS Simulator,id=${device.udid}`,
+      '-derivedDataPath',
+      join(output, 'DerivedData'),
+      '-resultBundlePath',
+      join(output, 'results.xcresult'),
+      'CODE_SIGNING_ALLOWED=NO',
+    ],
+    900_000,
+  )
   // Eight UI scenarios plus their build, simulator launches, and result-bundle
   // finalization exceeded ten minutes on CI even though every test passed.
   run(
@@ -289,6 +320,15 @@ try {
   keepDiagnostics()
   throw error
 } finally {
+  if (created) {
+    for (const action of ['shutdown', 'delete']) {
+      try {
+        run('xcrun', ['simctl', action, created.udid], 60_000)
+      } catch {
+        /* A runner is thrown away; a Mac keeps one stray simulator at worst. */
+      }
+    }
+  }
   for (const identifier of [hostId, `${hostId}.Tests.xctrunner`]) {
     try {
       run('xcrun', ['simctl', 'uninstall', device.udid, identifier], 30_000)
