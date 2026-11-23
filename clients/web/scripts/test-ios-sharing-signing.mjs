@@ -35,6 +35,7 @@ function generate(env) {
     for (const name of [
       'configure-ios-sharing.mjs',
       'ios-minimum-version.mjs',
+      'is-entry-point.mjs',
       'ios-share-activation.json',
     ])
       copyFileSync(join(source, 'scripts', name), join(scripts, name))

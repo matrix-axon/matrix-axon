@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
+
+import { isEntryPoint } from './is-entry-point.mjs'
 
 // The oldest iOS the app is built to run on: `bundle.iOS.minimumSystemVersion` in
 // tauri.conf.json, which tauri.ios.conf.json may override, the way Tauri layers them.
@@ -34,10 +36,7 @@ export const minimumIosVersion = (tauriDir) => {
 }
 
 // `node ios-minimum-version.mjs` prints it, for the shell scripts that check a build.
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+if (isEntryPoint(import.meta.url)) {
   try {
     console.log(
       minimumIosVersion(

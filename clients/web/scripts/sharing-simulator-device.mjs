@@ -12,7 +12,8 @@
 // `pick` command at the bottom of this file, so there is one ranking and it is tested.
 
 import { execFileSync } from 'node:child_process'
-import { pathToFileURL } from 'node:url'
+
+import { isEntryPoint } from './is-entry-point.mjs'
 
 /** 0 for "iPhone 17 Pro" style names, up to 3 for a model these tests were not made for. */
 export const rankDevice = (name) => {
@@ -84,8 +85,12 @@ const majorMinor = (version) => version.split('.').slice(0, 2).join('.')
  * `runtimes` and `devices` are the objects `simctl list runtimes -j` and
  * `simctl list devices available -j` hold. Returns one of
  * { kind: 'device', udid, name }, { kind: 'create', type, runtime, name }, { kind: 'none' }.
+ *
+ * With `fresh`, an installed device is never returned: the answer is always a device
+ * type to make a new simulator from. Whoever installs an app on the result and removes
+ * it again must not be handed a simulator someone else already uses.
  */
-export const pickSimulator = ({ runtimes, devices, want }) => {
+export const pickSimulator = ({ runtimes, devices, want, fresh = false }) => {
   const matching = runtimes.filter(
     (runtime) =>
       runtime.isAvailable !== false &&
@@ -94,13 +99,15 @@ export const pickSimulator = ({ runtimes, devices, want }) => {
       ) &&
       majorMinor(runtime.version) === majorMinor(want),
   )
-  const installed = pickPhone(
-    matching.flatMap((runtime) =>
-      (devices[runtime.identifier] ?? []).filter((device) =>
-        device.name.startsWith('iPhone'),
-      ),
-    ),
-  )
+  const installed = fresh
+    ? undefined
+    : pickPhone(
+        matching.flatMap((runtime) =>
+          (devices[runtime.identifier] ?? []).filter((device) =>
+            device.name.startsWith('iPhone'),
+          ),
+        ),
+      )
   if (installed)
     return { kind: 'device', udid: installed.udid, name: installed.name }
   const type = pickPhone(
@@ -120,13 +127,10 @@ export const pickSimulator = ({ runtimes, devices, want }) => {
   return { kind: 'none' }
 }
 
-// `node sharing-simulator-device.mjs pick 26.0` asks the simulators installed here and
-// prints "device <udid> <name>", "create <type> <runtime> <name>" or "none".
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href &&
-  process.argv[2] === 'pick'
-) {
+// `node sharing-simulator-device.mjs pick 26.0 [--new]` asks the simulators installed here
+// and prints "device <udid> <name>", "create <type> <runtime> <name>" or "none"; with
+// `--new` it only ever answers "create" or "none".
+if (isEntryPoint(import.meta.url) && process.argv[2] === 'pick') {
   const simctl = (...args) =>
     JSON.parse(
       execFileSync('xcrun', ['simctl', ...args, '-j'], {
@@ -139,6 +143,7 @@ if (
     runtimes: simctl('list', 'runtimes').runtimes,
     devices: simctl('list', 'devices', 'available').devices,
     want: process.argv[3] ?? '',
+    fresh: process.argv.includes('--new'),
   })
   console.log(
     pick.kind === 'device'

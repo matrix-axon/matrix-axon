@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, rmSync, symlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import {
   createStandardPhone,
@@ -255,3 +260,44 @@ test('a patch release matches its major.minor', () => {
     'iPhone 17 Pro',
   )
 })
+
+test('fresh never returns an installed device, only a type to make one from', () => {
+  // The launch check installs the app, removes it and shuts the simulator down, so it
+  // must not be handed one that somebody already uses.
+  const picked = pickSimulator({ ...runner, want: '27.2', fresh: true })
+  assert.deepEqual(picked, {
+    kind: 'create',
+    type: 'type.iPhone-18-Pro',
+    runtime: 'com.apple.CoreSimulator.SimRuntime.iOS-27-2',
+    name: 'iPhone 18 Pro',
+  })
+  // Ordinary mode would have taken the installed one.
+  assert.equal(pickSimulator({ ...runner, want: '27.2' }).kind, 'device')
+  assert.deepEqual(pickSimulator({ ...runner, want: '99.9', fresh: true }), {
+    kind: 'none',
+  })
+})
+
+test(
+  'the pick command answers when it is started through a symlink',
+  { skip: process.platform !== 'darwin' },
+  () => {
+    // Through a symlinked checkout it once exited 0 and printed nothing, so the launch
+    // check saw no simulator. A version nothing has is "none"; what matters is the word.
+    const scripts = fileURLToPath(new URL('.', import.meta.url))
+    const root = mkdtempSync(join(tmpdir(), 'sharing-simulator-link-'))
+    symlinkSync(scripts, join(root, 'scripts-link'))
+    const printed = execFileSync(
+      'node',
+      [
+        join(root, 'scripts-link', 'sharing-simulator-device.mjs'),
+        'pick',
+        '99.9',
+        '--new',
+      ],
+      { encoding: 'utf8' },
+    ).trim()
+    assert.equal(printed, 'none')
+    rmSync(root, { recursive: true })
+  },
+)

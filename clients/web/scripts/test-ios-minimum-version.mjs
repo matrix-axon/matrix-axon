@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -64,4 +64,27 @@ test("the repository's own configuration is valid, and the CLI prints it", () =>
   )
   const printed = execFileSync('node', [script], { encoding: 'utf8' }).trim()
   assert.ok(isVersion(printed), printed)
+})
+
+test('the CLI prints the version when it is started through a symlink', () => {
+  // A checkout reached through an alias, such as ~/ma for the working copy, made the CLI
+  // exit 0 and print nothing, and the build then compared its result with an empty string.
+  const scripts = fileURLToPath(new URL('.', import.meta.url))
+  const root = mkdtempSync(join(tmpdir(), 'ios-minimum-version-link-'))
+  symlinkSync(scripts, join(root, 'scripts-link'))
+  symlinkSync(join(scripts, 'ios-minimum-version.mjs'), join(root, 'min.mjs'))
+  const direct = execFileSync(
+    'node',
+    [join(scripts, 'ios-minimum-version.mjs')],
+    { encoding: 'utf8' },
+  ).trim()
+  for (const path of [
+    join(root, 'scripts-link', 'ios-minimum-version.mjs'),
+    join(root, 'min.mjs'),
+  ]) {
+    const printed = execFileSync('node', [path], { encoding: 'utf8' }).trim()
+    assert.equal(printed, direct, path)
+    assert.ok(isVersion(printed), path)
+  }
+  rmSync(root, { recursive: true })
 })

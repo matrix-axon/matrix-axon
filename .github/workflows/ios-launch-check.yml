@@ -10,7 +10,10 @@
 # pull request that changes this workflow, its script or the minimum iOS: once on each
 # runner so the newer Xcode has an older one to be compared with, and once more with the
 # newer Xcode's build launched on the oldest iOS the app claims to support
-# (bundle.iOS.minimumSystemVersion), which is what keeping that claim honest needs.
+# (bundle.iOS.minimumSystemVersion), which is what keeping that claim honest needs. That
+# iOS is read from the configuration, tauri.ios.conf.json overriding tauri.conf.json,
+# by the first job: it is not written here, so lowering the minimum moves the launch
+# test with it, and a change to either file runs the check.
 # (GitHub dispatches only workflows that exist on the default branch, so the pull
 # request is how a new one first runs.) It needs no signing material: the simulator
 # build is unsigned.
@@ -35,10 +38,13 @@ on:
     paths:
       - scripts/ci/ios-launch-check.sh
       - .github/workflows/ios-launch-check.yml
+      - scripts/ci/test-ios-launch-check.sh
       - clients/web/scripts/ios-minimum-version.mjs
+      - clients/web/scripts/is-entry-point.mjs
       - clients/web/scripts/sharing-simulator-device.mjs
       - clients/web/scripts/configure-ios-sharing.mjs
       - clients/web/src-tauri/tauri.conf.json
+      - clients/web/src-tauri/tauri.ios.conf.json
 
 permissions:
   contents: read
@@ -52,15 +58,38 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The minimum iOS the app is configured for, which the oldest-runtime leg launches on. It
+  # is read from the checked-out configuration, so the matrix cannot go on testing 26.0
+  # after the minimum has been lowered to something else.
+  plan:
+    name: Read the minimum iOS
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      floor: ${{ steps.floor.outputs.floor }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      # Fails on a missing or malformed value, which fails the run before anything is built.
+      - name: Read bundle.iOS.minimumSystemVersion
+        id: floor
+        run: echo "floor=$(node clients/web/scripts/ios-minimum-version.mjs)" >> "$GITHUB_OUTPUT"
+
   launch:
     name: Build and launch the app in the iOS simulator (${{ matrix.runner }}${{ matrix.ios && format(', on iOS {0}', matrix.ios) || '' }})
+    needs: plan
     strategy:
       fail-fast: false
       matrix:
         include: >-
           ${{ github.event_name == 'workflow_dispatch'
           && fromJson(format('[{{"runner":"{0}","ios":"{1}"}}]', inputs.runner, inputs.ios))
-          || fromJson('[{"runner":"xcode-27","ios":""},{"runner":"macos-26","ios":""},{"runner":"xcode-27","ios":"26.0"}]') }}
+          || fromJson(format('[{{"runner":"xcode-27","ios":""}},{{"runner":"macos-26","ios":""}},{{"runner":"xcode-27","ios":"{0}"}}]', needs.plan.outputs.floor)) }}
     runs-on: ${{ matrix.runner }}
     # The build is about 25 minutes; downloading an older simulator runtime adds more.
     timeout-minutes: 80
@@ -75,7 +104,12 @@ jobs:
         uses: ./.github/actions/check-environment
 
       - name: Check the script parses under this runner's bash
-        run: scripts/ci/check-bash-syntax.sh scripts/ci/ios-launch-check.sh
+        run: scripts/ci/check-bash-syntax.sh scripts/ci/ios-launch-check.sh scripts/ci/test-ios-launch-check.sh
+
+      # Seconds, and no simulator: that gathering evidence cannot end the script and that
+      # it removes only the simulator it made. See the test for the cases.
+      - name: Test the script's cleanup and diagnostics
+        run: scripts/ci/test-ios-launch-check.sh
 
       # One Xcode for every process, as in the store build: the Tauri build starts its
       # own xcodebuild, which ignores DEVELOPER_DIR.

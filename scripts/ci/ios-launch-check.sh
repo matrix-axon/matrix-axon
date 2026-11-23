@@ -80,7 +80,14 @@ export PATH="$HOME/.cargo/bin:$PATH"
 unset FORCE_COLOR
 started_marker=$(mktemp "${TMPDIR:-/var/tmp}/ios-launch-check.XXXXXX")
 created_sim=""
-trap 'rm -f "$started_marker"; [ -z "$created_sim" ] || xcrun simctl delete "$created_sim" >/dev/null 2>&1 || true' EXIT
+# The simulator this made, and only that one, is shut down and deleted on the way out.
+remove_created_sim() {
+  if [ -n "$created_sim" ]; then
+    xcrun simctl shutdown "$created_sim" >/dev/null 2>&1 || true
+    xcrun simctl delete "$created_sim" >/dev/null 2>&1 || true
+  fi
+}
+trap 'rm -f "$started_marker"; remove_created_sim' EXIT
 
 # Same regeneration as package-ios.sh and for the same reason: the generated project
 # is written once and then left alone, so a stale one would be built instead of the
@@ -120,7 +127,7 @@ stop_cli() {
   fi
   kill -TERM "$cli_subshell" 2>/dev/null || true
 }
-trap 'stop_cli; rm -rf "$noop_bin"; rm -f "$started_marker"; [ -z "$created_sim" ] || xcrun simctl delete "$created_sim" >/dev/null 2>&1 || true' EXIT
+trap 'stop_cli; rm -rf "$noop_bin"; rm -f "$started_marker"; remove_created_sim' EXIT
 
 waited=0
 until [ -f "$options_file" ]; do
@@ -181,7 +188,12 @@ xcrun simctl list runtimes | sed 's/^/    /'
 # Prints "device <udid> <name>", "create <type> <runtime> <name>" or "none". The choice,
 # and the tests of it, are in sharing-simulator-device.mjs, which the share-sheet UI tests
 # use too: a standard phone model on any runtime of the version, not the first runtime's.
-pick_simulator() { node "$web_dir/scripts/sharing-simulator-device.mjs" pick "$target_ios"; }
+#
+# It is always asked for a new device (--new): this installs the app on the simulator,
+# removes it, and may shut the simulator down and boot it again, which must never
+# happen to one somebody already uses, an installed Axon and its data included. The
+# new one is deleted when the script ends.
+pick_simulator() { node "$web_dir/scripts/sharing-simulator-device.mjs" pick "$target_ios" --new; }
 
 choice=$(pick_simulator)
 if [ "${choice%% *}" = none ] && [ -n "${LAUNCH_CHECK_IOS:-}" ]; then
@@ -200,38 +212,44 @@ read -r kind first second rest <<EOF
 $choice
 EOF
 case "$kind" in
-  device)
-    udid=$first
-    sim_name=$second${rest:+ $rest}
-    ;;
   create)
     sim_name=$rest
     udid=$(xcrun simctl create "Axon launch check" "$first" "$second") || die "could not create a $sim_name simulator on $second"
     created_sim=$udid
     ;;
-  *) die "no iPhone simulator for iOS $target_ios (the SDK is $sdk)" ;;
+  *) die "no iPhone simulator can be made for iOS $target_ios (the SDK is $sdk)" ;;
 esac
 note "simulator $sim_name $udid (iOS $target_ios, SDK $sdk)"
 
 # Keeps what is known when the simulator itself fails (it never finishes booting, or
 # will not take the app), before the script gives up: the device list and the
 # simulator's own log say what a bare "timed out" cannot.
+#
+# It must never change the outcome it is gathering evidence of: it runs in a subshell
+# with errors switched off, so that an unwritable destination, a missing
+# DiagnosticReports folder or a log that will not read cannot end the script before the
+# boot is tried again, or replace the failure that is about to be reported.
 keep_simulator_diagnostics() {
   [ -n "$diagnostics" ] || return 0
-  mkdir -p "$diagnostics"
-  echo "$facts" >"$diagnostics/app-facts.txt"
-  xcrun simctl list devices >"$diagnostics/simulators.txt" 2>&1 || true
-  xcrun simctl list runtimes >>"$diagnostics/simulators.txt" 2>&1 || true
-  # What bootstatus said while it waited names the stage that never finished.
-  cp "$bootstatus_log" "$diagnostics/bootstatus.log" 2>/dev/null || true
-  tail -n 4000 "$HOME/Library/Logs/CoreSimulator/$udid/system.log" >"$diagnostics/simulator-boot.log" 2>/dev/null || true
-  # The host's own log of CoreSimulator and the simulator's launchd, which is where a
-  # simulator that came up as a device but never started its services shows why.
-  with_timeout 180 log show --last 45m --style compact \
-    --predicate 'subsystem BEGINSWITH "com.apple.CoreSimulator" OR process == "launchd_sim" OR process == "CoreSimulatorService"' \
-    2>/dev/null | tail -n 500 >"$diagnostics/coresimulator-host.log" || true
-  find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -type f \( -name '*.ips' -o -name '*.crash' \) -newer "$started_marker" 2>/dev/null \
-    | while IFS= read -r report; do mkdir -p "$diagnostics/crash-reports"; cp "$report" "$diagnostics/crash-reports/"; done
+  (
+    set +e
+    mkdir -p "$diagnostics" || exit 0
+    echo "$facts" >"$diagnostics/app-facts.txt"
+    xcrun simctl list devices >"$diagnostics/simulators.txt" 2>&1
+    xcrun simctl list runtimes >>"$diagnostics/simulators.txt" 2>&1
+    # What bootstatus said while it waited names the stage that never finished.
+    cp "$bootstatus_log" "$diagnostics/bootstatus.log" 2>/dev/null
+    tail -n 4000 "$HOME/Library/Logs/CoreSimulator/$udid/system.log" >"$diagnostics/simulator-boot.log" 2>/dev/null
+    # The host's own log of CoreSimulator and the simulator's launchd, which is where a
+    # simulator that came up as a device but never started its services shows why.
+    with_timeout 180 log show --last 45m --style compact \
+      --predicate 'subsystem BEGINSWITH "com.apple.CoreSimulator" OR process == "launchd_sim" OR process == "CoreSimulatorService"' \
+      2>/dev/null | tail -n 500 >"$diagnostics/coresimulator-host.log"
+    find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -type f \( -name '*.ips' -o -name '*.crash' \) -newer "$started_marker" 2>/dev/null \
+      | while IFS= read -r report; do mkdir -p "$diagnostics/crash-reports"; cp "$report" "$diagnostics/crash-reports/"; done
+    exit 0
+  ) 2>/dev/null || true
+  return 0
 }
 
 # A runtime downloaded a moment ago has never booted here, and its first boot migrates
@@ -288,8 +306,6 @@ note "the simulator has booted"
 # limits of 5 and 3, one slow run from failing. Allow it three times as long.
 op_scale=1
 if [ -n "${LAUNCH_CHECK_IOS:-}" ]; then op_scale=3; fi
-xcrun simctl terminate "$udid" "$bundle_id" 2>/dev/null || true
-xcrun simctl uninstall "$udid" "$bundle_id" 2>/dev/null || true
 if ! with_timeout $((300 * op_scale)) xcrun simctl install "$udid" "$app"; then
   keep_simulator_diagnostics
   die "the simulator would not install the app" 1
@@ -315,18 +331,24 @@ reports_dir="$HOME/Library/Logs/DiagnosticReports"
 crashes=$(find "$reports_dir" -maxdepth 1 -type f \( -name '*.ips' -o -name '*.crash' \) -newer "$started_marker" 2>/dev/null \
   | grep -i -e "/axon" -e "$bundle_id" || true)
 
+# As in keep_simulator_diagnostics: gathering the artifact cannot be allowed to decide
+# whether the app launched, so an unwritable folder ends the gathering, not the check.
 if [ -n "$diagnostics" ]; then
-  mkdir -p "$diagnostics"
-  echo "$facts" >"$diagnostics/app-facts.txt"
-  cp "$plist" "$diagnostics/Info.plist" 2>/dev/null || true
-  xcrun simctl io "$udid" screenshot "$diagnostics/after-launch.png" >/dev/null 2>&1 || true
-  xcrun simctl spawn "$udid" log show --last 3m --style compact \
-    --predicate "process == \"$(plist_value CFBundleExecutable)\" OR eventMessage CONTAINS \"$bundle_id\"" \
-    2>/dev/null | head -n 600 >"$diagnostics/simulator.log" || true
-  if [ -n "$crashes" ]; then
-    mkdir -p "$diagnostics/crash-reports"
-    echo "$crashes" | while IFS= read -r report; do cp "$report" "$diagnostics/crash-reports/"; done
-  fi
+  (
+    set +e
+    mkdir -p "$diagnostics" || exit 0
+    echo "$facts" >"$diagnostics/app-facts.txt"
+    cp "$plist" "$diagnostics/Info.plist" 2>/dev/null
+    xcrun simctl io "$udid" screenshot "$diagnostics/after-launch.png" >/dev/null 2>&1
+    xcrun simctl spawn "$udid" log show --last 3m --style compact \
+      --predicate "process == \"$(plist_value CFBundleExecutable)\" OR eventMessage CONTAINS \"$bundle_id\"" \
+      2>/dev/null | head -n 600 >"$diagnostics/simulator.log"
+    if [ -n "$crashes" ]; then
+      mkdir -p "$diagnostics/crash-reports"
+      echo "$crashes" | while IFS= read -r report; do cp "$report" "$diagnostics/crash-reports/"; done
+    fi
+    exit 0
+  ) 2>/dev/null || true
 fi
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
