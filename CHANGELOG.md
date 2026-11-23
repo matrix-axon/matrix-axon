@@ -3,6 +3,29 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](https://github.com/matrix-axon/matrix-axon/releases) page.
 
+## v0.2.0 - 2026-11-23
+
+<!-- Release notes generated using configuration in .github/release.yml at v0.2.0 -->
+
+### What's Changed
+#### Security
+* fix: update ruma and url to address RUSTSEC-2026-0588 and RUSTSEC-2026-0592 by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1229
+* fix(web): keep percent-encoded ids out of telemetry routes by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1216
+* ci: run lint-and-clippy on a self-hosted runner when one is free (ADR 0141 pilot) by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1226
+#### Features
+* feat(web): show decryption reasons and identity warnings by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1235
+* feat(server): send video and audio as m.video and m.audio with their real mimetype by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1236
+#### Performance
+* feat(web): keep warm rooms live across room switches, with their names and thread roots by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1230
+#### Documentation
+* docs(adr): ADR 0142 — media metadata, thumbnails and posters at send time by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1214
+#### Other Changes
+* bump version to 0.2.0 by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1225
+* complete version bump to 0.2.0 by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1228
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.1.31...v0.2.0
+
 ## v0.1.31 - 2026-11-22
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
