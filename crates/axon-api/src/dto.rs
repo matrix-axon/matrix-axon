@@ -1289,8 +1289,7 @@ pub struct SendMediaRequest {
 /// optional, and each value must be at least 1 and at most 2^53 − 1.
 /// `width` and `height` come together, and are accepted for `image` and
 /// `video`; `duration_ms` is accepted for `video` and `audio`. Anything else
-/// is a `400`. For an image whose header the server can read, the dimensions
-/// it reads win.
+/// is a `400`. The values are sent in the event's `info` as given.
 #[derive(Debug, Clone, Default, Deserialize, ToSchema)]
 pub struct SendMediaInfo {
     #[serde(default)]

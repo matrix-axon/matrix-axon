@@ -84,7 +84,7 @@ impl GatewayAdapter {
     ) -> impl Future<Output = Result<T, SendError>> + 'a {
         run_bounded(
             self.gateway.interactive_call(account_id),
-            timeout,
+            Some(timeout),
             verb,
             fut,
         )
@@ -113,16 +113,25 @@ impl GatewayAdapter {
         verb: &'a str,
         fut: impl Future<Output = Result<T, GatewayError>> + 'a,
     ) -> impl Future<Output = Result<T, SendError>> + 'a {
-        self.with_upload_ceiling(account_id, self.upstream_upload_timeout, verb, fut)
+        run_bounded(
+            self.gateway
+                .interactive_call(account_id)
+                .ignoring_timeouts(),
+            Some(self.upstream_upload_timeout),
+            verb,
+            fut,
+        )
     }
 
-    /// [`with_upload_timeout`](Self::with_upload_timeout) with an explicit
-    /// ceiling: a media send bounds each of its steps itself
-    /// ([`media_bounds`](Self::media_bounds)), so its ceiling is their sum.
-    fn with_upload_ceiling<'a, T: 'a>(
+    /// [`with_upload_timeout`](Self::with_upload_timeout) for a send the
+    /// gateway bounds itself under [`media_bounds`](Self::media_bounds). No
+    /// outer timeout: one here would also run while the thumbnail uploads,
+    /// and could cancel the send during the step that must never fail it
+    /// (ADR 0142 section 6). The gateway's clock covers the whole call,
+    /// resolving the room included, so nothing here waits unbounded.
+    fn with_media_bounds<'a, T: 'a>(
         &self,
         account_id: Uuid,
-        ceiling: Duration,
         verb: &'a str,
         fut: impl Future<Output = Result<T, GatewayError>> + 'a,
     ) -> impl Future<Output = Result<T, SendError>> + 'a {
@@ -130,27 +139,28 @@ impl GatewayAdapter {
             self.gateway
                 .interactive_call(account_id)
                 .ignoring_timeouts(),
-            ceiling,
+            None,
             verb,
             fut,
         )
     }
 
-    /// The bound on each step of a media send (ADR 0142 sections 6 and 8):
-    /// the original under the upload timeout, the thumbnail under its own
-    /// 10 s, and the event, with any reply lookup, under the send timeout.
+    /// A media send's budget: the upload timeout for the whole send, as it
+    /// was before ADR 0142, and the thumbnail upload's own 10 s outside it
+    /// (see [`MediaSendBounds`]).
     fn media_bounds(&self) -> MediaSendBounds {
         MediaSendBounds {
-            original: self.upstream_upload_timeout,
+            send: self.upstream_upload_timeout,
             thumbnail: MediaSendBounds::THUMBNAIL_UPLOAD,
-            event: self.send_mutation_timeout,
         }
     }
 }
 
 /// Runs `fut` under `timeout`, finishes `call` with the result, reports a
 /// timeout via [`timed_out`] and maps a gateway error via [`map_err`], so no
-/// outbound call can report a timeout any other way.
+/// outbound call can report a timeout any other way. `None` is for a call the
+/// gateway bounds itself, which reports running out as
+/// [`GatewayError::Timeout`].
 ///
 /// The SDK's own request timeout (30 s by default) can fire first. That is
 /// reported in the same `<verb> timed out after Ns` form, with how long Axon
@@ -158,15 +168,21 @@ impl GatewayAdapter {
 /// join/knock hint) sees one shape. The SDK logs the failed request itself.
 async fn run_bounded<T>(
     call: InteractiveCall,
-    timeout: Duration,
+    timeout: Option<Duration>,
     verb: &str,
     fut: impl Future<Output = Result<T, GatewayError>>,
 ) -> Result<T, SendError> {
     let started = tokio::time::Instant::now();
-    let result = tokio::time::timeout(timeout, fut).await;
+    let result = match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, fut).await,
+        None => Ok(fut.await),
+    };
     call.finish(&result);
     match result {
-        Err(_) => Err(timed_out(verb, timeout)),
+        Err(_) => Err(timed_out(
+            verb,
+            timeout.unwrap_or_else(|| started.elapsed()),
+        )),
         Ok(Err(GatewayError::Timeout(_))) => Err(timed_out(verb, started.elapsed())),
         Ok(result) => result.map_err(map_err),
     }
@@ -220,19 +236,17 @@ impl MessageSender for GatewayAdapter {
         attachment: Option<MediaAttachment>,
         txn_id: Option<&str>,
     ) -> Result<String, SendError> {
-        let bounds = self.media_bounds();
-        // A text send with previews keeps its single upload bound.
-        let ceiling = if attachment.is_some() {
-            bounds.total()
-        } else {
-            self.upstream_upload_timeout
-        };
-        self.with_upload_ceiling(
+        self.with_media_bounds(
             account_id,
-            ceiling,
             "preview send",
-            self.gateway
-                .send_with_previews(account_id, room_id, message, attachment, txn_id, bounds),
+            self.gateway.send_with_previews(
+                account_id,
+                room_id,
+                message,
+                attachment,
+                txn_id,
+                self.media_bounds(),
+            ),
         )
         .await
     }
@@ -279,13 +293,18 @@ impl MessageSender for GatewayAdapter {
         relation: Relation<'_>,
         txn_id: Option<&str>,
     ) -> Result<String, SendError> {
-        let bounds = self.media_bounds();
-        self.with_upload_ceiling(
+        self.with_media_bounds(
             account_id,
-            bounds.total(),
             "media send",
             self.gateway.send_media(
-                account_id, room_id, attachment, caption, formatted, relation, txn_id, bounds,
+                account_id,
+                room_id,
+                attachment,
+                caption,
+                formatted,
+                relation,
+                txn_id,
+                self.media_bounds(),
             ),
         )
         .await
@@ -782,7 +801,7 @@ mod tests {
     async fn a_call_the_homeserver_never_answers_is_a_504_naming_the_verb() {
         let result: Result<(), SendError> = run_bounded(
             InteractiveCall::default(),
-            Duration::from_secs(30),
+            Some(Duration::from_secs(30)),
             "leave",
             std::future::pending(),
         )
@@ -800,7 +819,7 @@ mod tests {
     async fn an_sdk_timeout_inside_the_deadline_is_a_504_too() {
         let result: Result<(), SendError> = run_bounded(
             InteractiveCall::default(),
-            Duration::from_secs(45),
+            Some(Duration::from_secs(45)),
             "leave",
             async {
                 tokio::time::sleep(Duration::from_secs(30)).await;
@@ -818,7 +837,7 @@ mod tests {
     async fn a_homeserver_error_inside_the_timeout_stays_a_502() {
         let result: Result<(), SendError> = run_bounded(
             InteractiveCall::default(),
-            Duration::from_secs(30),
+            Some(Duration::from_secs(30)),
             "leave",
             async { Err(GatewayError::Upstream("M_UNKNOWN".to_owned())) },
         )
@@ -839,7 +858,7 @@ mod tests {
         let gates = HomeserverGates::default();
         let result: Result<(), SendError> = run_bounded(
             gates.interactive_call(&homeserver),
-            Duration::from_secs(30),
+            Some(Duration::from_secs(30)),
             "leave",
             std::future::pending(),
         )
@@ -850,7 +869,7 @@ mod tests {
         let gates = HomeserverGates::default();
         let result: Result<(), SendError> = run_bounded(
             gates.interactive_call(&homeserver),
-            Duration::from_secs(30),
+            Some(Duration::from_secs(30)),
             "leave",
             async { Err(GatewayError::Overloaded("503".to_owned())) },
         )
@@ -865,7 +884,7 @@ mod tests {
         let gates = HomeserverGates::default();
         let result: Result<(), SendError> = run_bounded(
             gates.interactive_call(&homeserver),
-            Duration::from_secs(30),
+            Some(Duration::from_secs(30)),
             "leave",
             async { Err(GatewayError::Upstream("M_UNKNOWN".to_owned())) },
         )

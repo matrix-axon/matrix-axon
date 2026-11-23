@@ -1343,10 +1343,10 @@ export interface paths {
          *
          *     The send runs in a task of its own, which settles every upload it
          *     claimed even if the client disconnects: consumed when the event is sent,
-         *     released when it fails. Each step is bounded: the thumbnail's preparation
-         *     (5 s), the original's upload (`media.upstream_upload_timeout_secs`), the
-         *     thumbnail's upload (10 s) and the event (`sync.send_mutation_timeout_secs`),
-         *     about 105 s with the defaults.
+         *     released when it fails. The send, from resolving the room to the event,
+         *     has one budget (`media.upstream_upload_timeout_secs`, 60 s by default), as
+         *     before thumbnails. A thumbnail adds at most 5 s to prepare and 10 s to
+         *     upload, outside that budget; without one, a send answers within it.
          */
         post: operations["send_media"];
         delete?: never;
@@ -6664,8 +6664,7 @@ export interface components {
          *     optional, and each value must be at least 1 and at most 2^53 − 1.
          *     `width` and `height` come together, and are accepted for `image` and
          *     `video`; `duration_ms` is accepted for `video` and `audio`. Anything else
-         *     is a `400`. For an image whose header the server can read, the dimensions
-         *     it reads win.
+         *     is a `400`. The values are sent in the event's `info` as given.
          */
         SendMediaInfo: {
             /** Format: int64 */

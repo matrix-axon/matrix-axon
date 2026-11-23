@@ -666,8 +666,9 @@ impl StagedUploadService for FilesystemStagedUploads {
         let permit = permit
             .map_err(|_| StageUploadError::Internal("thumbnail decoder capacity closed".into()))?;
         // The work keeps its permit until it finishes, even once the budget
-        // has run out and nobody waits for it, so an abandoned decode never
-        // overlaps the next one.
+        // has run out and nobody waits for it: a timed-out thumbnail still
+        // occupies one staging slot (of `media.max_concurrent_uploads`) until
+        // its decode ends, which bounds how many decodes run at once.
         let work = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let decoded = decode_preview_image(upload)?;

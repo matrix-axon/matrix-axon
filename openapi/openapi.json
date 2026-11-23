@@ -6022,7 +6022,7 @@
           "messages"
         ],
         "summary": "Send media",
-        "description": "Send a staged media upload to a room, as the event its staged kind names,\nwith optional `info` and a thumbnail (`thumbnail_upload_id`). A send with a\n`txn_id` already in flight or sent within 10 minutes in this room returns\nthat send's event id and sends nothing (ADR 0142 section 4).\n\nThe send runs in a task of its own, which settles every upload it\nclaimed even if the client disconnects: consumed when the event is sent,\nreleased when it fails. Each step is bounded: the thumbnail's preparation\n(5 s), the original's upload (`media.upstream_upload_timeout_secs`), the\nthumbnail's upload (10 s) and the event (`sync.send_mutation_timeout_secs`),\nabout 105 s with the defaults.",
+        "description": "Send a staged media upload to a room, as the event its staged kind names,\nwith optional `info` and a thumbnail (`thumbnail_upload_id`). A send with a\n`txn_id` already in flight or sent within 10 minutes in this room returns\nthat send's event id and sends nothing (ADR 0142 section 4).\n\nThe send runs in a task of its own, which settles every upload it\nclaimed even if the client disconnects: consumed when the event is sent,\nreleased when it fails. The send, from resolving the room to the event,\nhas one budget (`media.upstream_upload_timeout_secs`, 60 s by default), as\nbefore thumbnails. A thumbnail adds at most 5 s to prepare and 10 s to\nupload, outside that budget; without one, a send answers within it.",
         "operationId": "send_media",
         "parameters": [
           {
@@ -18477,7 +18477,7 @@
       },
       "SendMediaInfo": {
         "type": "object",
-        "description": "`info` of a [`SendMediaRequest`] (ADR 0142 section 4). Each field is\noptional, and each value must be at least 1 and at most 2^53 − 1.\n`width` and `height` come together, and are accepted for `image` and\n`video`; `duration_ms` is accepted for `video` and `audio`. Anything else\nis a `400`. For an image whose header the server can read, the dimensions\nit reads win.",
+        "description": "`info` of a [`SendMediaRequest`] (ADR 0142 section 4). Each field is\noptional, and each value must be at least 1 and at most 2^53 − 1.\n`width` and `height` come together, and are accepted for `image` and\n`video`; `duration_ms` is accepted for `video` and `audio`. Anything else\nis a `400`. The values are sent in the event's `info` as given.",
         "properties": {
           "duration_ms": {
             "type": [

@@ -952,16 +952,17 @@ async fn media_content_with_relation(
 /// request can get wrong, the attachment's kind and type included, is checked
 /// before the first upload.
 ///
-/// An attachment goes through the same steps as [`send_media_in_room`]: the
-/// preview images and the original under `bounds.original`, its thumbnail
-/// best-effort under `bounds.thumbnail`, and the event under `bounds.event`.
+/// Everything runs against `clock`'s budget except an attachment's
+/// thumbnail upload, which is best-effort and outside it, as in
+/// [`send_media_in_room`]. A text send has no thumbnail, so its whole send is
+/// one budget, as before.
 async fn send_with_previews_in_room(
     room: &Room,
     account_id: Uuid,
     message: axon_core::link_preview::PreviewSend<'_>,
     attachment: Option<MediaAttachment>,
     txn_id: Option<&str>,
-    bounds: MediaSendBounds,
+    mut clock: MediaClock,
 ) -> Result<String, GatewayError> {
     use axon_core::link_preview;
     link_preview::preflight(
@@ -1001,39 +1002,43 @@ async fn send_with_previews_in_room(
     ensure_joined(room)?;
     // A cached false state can also expose the message itself. Keep one
     // fresh lookup even for metadata-only sends, including explicit opt-out.
-    let encrypted = fresh_preview_encryption(room, account_id).await?;
+    let encrypted = clock
+        .run(fresh_preview_encryption(room, account_id))
+        .await?;
     let has_uploads = attachment.is_some() || message.previews.iter().any(|p| p.image.is_some());
     use futures_util::{FutureExt, StreamExt, TryStreamExt};
     // At most two uploads per send run at once. Consume the owned bytes;
     // avoid cloning up to 16 MiB while preserving input card order.
-    let (entries, uploaded) = media_step(bounds.original, "preview send upload", async {
-        let entries = futures_util::stream::iter(message.previews)
-            .map(|preview| preview_entry(room, preview, encrypted).boxed())
-            .buffered(2)
-            .try_collect::<Vec<_>>()
-            .await?;
-        let uploaded = match attachment {
-            Some((attachment, mime, info)) => {
-                let MediaAttachment {
-                    kind,
-                    filename,
-                    bytes,
-                    thumbnail,
-                    ..
-                } = attachment;
-                let source =
-                    upload_media_source_with_encryption(room, &mime, bytes, encrypted).await?;
-                validate_preview_media_source(&source)?;
-                Some((kind, filename, mime, info, source, thumbnail))
-            }
-            None => None,
-        };
-        Ok((entries, uploaded))
-    })
-    .await?;
+    let (entries, uploaded) = clock
+        .run(async {
+            let entries = futures_util::stream::iter(message.previews)
+                .map(|preview| preview_entry(room, preview, encrypted).boxed())
+                .buffered(2)
+                .try_collect::<Vec<_>>()
+                .await?;
+            let uploaded = match attachment {
+                Some((attachment, mime, info)) => {
+                    let MediaAttachment {
+                        kind,
+                        filename,
+                        bytes,
+                        thumbnail,
+                        ..
+                    } = attachment;
+                    let source =
+                        upload_media_source_with_encryption(room, &mime, bytes, encrypted).await?;
+                    validate_preview_media_source(&source)?;
+                    Some((kind, filename, mime, info, source, thumbnail))
+                }
+                None => None,
+            };
+            Ok((entries, uploaded))
+        })
+        .await?;
     let media = if let Some((kind, filename, mime, info, source, thumbnail)) = uploaded {
         let thumbnail = match thumbnail.filter(|_| kind != MediaSendKind::Audio) {
-            Some(thumbnail) => upload_thumbnail(room, thumbnail, encrypted, bounds.thumbnail)
+            Some(thumbnail) => clock
+                .thumbnail(room, thumbnail, encrypted)
                 .await
                 // The same check as the original's: an odd URI from the
                 // homeserver costs the thumbnail, not the send.
@@ -1050,74 +1055,111 @@ async fn send_with_previews_in_room(
     } else {
         None
     };
-    media_step(bounds.event, "preview send", async {
-        let mut content = match media {
-            Some(media) => serde_json::to_value(
-                media_content_with_relation(room, media, message.relation).await?,
-            )
-            .map_err(|_| GatewayError::Invalid("invalid media metadata".into()))?,
-            None => link_preview::text_content(message.body, message.formatted, message.relation),
-        };
-        link_preview::install_previews(&mut content, entries);
-        // Preflight reserves are conservative, but validate actual SDK fields
-        // too. If they exceed the reserve, reject the parent event and accept
-        // that already-uploaded Matrix objects can remain orphaned; staged
-        // originals are released for explicit correction/retry by the caller.
-        link_preview::check_content(&content).map_err(preview_validation_error)?;
-        // Do not send plaintext thumbnail references after a concurrent room
-        // encryption upgrade. The next explicit attempt will reupload them.
-        if has_uploads && !encrypted && fresh_preview_encryption(room, account_id).await? {
-            return Err(GatewayError::Invalid(
-                "room encryption changed; review and retry the send".into(),
-            ));
-        }
-        let mut send = room.send_raw("m.room.message", content);
-        let txn_id = txn_id.map(media_transaction_id);
-        if let Some(txn_id) = &txn_id {
-            send = send.with_transaction_id(txn_id);
-        }
-        let response = send.await.map_err(map_preview_send_error)?;
-        Ok(response.response.event_id.to_string())
-    })
-    .await
+    clock
+        .run(async {
+            let mut content = match media {
+                Some(media) => serde_json::to_value(
+                    media_content_with_relation(room, media, message.relation).await?,
+                )
+                .map_err(|_| GatewayError::Invalid("invalid media metadata".into()))?,
+                None => {
+                    link_preview::text_content(message.body, message.formatted, message.relation)
+                }
+            };
+            link_preview::install_previews(&mut content, entries);
+            // Preflight reserves are conservative, but validate actual SDK fields
+            // too. If they exceed the reserve, reject the parent event and accept
+            // that already-uploaded Matrix objects can remain orphaned; staged
+            // originals are released for explicit correction/retry by the caller.
+            link_preview::check_content(&content).map_err(preview_validation_error)?;
+            // Do not send plaintext thumbnail references after a concurrent room
+            // encryption upgrade. The next explicit attempt will reupload them.
+            if has_uploads && !encrypted && fresh_preview_encryption(room, account_id).await? {
+                return Err(GatewayError::Invalid(
+                    "room encryption changed; review and retry the send".into(),
+                ));
+            }
+            let mut send = room.send_raw("m.room.message", content);
+            let txn_id = txn_id.map(media_transaction_id);
+            if let Some(txn_id) = &txn_id {
+                send = send.with_transaction_id(txn_id);
+            }
+            let response = send.await.map_err(map_preview_send_error)?;
+            Ok(response.response.event_id.to_string())
+        })
+        .await
 }
 
-/// The bound on each step of a media send (ADR 0142 sections 6 and 8). Each
-/// step has its own, so a slow thumbnail upload can never push the original
-/// past its bound and fail a send that would succeed without it.
+/// How long a media send may take.
+///
+/// ADR 0142 section 8 gives each step its own bound (60 s, 10 s and 30 s),
+/// but the shipped web client gives up on `send-media` after 65 s and sends
+/// no `txn_id`, so a send that succeeded later than that would be retried and
+/// posted twice. Until clients wait for the longer sum (issue 24; the
+/// per-step bounds return with issue 1243), everything but the thumbnail
+/// upload shares the one budget it had before ADR 0142: resolving the room, the encryption state, preview images, the original, a
+/// reply lookup and the event. The thumbnail upload runs outside that budget,
+/// under its own bound, so it can never fail the send (section 6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MediaSendBounds {
-    /// Uploading the original (`media.upstream_upload_timeout_secs`), with a
-    /// preview-aware send's preview images.
-    pub original: std::time::Duration,
-    /// Uploading the thumbnail. When it runs out, the event goes without one.
+    /// Everything but the thumbnail upload
+    /// (`media.upstream_upload_timeout_secs`).
+    pub send: std::time::Duration,
+    /// The thumbnail upload. When it runs out, the event goes without one,
+    /// and the time it took is not charged to `send`.
     pub thumbnail: std::time::Duration,
-    /// Building the event, including fetching a replied-to event, and sending
-    /// it (`sync.send_mutation_timeout_secs`).
-    pub event: std::time::Duration,
 }
 
 impl MediaSendBounds {
     /// A thumbnail upload's bound (ADR 0142 section 6): tens of KiB, so ten
     /// seconds is long even on a slow link.
     pub const THUMBNAIL_UPLOAD: std::time::Duration = std::time::Duration::from_secs(10);
-
-    /// The longest a send can spend inside these bounds.
-    pub fn total(&self) -> std::time::Duration {
-        self.original + self.thumbnail + self.event
-    }
 }
 
-/// Run one step of a media send under `limit`. Running out is a
-/// [`GatewayError::Timeout`], a `504`: the homeserver may still finish it.
-async fn media_step<T>(
-    limit: std::time::Duration,
-    step: &str,
-    fut: impl std::future::Future<Output = Result<T, GatewayError>>,
-) -> Result<T, GatewayError> {
-    tokio::time::timeout(limit, fut).await.map_err(|_| {
-        GatewayError::Timeout(format!("{step} timed out after {}s", limit.as_secs()))
-    })?
+/// The clock one media send runs against: [`MediaSendBounds::send`] from the
+/// start, paused while the thumbnail uploads.
+pub(crate) struct MediaClock {
+    deadline: tokio::time::Instant,
+    bounds: MediaSendBounds,
+}
+
+impl MediaClock {
+    pub(crate) fn start(bounds: MediaSendBounds) -> Self {
+        Self {
+            deadline: tokio::time::Instant::now() + bounds.send,
+            bounds,
+        }
+    }
+
+    /// Run part of the send against the budget. Running out is a
+    /// [`GatewayError::Timeout`], a `504`: the homeserver may still finish it.
+    async fn run<T>(
+        &self,
+        fut: impl std::future::Future<Output = Result<T, GatewayError>>,
+    ) -> Result<T, GatewayError> {
+        tokio::time::timeout_at(self.deadline, fut)
+            .await
+            .map_err(|_| {
+                GatewayError::Timeout(format!(
+                    "media send timed out after {}s",
+                    self.bounds.send.as_secs()
+                ))
+            })?
+    }
+
+    /// Upload a thumbnail outside the budget: the deadline moves back by
+    /// however long it took, so a slow thumbnail costs only itself.
+    async fn thumbnail(
+        &mut self,
+        room: &Room,
+        thumbnail: axon_core::MediaThumbnail,
+        encrypted: bool,
+    ) -> Option<(MediaSource, Box<ThumbnailInfo>)> {
+        let started = tokio::time::Instant::now();
+        let uploaded = upload_thumbnail(room, thumbnail, encrypted, self.bounds.thumbnail).await;
+        self.deadline += started.elapsed();
+        uploaded
+    }
 }
 
 /// The Matrix transaction id for a client's `txn_id` (ADR 0142 section 4).
@@ -1176,7 +1218,7 @@ async fn upload_media(
     info: AttachmentInfo,
     caption: Option<TextMessageEventContent>,
     encrypted: bool,
-    bounds: MediaSendBounds,
+    clock: &mut MediaClock,
 ) -> Result<MessageType, GatewayError> {
     let MediaAttachment {
         kind,
@@ -1185,15 +1227,17 @@ async fn upload_media(
         thumbnail,
         ..
     } = attachment;
-    let source = media_step(
-        bounds.original,
-        "media upload",
-        upload_media_source_with_encryption(room, content_type, bytes, encrypted),
-    )
-    .await?;
+    let source = clock
+        .run(upload_media_source_with_encryption(
+            room,
+            content_type,
+            bytes,
+            encrypted,
+        ))
+        .await?;
     // `m.audio` has no thumbnail; the API refuses one, so this only guards.
     let thumbnail = match thumbnail.filter(|_| kind != MediaSendKind::Audio) {
-        Some(thumbnail) => upload_thumbnail(room, thumbnail, encrypted, bounds.thumbnail).await,
+        Some(thumbnail) => clock.thumbnail(room, thumbnail, encrypted).await,
         None => None,
     };
     Ok(media_message_type(
@@ -1227,7 +1271,7 @@ async fn send_media_in_room(
     formatted: Option<Formatted<'_>>,
     relation: Relation<'_>,
     txn_id: Option<&str>,
-    bounds: MediaSendBounds,
+    mut clock: MediaClock,
 ) -> Result<String, GatewayError> {
     let content_type = effective_mime(attachment.kind, attachment.content_type.as_deref())?;
     let info = attachment_info(&attachment)?;
@@ -1238,11 +1282,15 @@ async fn send_media_in_room(
         None => TextMessageEventContent::plain(caption),
     });
     ensure_joined(room)?;
-    let encrypted = room
-        .latest_encryption_state()
-        .await
-        .map_err(map_sdk_err)?
-        .is_encrypted();
+    let encrypted = clock
+        .run(async {
+            Ok(room
+                .latest_encryption_state()
+                .await
+                .map_err(map_sdk_err)?
+                .is_encrypted())
+        })
+        .await?;
     let msg_type = upload_media(
         room,
         attachment,
@@ -1250,21 +1298,22 @@ async fn send_media_in_room(
         info,
         caption,
         encrypted,
-        bounds,
+        &mut clock,
     )
     .await?;
-    media_step(bounds.event, "media event send", async {
-        let content =
-            media_content_with_relation(room, RoomMessageEventContent::new(msg_type), relation)
-                .await?;
-        let mut send = room.send(content);
-        if let Some(txn_id) = txn_id {
-            send = send.with_transaction_id(media_transaction_id(txn_id));
-        }
-        let resp = send.await.map_err(map_sdk_err)?;
-        Ok(resp.response.event_id.to_string())
-    })
-    .await
+    clock
+        .run(async {
+            let content =
+                media_content_with_relation(room, RoomMessageEventContent::new(msg_type), relation)
+                    .await?;
+            let mut send = room.send(content);
+            if let Some(txn_id) = txn_id {
+                send = send.with_transaction_id(media_transaction_id(txn_id));
+            }
+            let resp = send.await.map_err(map_sdk_err)?;
+            Ok(resp.response.event_id.to_string())
+        })
+        .await
 }
 
 /// The content of the `m.room.message` an edit replaces, from the fetched
@@ -1581,11 +1630,14 @@ impl SdkGateway {
         bounds: MediaSendBounds,
     ) -> Result<String, GatewayError> {
         use futures_util::FutureExt;
-        let room = self.room(account_id, room_id).await?;
+        // The budget starts before the room is resolved, as the adapter's
+        // single timeout did.
+        let clock = MediaClock::start(bounds);
+        let room = clock.run(self.room(account_id, room_id)).await?;
         // Boxed as a trait object: the send future is deep enough that,
         // nested once more inside the server's adapter, proving it `Send`
         // overflows the compiler's recursion limit.
-        send_with_previews_in_room(&room, account_id, message, attachment, txn_id, bounds)
+        send_with_previews_in_room(&room, account_id, message, attachment, txn_id, clock)
             .boxed()
             .await
     }
@@ -1646,8 +1698,9 @@ impl SdkGateway {
     /// dimensions, duration and thumbnail (section 4).
     ///
     /// Every relation shape goes through one hand-built send
-    /// ([`send_media_in_room`]), each step under its own bound in `bounds`
-    /// (section 6). `txn_id`, when present, is the client's id for this send;
+    /// ([`send_media_in_room`]) under `bounds` (see [`MediaSendBounds`]): one
+    /// budget for the whole send, with the thumbnail upload outside it.
+    /// `txn_id`, when present, is the client's id for this send;
     /// it becomes the Matrix transaction id, so a retry the homeserver has
     /// already seen returns the first event instead of posting another.
     ///
@@ -1668,10 +1721,11 @@ impl SdkGateway {
         bounds: MediaSendBounds,
     ) -> Result<String, GatewayError> {
         use futures_util::FutureExt;
-        let room = self.room(account_id, room_id).await?;
+        let clock = MediaClock::start(bounds);
+        let room = clock.run(self.room(account_id, room_id)).await?;
         // Boxed for the same reason as `send_with_previews`.
         send_media_in_room(
-            &room, attachment, caption, formatted, relation, txn_id, bounds,
+            &room, attachment, caption, formatted, relation, txn_id, clock,
         )
         .boxed()
         .await
@@ -3192,9 +3246,8 @@ mod tests {
 
     /// Bounds long enough that no test step runs out.
     const TEST_BOUNDS: super::MediaSendBounds = super::MediaSendBounds {
-        original: std::time::Duration::from_secs(30),
+        send: std::time::Duration::from_secs(30),
         thumbnail: std::time::Duration::from_secs(30),
-        event: std::time::Duration::from_secs(30),
     };
 
     fn plain_media_source() -> MediaSource {
@@ -3625,7 +3678,7 @@ mod tests {
                         thread_root,
                     },
                     None,
-                    TEST_BOUNDS,
+                    super::MediaClock::start(TEST_BOUNDS),
                 )
                 .await
                 .unwrap_or_else(|e| panic!("{kind:?} {reply_to:?} {thread_root:?}: {e:?}"));
@@ -3716,7 +3769,7 @@ mod tests {
                         thread_root,
                     },
                     None,
-                    TEST_BOUNDS,
+                    super::MediaClock::start(TEST_BOUNDS),
                 )
                 .await
                 .expect_err("a mismatched kind fails");
@@ -3743,6 +3796,9 @@ mod tests {
     #[derive(Default)]
     struct ThumbSeen {
         mode: Option<ThumbUpload>,
+        /// How long the original's upload and the event send take.
+        original_delay: std::time::Duration,
+        send_delay: std::time::Duration,
         /// (content type, body length) of each upload.
         uploads: Vec<(String, usize)>,
         /// (request path, content) of each event.
@@ -3793,9 +3849,13 @@ mod tests {
                 }
                 return Json(json!({"content_uri":"mxc://localhost/thumb"})).into_response();
             }
+            let delay = seen.lock().unwrap().original_delay;
+            tokio::time::sleep(delay).await;
             return Json(json!({"content_uri":"mxc://localhost/original"})).into_response();
         }
         if method == axum::http::Method::PUT && path.contains("/send/m.room.message/") {
+            let delay = seen.lock().unwrap().send_delay;
+            tokio::time::sleep(delay).await;
             let content: serde_json::Value = serde_json::from_slice(&body).unwrap();
             seen.lock().unwrap().sent.push((path.to_owned(), content));
             return Json(json!({"event_id":"$sent:localhost"})).into_response();
@@ -3867,7 +3927,7 @@ mod tests {
                 None,
                 Relation::default(),
                 Some("abc-123"),
-                TEST_BOUNDS,
+                super::MediaClock::start(TEST_BOUNDS),
             )
             .await
             .unwrap();
@@ -3906,7 +3966,7 @@ mod tests {
                     None,
                     Relation::default(),
                     None,
-                    bounds,
+                    super::MediaClock::start(bounds),
                 )
                 .await
                 .unwrap_or_else(|e| {
@@ -3941,7 +4001,7 @@ mod tests {
             None,
             Relation::default(),
             None,
-            TEST_BOUNDS,
+            super::MediaClock::start(TEST_BOUNDS),
         )
         .await
         .unwrap();
@@ -3968,7 +4028,7 @@ mod tests {
             message(),
             Some(with_thumbnail(MediaSendKind::Video, "video/mp4")),
             Some("p-1"),
-            TEST_BOUNDS,
+            super::MediaClock::start(TEST_BOUNDS),
         )
         .await
         .unwrap();
@@ -3986,7 +4046,7 @@ mod tests {
             message(),
             Some(with_thumbnail(MediaSendKind::Video, "video/mp4")),
             None,
-            TEST_BOUNDS,
+            super::MediaClock::start(TEST_BOUNDS),
         )
         .await
         .expect("a rejected thumbnail does not fail a preview-aware send");
@@ -4002,10 +4062,17 @@ mod tests {
             let mime =
                 super::effective_mime(attachment.kind, attachment.content_type.as_deref()).unwrap();
             let info = super::attachment_info(&attachment).unwrap();
-            let msg_type =
-                super::upload_media(&room, attachment, &mime, info, None, true, TEST_BOUNDS)
-                    .await
-                    .unwrap();
+            let msg_type = super::upload_media(
+                &room,
+                attachment,
+                &mime,
+                info,
+                None,
+                true,
+                &mut super::MediaClock::start(TEST_BOUNDS),
+            )
+            .await
+            .unwrap();
             let uploads = std::mem::take(&mut seen.lock().unwrap().uploads);
             assert_eq!(
                 uploads,
@@ -4031,6 +4098,115 @@ mod tests {
                 _ => assert!(info.thumbnail_source.is_none() && info.thumbnail_info.is_none()),
             }
         }
+        server.abort();
+    }
+
+    /// The #1241 review's budget: everything but the thumbnail upload shares
+    /// one `send` budget, as the single upload timeout did before ADR 0142,
+    /// so a send never succeeds later than shipped clients wait; and the
+    /// clock stops while the thumbnail uploads, so a slow thumbnail can never
+    /// time out the send it is optional for. A text send with previews has
+    /// the same single budget.
+    #[tokio::test]
+    async fn one_send_budget_covers_everything_but_the_thumbnail_upload() {
+        use std::time::Duration;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(ThumbSeen::default()));
+        let (room, server) = preview_test_room(
+            axum::Router::new()
+                .fallback(thumb_handler)
+                .with_state(seen.clone()),
+        )
+        .await;
+        room.update_room_info(|mut info| {
+            info.set_encryption_event(None);
+            info.mark_encryption_state_synced();
+            (info, matrix_sdk_base::RoomInfoNotableUpdateReasons::empty())
+        })
+        .await;
+        let bounds = super::MediaSendBounds {
+            send: Duration::from_millis(2000),
+            thumbnail: Duration::from_millis(1200),
+        };
+        let set = |original: u64, send: u64, mode: ThumbUpload| {
+            let mut seen = seen.lock().unwrap();
+            seen.original_delay = Duration::from_millis(original);
+            seen.send_delay = Duration::from_millis(send);
+            seen.mode = Some(mode);
+            seen.sent.clear();
+            seen.uploads.clear();
+        };
+
+        // 1.2 s original + 1.2 s thumbnail (timed out) + 0.3 s event: 2.7 s
+        // in all, but only 1.5 s of it is charged to the 2 s budget.
+        set(1200, 300, ThumbUpload::Slow);
+        super::send_media_in_room(
+            &room,
+            with_thumbnail(MediaSendKind::Image, "image/png"),
+            None,
+            None,
+            Relation::default(),
+            None,
+            super::MediaClock::start(bounds),
+        )
+        .await
+        .expect("a slow thumbnail does not use up the send's budget");
+        let content = seen.lock().unwrap().sent.pop().expect("sent").1;
+        assert!(content["info"].get("thumbnail_url").is_none());
+
+        // No thumbnail: a 1.2 s original and a 1.2 s event overrun the 2 s
+        // budget together, as they did the single upload timeout.
+        set(1200, 1200, ThumbUpload::Accept);
+        let mut attachment = with_thumbnail(MediaSendKind::Image, "image/png");
+        attachment.thumbnail = None;
+        let err = super::send_media_in_room(
+            &room,
+            attachment,
+            None,
+            None,
+            Relation::default(),
+            None,
+            super::MediaClock::start(bounds),
+        )
+        .await
+        .expect_err("the original and the event share one budget");
+        assert!(matches!(err, GatewayError::Timeout(_)), "{err:?}");
+
+        // A text send with previews: one budget for the whole send.
+        let message = || axon_core::link_preview::PreviewSend {
+            body: "see https://example.org",
+            formatted: None,
+            relation: Relation::default(),
+            previews: vec![axon_core::link_preview::LinkPreview {
+                metadata: axon_core::link_preview::PreviewMetadata {
+                    matched_url: "https://example.org".into(),
+                    ..Default::default()
+                },
+                image: None,
+            }],
+        };
+        set(0, 1500, ThumbUpload::Accept);
+        super::send_with_previews_in_room(
+            &room,
+            uuid::Uuid::nil(),
+            message(),
+            None,
+            None,
+            super::MediaClock::start(bounds),
+        )
+        .await
+        .expect("a 1.5 s event fits the text send's 2 s budget");
+        set(0, 2500, ThumbUpload::Accept);
+        let err = super::send_with_previews_in_room(
+            &room,
+            uuid::Uuid::nil(),
+            message(),
+            None,
+            None,
+            super::MediaClock::start(bounds),
+        )
+        .await
+        .expect_err("but not a 2.5 s one");
+        assert!(matches!(err, GatewayError::Timeout(_)), "{err:?}");
         server.abort();
     }
 
@@ -4126,7 +4302,7 @@ mod tests {
             message(),
             Some(attachment(MediaSendKind::Video, Some("video/mp4"))),
             None,
-            TEST_BOUNDS,
+            super::MediaClock::start(TEST_BOUNDS),
         )
         .await
         .expect("a valid send");
@@ -4153,7 +4329,7 @@ mod tests {
                 message(),
                 Some(attachment(kind, content_type)),
                 None,
-                TEST_BOUNDS,
+                super::MediaClock::start(TEST_BOUNDS),
             )
             .await
             .expect_err("a mismatched kind fails");
