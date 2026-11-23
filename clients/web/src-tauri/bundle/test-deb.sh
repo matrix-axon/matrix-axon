@@ -8,16 +8,22 @@ trap 'rm -rf -- "$work"' EXIT
 
 input=$work/input
 mkdir -p "$input/DEBIAN" "$input/usr/bin" "$input/usr/share/applications" \
-    "$work/old" "$work/bad-symbol" "$work/missing-library" "$work/tools"
+    "$work/old" "$work/bad-symbol" "$work/missing-library" "$work/local" "$work/vendor" "$work/tools"
 cat > "$input/DEBIAN/control" <<EOF
 Package: axon
 Version: 1.0
 Architecture: $(dpkg --print-architecture)
 Maintainer: Axon
-Depends: libwebkit2gtk-4.1-0 (>= 2.42), libwebkit2gtk-4.1-0, libgtk-3-0
+Depends: libwebkit2gtk-4.1-0, libwebkit2gtk-4.1-0 (>= 2.42), libgtk-3-0
 Description: Axon desktop launcher test
 EOF
-printf 'Exec=axon %%u\n' > "$input/usr/share/applications/Axon.desktop"
+cat > "$input/usr/share/applications/Axon.desktop" <<'EOF'
+[Desktop Entry]
+Exec=axon %u
+
+[Desktop Action Help]
+Exec=axon-help %u
+EOF
 
 # Use the same relocation as Axon without starting a webview or needing a
 # display. The callback argument and exit status must survive the launcher.
@@ -50,6 +56,8 @@ EOF
 cat > "$work/webkit.c" <<'EOF'
 void webkit_cookie_manager_get_all_cookies(void) {}
 EOF
+cc -shared -fPIC -Wl,-soname,libwebkit2gtk-4.1.so.0 "$work/webkit.c" \
+    -o "$work/local/libwebkit2gtk-4.1.so.0"
 cc -shared -fPIC -Wl,-z,now,-soname,libwebkit2gtk-4.1.so.0 "$work/webkit.c" -x c - \
     -o "$work/bad-symbol/libwebkit2gtk-4.1.so.0" <<'EOF'
 extern void axon_fixture_missing_symbol(void);
@@ -71,6 +79,7 @@ test "$(dpkg-deb --field "$work/axon.deb" Depends)" = 'libwebkit2gtk-4.1-0 (>= 2
 dpkg-deb --raw-extract "$work/axon.deb" "$work/installed"
 (cd "$work/installed" && md5sum --check DEBIAN/md5sums)
 grep -Fx 'Exec=env AXON_DESKTOP_LAUNCH=1 axon %u' "$work/installed/usr/share/applications/Axon.desktop"
+grep -Fx 'Exec=axon-help %u' "$work/installed/usr/share/applications/Axon.desktop"
 
 axon=$work/installed/usr/bin/axon
 callback='org.matrixaxon.axon:/oauth/callback?code=test%20code&state=test'
@@ -89,7 +98,7 @@ expect_recovery() {
         cat "$work/error" >&2
         return 1
     fi
-    printf '%s\n%s\n' "$callback" "$(pkg-config --variable=libdir webkit2gtk-4.1)" | diff - "$work/out"
+    printf '%s\n%s:%s\n' "$callback" "$(pkg-config --variable=libdir webkit2gtk-4.1)" "$1" | diff - "$work/out"
     grep -F 'using the distro WebKitGTK and JavaScriptCore' "$work/error"
 }
 expect_recovery "$work/old"
@@ -136,12 +145,20 @@ test "$status" -eq 1
 grep -F 'libwebkit2gtk-4.1-0: 2.40.5' "$work/error"
 grep -F 'Install or update libwebkit2gtk-4.1-0 to version 2.42 or newer' "$work/error"
 
-# When the app itself requires a missing library and both WebKit libraries
-# are distro copies, the launcher leaves the loader's own error intact.
+# The probe and the recovered app both need the caller's vendor directory.
 build_app -Wl,--no-as-needed "$work/libaxon-fixture-dependency.so.0" \
     -o "$work/installed/usr/lib/axon/axon"
-status=0
-"$axon" "$callback" > "$work/out" 2> "$work/error" || status=$?
-test "$status" -eq 127
-grep -F 'error while loading shared libraries: libaxon-fixture-dependency.so.0' "$work/error"
-test ! -s "$work/out"
+cp "$work/libaxon-fixture-dependency.so.0" "$work/vendor/"
+expect_recovery "$work/vendor:$work/old"
+
+# A missing app dependency should report the loader's own error even
+# when the initial lookup selected a local WebKit library.
+rm -f "$work/dialog"
+for library_path in "" "$work/local"; do
+    status=0
+    AXON_DESKTOP_LAUNCH=1 LD_LIBRARY_PATH=$library_path "$axon" "$callback" > "$work/out" 2> "$work/error" || status=$?
+    test "$status" -eq 127
+    grep -F 'error while loading shared libraries: libaxon-fixture-dependency.so.0' "$work/error"
+    test ! -s "$work/out"
+    test ! -e "$work/dialog"
+done

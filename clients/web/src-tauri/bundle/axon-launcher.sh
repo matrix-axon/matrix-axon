@@ -71,15 +71,22 @@ if [ "$missing_dependency_only" = yes ]; then
     fi
 fi
 
+fallback_path="$system_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 if [ -n "$system_dir" ] &&
     [ -r "$system_dir/libwebkit2gtk-4.1.so.0" ] &&
     [ -r "$system_dir/libjavascriptcoregtk-4.1.so.0" ] &&
-    fallback=$(LD_LIBRARY_PATH="$system_dir" probe) &&
+    fallback=$(LD_LIBRARY_PATH="$fallback_path" probe) &&
     ! printf '%s\n' "$fallback" | grep -Eq 'undefined symbol:|=> not found|not found \(required by|error while loading shared libraries:' &&
     [ "$(loaded_library "$fallback" libwebkit2gtk-4.1.so.0)" = "$system_dir/libwebkit2gtk-4.1.so.0" ] &&
     [ "$(loaded_library "$fallback" libjavascriptcoregtk-4.1.so.0)" = "$system_dir/libjavascriptcoregtk-4.1.so.0" ]; then
     printf 'Axon: using the distro WebKitGTK and JavaScriptCore from %s.\n' "$system_dir" >&2
-    LD_LIBRARY_PATH=$system_dir exec "$app" "$@"
+    LD_LIBRARY_PATH=$fallback_path exec "$app" "$@"
+fi
+
+# An unnamed missing dependency may belong to the app or another library.
+# If the retry did not fix it, let the loader name the original failure.
+if [ "$missing_dependency_only" = yes ]; then
+    exec "$app" "$@"
 fi
 
 installed=$(dpkg-query -W -f='${db:Status-Status} ${Version}' "$native_package" 2>/dev/null) || installed=
