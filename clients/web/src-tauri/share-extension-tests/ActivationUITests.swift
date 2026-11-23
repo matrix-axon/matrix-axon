@@ -61,7 +61,7 @@ final class ActivationUITests: XCTestCase {
       XCTAssertFalse(send.isEnabled)
       XCTAssertFalse(app.buttons["Keep draft in Axon"].exists)
       XCTAssertTrue(app.staticTexts["share-status"].label.contains("No draft was saved"))
-      app.buttons["Cancel"].firstMatch.tap()
+      cancel(app)
       XCTAssertFalse(composer.exists)
     }
     app.terminate()
@@ -82,6 +82,20 @@ final class ActivationUITests: XCTestCase {
       if down { app.swipeDown() } else { app.swipeUp() }
     }
     XCTAssertTrue(element.exists && element.isHittable)
+  }
+  /// Brings the composer's header, with Cancel and Send, back into view. On a short
+  /// screen (the Xcode 27 simulator's iPhone Duo is 466 x 678 points) the header
+  /// scrolls out with the content, so after any scrolling it has to be looked for
+  /// again; on a tall one it never leaves and nothing is swiped.
+  private func showHeader(_ app: XCUIApplication) {
+    let cancel = app.buttons["Cancel"].firstMatch
+    for _ in 0..<10 where !(cancel.exists && cancel.isHittable) { app.swipeDown() }
+  }
+  private func cancel(_ app: XCUIApplication) {
+    showHeader(app)
+    let cancel = app.buttons["Cancel"].firstMatch
+    XCTAssertTrue(cancel.waitForExistence(timeout: uiTimeout))
+    cancel.tap()
   }
   private func expectSize(_ size: String, on element: XCUIElement) {
     let updated = XCTNSPredicateExpectation(
@@ -110,7 +124,7 @@ final class ActivationUITests: XCTestCase {
     all.tap()
     app.buttons["Original"].firstMatch.tap()
     expectSize("Original", on: all)
-    app.buttons["Cancel"].firstMatch.tap()
+    cancel(app)
     app.terminate()
   }
   func testPhotoFilenameEditsInlineAndLastRemovalShowsNothingToSend() {
@@ -137,9 +151,10 @@ final class ActivationUITests: XCTestCase {
     XCTAssertTrue(empty.waitForExistence(timeout: uiTimeout))
     XCTAssertEqual(empty.label, "Nothing to send.")
     XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label == 'Nothing to send.'")).count, 1)
+    showHeader(app)
     XCTAssertFalse(app.buttons["share-send"].isEnabled)
     XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Shorten the text' OR label CONTAINS 'empty_text'")).firstMatch.exists)
-    app.buttons["Cancel"].firstMatch.tap()
+    cancel(app)
     app.terminate()
   }
 
@@ -185,7 +200,7 @@ final class ActivationUITests: XCTestCase {
     XCTAssertEqual(fields.count, 1)
     XCTAssertFalse(reorder.exists)
     XCTAssertEqual(fields.firstMatch.value as? String, "Together")
-    app.buttons["Cancel"].firstMatch.tap()
+    cancel(app)
     app.terminate()
   }
 
@@ -231,7 +246,7 @@ final class ActivationUITests: XCTestCase {
     let remaining = app.textViews[secondID]
     reveal(remaining, app: app)
     XCTAssertEqual(remaining.value as? String, "Second mountain")
-    app.buttons["Cancel"].firstMatch.tap()
+    cancel(app)
     app.terminate()
   }
 
@@ -253,7 +268,7 @@ final class ActivationUITests: XCTestCase {
       reveal(message, app: app)
       XCTAssertEqual(message.value as? String, "Source message https://example.org")
     }
-    app.buttons["Cancel"].firstMatch.tap()
+    cancel(app)
     app.terminate()
   }
 
@@ -269,7 +284,7 @@ final class ActivationUITests: XCTestCase {
     first.tap()
     app.buttons["Small (640 px)"].firstMatch.tap()
     expectSize("Small", on: first)
-    app.buttons["Cancel"].firstMatch.tap()
+    cancel(app)
     app.terminate()
   }
   func testOtherFilesAndVideosDoNotAdvertiseSupport() {
