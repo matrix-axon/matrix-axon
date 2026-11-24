@@ -77,6 +77,7 @@ export const API_ROUTES = [
   '/v1/accounts/{account_id}/rooms/{room_id}/typing',
   '/v1/accounts/{account_id}/rooms/{room_id}/unban',
   '/v1/accounts/{account_id}/rooms/{room_id}/upgrade',
+  '/v1/accounts/{account_id}/spaces/graph',
   '/v1/accounts/{account_id}/users/{user_id}/identity/accept',
   '/v1/accounts/{account_id}/users/{user_id}/identity/withdraw_verification',
   '/v1/accounts/{account_id}/users/{user_id}/ignore',
