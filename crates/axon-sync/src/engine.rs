@@ -1427,7 +1427,7 @@ pub(crate) async fn persist_room_state_value(
         Ok(changed) => {
             tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type = event_type.as_str(), state_key = state_key.as_str(), event_id = %event_id, evidence = ?evidence, changed, "persisted room state");
             if changed {
-                mark_room_state_changes(ctx, client, room_id, &event_type, &state_key);
+                mark_room_state_changes(ctx, room_id, &event_type, &state_key).await;
             }
         }
     }
@@ -1446,9 +1446,8 @@ pub(crate) async fn persist_room_state_value(
 /// Invalidate projections after either state ingestion or redaction repair
 /// commits. For claims without a reciprocal link, only membership and power
 /// changes in the parent space affect verification.
-pub(crate) fn mark_room_state_changes(
+pub(crate) async fn mark_room_state_changes(
     ctx: &PersistContext,
-    client: &Client,
     room_id: &RoomId,
     event_type: &str,
     state_key: &str,
@@ -1459,11 +1458,19 @@ pub(crate) fn mark_room_state_changes(
     }
     let graph_change = match event_type {
         "m.space.child" | "m.space.parent" => true,
-        "m.room.create" | "m.room.tombstone" => state_key.is_empty(),
+        "m.room.create" | "m.room.tombstone" | "m.room.power_levels" => state_key.is_empty(),
         "m.room.member" if state_key == ctx.local_user_id.as_ref() => true,
-        "m.room.member" | "m.room.power_levels" => {
-            client.get_room(room_id).is_some_and(|room| room.is_space())
-        }
+        "m.room.member" => match ctx
+            .store
+            .room_is_space(ctx.account_id, room_id.as_str())
+            .await
+        {
+            Ok(is_space) => is_space,
+            Err(error) => {
+                tracing::warn!(account_id = %ctx.account_id, %room_id, reason = error.diagnostic_reason(), "space classification failed; invalidating graph conservatively");
+                true
+            }
+        },
         _ => false,
     };
     if graph_change {

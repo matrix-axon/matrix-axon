@@ -5,7 +5,7 @@ use serde_json::Value;
 use sqlx_core::row::Row;
 use uuid::Uuid;
 
-use crate::spaces::{SPACE_LINK_IS_CURRENT, SPACE_PARENT_POWER, SPACE_PARENT_VERIFIED};
+use crate::spaces::{SPACE_LINK_IS_CURRENT, SPACE_PARENT_AUTHORIZED, SPACE_PARENT_POWER};
 use crate::{Store, StoreError};
 
 #[derive(Debug)]
@@ -68,7 +68,7 @@ const ANCESTORS: &str = r#",
             WHERE link.account_id=$1 AND link.room_id=chain.room_id
                 AND link.event_type='m.space.parent'
                 AND link.content->'canonical'='true'::jsonb
-                AND {space_parent_verified}
+                AND (reciprocal.event_id IS NOT NULL OR {space_parent_authorized})
             ORDER BY link.state_key COLLATE "C" LIMIT 1
         ) parent
         WHERE chain.depth < {max_depth} AND NOT chain.cycle
@@ -171,7 +171,7 @@ impl Store {
             ANCESTORS
                 .replace("{space_link_is_current}", SPACE_LINK_IS_CURRENT)
                 .replace("{space_parent_power}", SPACE_PARENT_POWER)
-                .replace("{space_parent_verified}", SPACE_PARENT_VERIFIED)
+                .replace("{space_parent_authorized}", SPACE_PARENT_AUTHORIZED)
                 .replace("{max_depth}", &(MAX_ANCESTORS + 1).to_string())
                 .replace("{max_ancestors}", &MAX_ANCESTORS.to_string())
         } else {

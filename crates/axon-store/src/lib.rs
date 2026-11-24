@@ -101,7 +101,7 @@ pub use spaces::{
 };
 pub use state::{
     AccountDataRow, AccountDataUpsert, RoomMetadataStateRow, RoomStateRedaction, RoomStateRow,
-    RoomStateUpsert, UnappliedStateRedaction,
+    RoomStateUpsert, UnappliedStateRedaction, STATE_REDACTION_PAGE_SIZE,
 };
 pub use timeline_gaps::{
     GapCheck, GapOrigin, GapPageLookup, GapTotals, HistoryGapCounts, LagMark, TimelineGap,

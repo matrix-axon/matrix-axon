@@ -1076,7 +1076,7 @@ async fn joined_space_graph_pages_edges_and_revalidates_parent_claims() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn joined_space_graph_pages_a_bridge_sized_branch() {
+async fn joined_space_graph_pages_multiple_bridge_sized_branches() {
     let f = joined_room().await;
     f.state(
         &f.room_id,
@@ -1093,6 +1093,31 @@ async fn joined_space_graph_pages_a_bridge_sized_branch() {
     )
     .await;
     f.sql(
+        "INSERT INTO room_summaries
+         (account_id, room_id, last_activity_ts, last_event_id, last_event_row_id, last_activity_is_content)
+         SELECT $1, room_id, 1, '$fixture', 1, false
+         FROM (VALUES ('!bridge-space-a:localhost'), ('!bridge-space-b:localhost')) spaces(room_id)
+         WHERE room_id <> $2",
+    )
+    .await;
+    let user: String =
+        sqlx_core::query_scalar::query_scalar("SELECT user_id FROM accounts WHERE account_id = $1")
+            .bind(f.account_id)
+            .fetch_one(f.store.pool())
+            .await
+            .unwrap();
+    for space in ["!bridge-space-a:localhost", "!bridge-space-b:localhost"] {
+        f.state(
+            space,
+            "m.room.create",
+            "",
+            json!({"room_version":"11","type":"m.space"}),
+        )
+        .await;
+        f.state(space, "m.room.member", &user, json!({"membership":"join"}))
+            .await;
+    }
+    f.sql(
         "WITH rooms AS (
            SELECT '!bridge-' || n || ':localhost' AS room_id FROM generate_series(1, 4864) n
          ), owner AS (SELECT user_id FROM accounts WHERE account_id = $1)
@@ -1100,25 +1125,35 @@ async fn joined_space_graph_pages_a_bridge_sized_branch() {
          SELECT $1, room_id, 'm.room.member', user_id, '$member', user_id, 1, '{\"membership\":\"join\"}'::jsonb
          FROM rooms CROSS JOIN owner
          UNION ALL
-         SELECT $1, $2, 'm.space.child', room_id, '$child', user_id, 1, '{\"via\":[\"localhost\"]}'::jsonb
-         FROM rooms CROSS JOIN owner",
+         SELECT $1, spaces.parent, 'm.space.child', room_id, '$child', user_id, 1, '{\"via\":[\"localhost\"]}'::jsonb
+         FROM rooms CROSS JOIN owner
+         CROSS JOIN (VALUES ($2::text), ('!bridge-space-a:localhost'), ('!bridge-space-b:localhost')) spaces(parent)",
     )
     .await;
     let path = format!("/v1/accounts/{}/spaces/graph?limit=1000", f.account_id);
     let mut cursor = None;
     let mut children = std::collections::HashSet::new();
-    for expected in [1000, 1000, 1000, 1000, 864] {
+    for expected in std::iter::repeat_n(1000, 14).chain([592]) {
         let page = cursor.map_or_else(|| path.clone(), |cursor| format!("{path}&cursor={cursor}"));
         let (status, body) = get(&f.app, &page).await;
         assert_eq!(status, StatusCode::OK);
         let links = body["data"]["links"].as_array().unwrap();
         assert_eq!(links.len(), expected);
         for link in links {
-            assert_eq!(link["parent_room_id"], f.room_id);
-            assert!(children.insert(link["child_room_id"].as_str().unwrap().to_owned()));
+            let parent = link["parent_room_id"].as_str().unwrap();
+            assert!([
+                f.room_id.as_str(),
+                "!bridge-space-a:localhost",
+                "!bridge-space-b:localhost"
+            ]
+            .contains(&parent));
+            assert!(children.insert((
+                parent.to_owned(),
+                link["child_room_id"].as_str().unwrap().to_owned()
+            )));
         }
         cursor = body["data"]["next_cursor"].as_str().map(str::to_owned);
     }
     assert!(cursor.is_none());
-    assert_eq!(children.len(), 4864);
+    assert_eq!(children.len(), 3 * 4864);
 }

@@ -18,6 +18,8 @@ use crate::{Store, StoreError};
 /// `account_data` migration.
 pub(crate) const GLOBAL_SCOPE: &str = "";
 
+pub const STATE_REDACTION_PAGE_SIZE: usize = 32;
+
 /// Singleton state types whose current value is cached on `room_summaries`
 /// (ADR 0095). `state_key` must be `""`.
 fn summary_display_state(event_type: &str, state_key: &str) -> bool {
@@ -494,8 +496,10 @@ impl Store {
         sqlx_core::query_scalar::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM room_state \
              WHERE account_id = $1 AND room_id = $2 AND event_id = $3 \
-               AND ((state_key = '' AND event_type = ANY($4)) \
-                    OR event_type IN ('m.space.child', 'm.space.parent')))",
+               AND state_key = '' AND event_type = ANY($4)) \
+             OR EXISTS (SELECT 1 FROM room_state \
+             WHERE account_id = $1 AND room_id = $2 AND event_id = $3 \
+               AND event_type IN ('m.space.child', 'm.space.parent'))",
         )
         .bind(account_id)
         .bind(room_id)
@@ -576,13 +580,14 @@ impl Store {
                AND s.event_type = ANY($3) AND s.redacted IS DISTINCT FROM true \
                AND COALESCE(octet_length(s.content::text), 0) <= 131072 \
                AND octet_length(r.raw_event::text) <= 65536 \
-             ORDER BY s.event_type, s.state_key LIMIT 32",
+             ORDER BY s.event_type, s.state_key LIMIT $6",
         )
         .bind(account_id)
         .bind(room_id)
         .bind(event_types)
         .bind(after.map_or("", |key| key.0))
         .bind(after.map_or("", |key| key.1))
+        .bind(STATE_REDACTION_PAGE_SIZE as i64)
         .fetch_all(&mut *tx)
         .await?;
         tx.commit().await?;

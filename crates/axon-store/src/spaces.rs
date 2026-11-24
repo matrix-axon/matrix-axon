@@ -49,11 +49,9 @@ pub(crate) const SPACE_PARENT_POWER: &str = r#"CROSS JOIN LATERAL (
                                 levels.content->'state_default','50'::jsonb) AS required_level
             ) power"#;
 
-/// A parent claim needs either a current reciprocal child link or current
-/// membership and sufficient power in the parent. Shared with pack ancestry.
-pub(crate) const SPACE_PARENT_VERIFIED: &str = r#"(
-                    reciprocal.event_id IS NOT NULL
-                    OR (member.content->>'membership'='join' AND (
+/// Current membership and sufficient power verify an unreciprocated parent
+/// claim. Shared with pack ancestry.
+pub(crate) const SPACE_PARENT_AUTHORIZED: &str = r#"(member.content->>'membership'='join' AND (
                         -- Without power levels the creator has power 100.
                         (levels.event_id IS NULL AND
                          COALESCE(creation.content->>'creator',creation.sender)=member.state_key)
@@ -67,8 +65,7 @@ pub(crate) const SPACE_PARENT_VERIFIED: &str = r#"(
                                   AND abs(power.required_level::text::numeric)<=9007199254740991
                                   AND power.sender_level::text::numeric>=power.required_level::text::numeric
                                  ELSE false END)
-                    ))
-                )"#;
+                    ))"#;
 
 /// Normalized MSC1772 `order` of an `m.space.child` tuple aliased `sc`: the
 /// `content.order` string when it is at most 50 characters of printable ASCII
@@ -251,6 +248,20 @@ pub struct SpaceHierarchyPage {
 }
 
 impl Store {
+    /// Use the same stored room creation state as the graph read.
+    pub async fn room_is_space(&self, account_id: Uuid, room_id: &str) -> Result<bool, StoreError> {
+        sqlx_core::query_scalar::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM room_state \
+             WHERE account_id = $1 AND room_id = $2 AND event_type = 'm.room.create' \
+               AND state_key = '' AND content->>'type' = 'm.space')",
+        )
+        .bind(account_id)
+        .bind(room_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
     /// List `room_id`'s space children (`m.space.child`), MSC1772-ordered:
     /// `order` string ascending (a child with no `order` sorts after every
     /// child that has one), then `origin_ts`, then child `room_id` as a
