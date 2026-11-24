@@ -33,12 +33,13 @@ fn summary_display_state(event_type: &str, state_key: &str) -> bool {
         )
 }
 
-/// A current singleton tuple and the stored redaction event that targets it
+/// A current tuple and the stored redaction event that targets it
 /// (see [`Store::unapplied_room_state_redactions`]).
 #[derive(Debug, Clone)]
 pub struct UnappliedStateRedaction {
-    /// Matrix state type; the state key is always `""`.
+    /// Matrix state event type and state key.
     pub event_type: String,
+    pub state_key: String,
     /// The current tuple's event ID, which the redaction targets.
     pub event_id: String,
     /// The current tuple's sender.
@@ -55,6 +56,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for UnappliedStateRedaction {
     fn from_row(row: &PgRow) -> Result<Self, sqlx_core::Error> {
         Ok(Self {
             event_type: row.try_get("event_type")?,
+            state_key: row.try_get("state_key")?,
             event_id: row.try_get("event_id")?,
             sender: row.try_get("sender")?,
             origin_ts: row.try_get("origin_ts")?,
@@ -480,8 +482,8 @@ impl Store {
         Ok(rows.into_iter().map(|(room,)| room).collect())
     }
 
-    /// Match a live redaction target against a trusted, fixed singleton set.
-    /// Primary-key probes avoid scanning member state or historical events.
+    /// Match a live redaction target against a fixed set of singleton types
+    /// and the two keyed space relationship types.
     pub async fn is_state_reconciliation_target(
         &self,
         account_id: Uuid,
@@ -491,8 +493,9 @@ impl Store {
     ) -> Result<bool, StoreError> {
         sqlx_core::query_scalar::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM room_state \
-             WHERE account_id = $1 AND room_id = $2 AND state_key = '' \
-               AND event_id = $3 AND event_type = ANY($4))",
+             WHERE account_id = $1 AND room_id = $2 AND event_id = $3 \
+               AND ((state_key = '' AND event_type = ANY($4)) \
+                    OR event_type IN ('m.space.child', 'm.space.parent')))",
         )
         .bind(account_id)
         .bind(room_id)
@@ -544,8 +547,8 @@ impl Store {
         Ok(changed)
     }
 
-    /// Current singleton tuples of `event_types` without redaction evidence
-    /// that a stored `m.room.redaction` event targets, with that redaction's
+    /// A bounded page of current singleton or keyed space tuples of
+    /// `event_types` targeted by a known redaction, with that redaction's
     /// raw event. Repair uses it for state the SDK cache never held (ADR 0126):
     /// the caller applies the same redaction the SDK store would have applied.
     /// Tuples over 128 KiB and redactions over 64 KiB are skipped before
@@ -555,10 +558,11 @@ impl Store {
         account_id: Uuid,
         room_id: &str,
         event_types: &[&str],
+        after: Option<(&str, &str)>,
     ) -> Result<Vec<UnappliedStateRedaction>, StoreError> {
         let mut tx = self.reconciliation_transaction().await?;
         let rows = sqlx_core::query_as::query_as::<Postgres, UnappliedStateRedaction>(
-            "SELECT s.event_type, s.event_id, s.sender, s.origin_ts, s.content, r.raw_event AS redaction \
+            "SELECT s.event_type, s.state_key, s.event_id, s.sender, s.origin_ts, s.content, r.raw_event AS redaction \
              FROM room_state s \
              CROSS JOIN LATERAL (\
                  SELECT rr.raw_event FROM events rr \
@@ -566,15 +570,19 @@ impl Store {
                    AND rr.room_id = s.room_id AND rr.event_type = 'm.room.redaction' \
                  ORDER BY rr.id LIMIT 1\
              ) r \
-             WHERE s.account_id = $1 AND s.room_id = $2 AND s.state_key = '' \
+             WHERE s.account_id = $1 AND s.room_id = $2 \
+               AND (s.state_key = '' OR s.event_type IN ('m.space.child', 'm.space.parent')) \
+               AND (s.event_type, s.state_key) > ($4, $5) \
                AND s.event_type = ANY($3) AND s.redacted IS DISTINCT FROM true \
                AND COALESCE(octet_length(s.content::text), 0) <= 131072 \
                AND octet_length(r.raw_event::text) <= 65536 \
-             ORDER BY s.event_type",
+             ORDER BY s.event_type, s.state_key LIMIT 32",
         )
         .bind(account_id)
         .bind(room_id)
         .bind(event_types)
+        .bind(after.map_or("", |key| key.0))
+        .bind(after.map_or("", |key| key.1))
         .fetch_all(&mut *tx)
         .await?;
         tx.commit().await?;

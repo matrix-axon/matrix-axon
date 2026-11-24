@@ -302,7 +302,8 @@ struct RoomDetailsFramePayload {
     /// `homeserver_details` (`GET …/homeserver_details`),
     /// `space_hierarchy` (`GET …/space/hierarchy` of this room, a space),
     /// `discovery` (`GET …/discovery` of this room, an unjoined room), and
-    /// `identity_changes` (`GET …/info`), in that order.
+    /// `identity_changes` (`GET …/info`), and `space_graph` (the account's
+    /// `GET …/spaces/graph`), in that order.
     /// Clients ignore values they do not know.
     sources: Vec<&'static str>,
 }
@@ -316,6 +317,7 @@ fn room_detail_source(source: RoomDetailSource) -> &'static str {
         RoomDetailSource::SpaceHierarchy => "space_hierarchy",
         RoomDetailSource::Discovery => "discovery",
         RoomDetailSource::IdentityChanges => "identity_changes",
+        RoomDetailSource::SpaceGraph => "space_graph",
     }
 }
 
@@ -1067,6 +1069,7 @@ mod tests {
             account_id,
             room_id: "!r:localhost".to_owned(),
             sources: [
+                RoomDetailSource::SpaceGraph,
                 RoomDetailSource::IdentityChanges,
                 RoomDetailSource::Discovery,
                 RoomDetailSource::SpaceHierarchy,
@@ -1080,7 +1083,7 @@ mod tests {
         assert_eq!(v["account_id"], account_id.to_string());
         assert_eq!(
             v["payload"],
-            serde_json::json!({"room_id": "!r:localhost", "sources": ["metadata", "member_counts", "homeserver_details", "space_hierarchy", "discovery", "identity_changes"]})
+            serde_json::json!({"room_id": "!r:localhost", "sources": ["metadata", "member_counts", "homeserver_details", "space_hierarchy", "discovery", "identity_changes", "space_graph"]})
         );
     }
 

@@ -46,6 +46,9 @@ pub enum RoomDetailSource {
     Discovery,
     /// `GET …/info`'s `identity_changes`: room member warnings changed.
     IdentityChanges,
+    /// `GET …/spaces/graph` for the frame's account: a joined relationship
+    /// or the current evidence used to verify it changed.
+    SpaceGraph,
 }
 
 /// The order an absence job confirms a room's missing metadata types (ADR

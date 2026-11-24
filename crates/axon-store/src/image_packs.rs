@@ -5,7 +5,7 @@ use serde_json::Value;
 use sqlx_core::row::Row;
 use uuid::Uuid;
 
-use crate::spaces::SPACE_LINK_IS_CURRENT;
+use crate::spaces::{SPACE_LINK_IS_CURRENT, SPACE_PARENT_POWER, SPACE_PARENT_VERIFIED};
 use crate::{Store, StoreError};
 
 #[derive(Debug)]
@@ -64,33 +64,11 @@ const ANCESTORS: &str = r#",
                 AND member.room_id=link.state_key
                 AND member.event_type='m.room.member' AND member.state_key=link.sender
                 AND member.redacted IS DISTINCT FROM true
-            CROSS JOIN LATERAL (
-                SELECT COALESCE(levels.content#>ARRAY['users',link.sender],
-                                levels.content->'users_default','0'::jsonb) AS sender_level,
-                       COALESCE(levels.content#>'{events,m.space.child}',
-                                levels.content->'state_default','50'::jsonb) AS required_level
-            ) power
+            {space_parent_power}
             WHERE link.account_id=$1 AND link.room_id=chain.room_id
                 AND link.event_type='m.space.parent'
                 AND link.content->'canonical'='true'::jsonb
-                AND (
-                    reciprocal.event_id IS NOT NULL
-                    OR (member.content->>'membership'='join' AND (
-                        -- Without power levels the creator has power 100.
-                        (levels.event_id IS NULL AND
-                         COALESCE(creation.content->>'creator',creation.sender)=link.sender)
-                        -- Room v12 creators have unbounded power.
-                        OR (creation.content->>'room_version'='12' AND
-                            (creation.sender=link.sender OR creation.content->'additional_creators' ? link.sender))
-                        OR (levels.event_id IS NOT NULL AND
-                            CASE WHEN power.sender_level::text ~ '^-?[0-9]{1,16}$'
-                                   AND power.required_level::text ~ '^-?[0-9]{1,16}$'
-                                 THEN abs(power.sender_level::text::numeric)<=9007199254740991
-                                  AND abs(power.required_level::text::numeric)<=9007199254740991
-                                  AND power.sender_level::text::numeric>=power.required_level::text::numeric
-                                 ELSE false END)
-                    ))
-                )
+                AND {space_parent_verified}
             ORDER BY link.state_key COLLATE "C" LIMIT 1
         ) parent
         WHERE chain.depth < {max_depth} AND NOT chain.cycle
@@ -192,6 +170,8 @@ impl Store {
         let hierarchy = if room_id.is_some() {
             ANCESTORS
                 .replace("{space_link_is_current}", SPACE_LINK_IS_CURRENT)
+                .replace("{space_parent_power}", SPACE_PARENT_POWER)
+                .replace("{space_parent_verified}", SPACE_PARENT_VERIFIED)
                 .replace("{max_depth}", &(MAX_ANCESTORS + 1).to_string())
                 .replace("{max_ancestors}", &MAX_ANCESTORS.to_string())
         } else {

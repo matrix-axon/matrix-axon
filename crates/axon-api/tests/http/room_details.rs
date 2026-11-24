@@ -937,3 +937,188 @@ async fn room_info_and_account_actions_share_the_identity_warning_contract() {
     );
     f.store.delete_account_row(f.account_id).await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn joined_space_graph_pages_edges_and_revalidates_parent_claims() {
+    let f = joined_room().await;
+    let user: String =
+        sqlx_core::query_scalar::query_scalar("SELECT user_id FROM accounts WHERE account_id = $1")
+            .bind(f.account_id)
+            .fetch_one(f.store.pool())
+            .await
+            .unwrap();
+    let root = "!a-root:localhost";
+    let branch = "!b-branch:localhost";
+    let peer = "!c-peer:localhost";
+    let leaf = f.room_id.as_str();
+    for space in [root, branch, peer] {
+        sqlx_core::query::query(
+            "INSERT INTO room_summaries
+             (account_id, room_id, last_activity_ts, last_event_id, last_event_row_id, last_activity_is_content)
+             VALUES ($1, $2, 1, '$fixture', 1, false)",
+        )
+        .bind(f.account_id)
+        .bind(space)
+        .execute(f.store.pool())
+        .await
+        .unwrap();
+        f.state(
+            space,
+            "m.room.create",
+            "",
+            json!({"room_version":"11","type":"m.space"}),
+        )
+        .await;
+        f.state(space, "m.room.member", &user, json!({"membership":"join"}))
+            .await;
+    }
+    for (parent, child) in [(root, branch), (branch, root), (branch, leaf), (peer, leaf)] {
+        f.state(
+            parent,
+            "m.space.child",
+            child,
+            json!({"via":["localhost"],"order":"A"}),
+        )
+        .await;
+    }
+    f.state(root, "m.space.child", peer, json!({"via":[]}))
+        .await;
+    f.state(
+        root,
+        "m.space.child",
+        "!unjoined:localhost",
+        json!({"via":["localhost"]}),
+    )
+    .await;
+    f.state(leaf, "m.space.child", peer, json!({"via":["localhost"]}))
+        .await;
+    for parent in [root, branch] {
+        f.state(
+            leaf,
+            "m.space.parent",
+            parent,
+            json!({"via":["localhost"],"canonical":true}),
+        )
+        .await;
+    }
+    let path = format!("/v1/accounts/{}/spaces/graph", f.account_id);
+    let (status, body) = get(&f.app, &format!("{path}?limit=2")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["links"].as_array().unwrap().len(), 2);
+    let cursor = body["data"]["next_cursor"].as_str().unwrap();
+    let other = joined_room().await;
+    let other_path = format!("/v1/accounts/{}/spaces/graph", other.account_id);
+    let (status, empty) = get(&f.app, &other_path).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(empty["data"]["links"], json!([]));
+    let (status, _) = get(&f.app, &format!("{other_path}?cursor={cursor}")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (_, next) = get(&f.app, &format!("{path}?limit=2&cursor={cursor}")).await;
+    assert_eq!(next["data"]["links"].as_array().unwrap().len(), 2);
+    assert_ne!(next["data"]["links"][0], next["data"]["links"][1]);
+    let cursor = next["data"]["next_cursor"].as_str().unwrap();
+    let (_, last) = get(&f.app, &format!("{path}?limit=2&cursor={cursor}")).await;
+    assert_eq!(last["data"]["links"].as_array().unwrap().len(), 2);
+    assert!(last["data"]["next_cursor"].is_null());
+    let (_, all) = get(&f.app, &path).await;
+    assert_eq!(
+        all["data"]["links"].as_array().unwrap(),
+        &[&body, &next, &last]
+            .into_iter()
+            .flat_map(|page| page["data"]["links"].as_array().unwrap().iter().cloned())
+            .collect::<Vec<_>>()
+    );
+    assert!(all["data"]["links"].as_array().unwrap().contains(&json!({
+        "parent_room_id":root,"child_room_id":branch,
+        "source":"child","order":"A","origin_ts":1,"canonical":false,
+    })));
+    let claim = |parent| {
+        json!({
+            "parent_room_id":parent,"child_room_id":leaf,
+            "source":"parent_claim","order":null,"origin_ts":1,"canonical":true,
+        })
+    };
+    assert!(all["data"]["links"]
+        .as_array()
+        .unwrap()
+        .contains(&claim(root)));
+
+    for parent in [root, branch] {
+        f.state(
+            parent,
+            "m.room.power_levels",
+            "",
+            json!({"state_default": 50}),
+        )
+        .await;
+    }
+    let (_, demoted) = get(&f.app, &path).await;
+    let links = demoted["data"]["links"].as_array().unwrap();
+    assert!(
+        !links.contains(&claim(root)),
+        "an unreciprocated claim loses authority"
+    );
+    assert!(
+        links.contains(&claim(branch)),
+        "the reciprocal link still verifies the claim"
+    );
+
+    f.state(branch, "m.space.child", leaf, json!({})).await;
+    f.state(peer, "m.room.member", &user, json!({"membership":"leave"}))
+        .await;
+    let (_, remaining) = get(&f.app, &path).await;
+    let links = remaining["data"]["links"].as_array().unwrap();
+    assert_eq!(links.len(), 2, "only the two cycle edges remain");
+    assert!(links.iter().all(|link| link["source"] == "child"));
+    assert!(f.acquirer.take().is_empty(), "graph reads are local");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn joined_space_graph_pages_a_bridge_sized_branch() {
+    let f = joined_room().await;
+    f.state(
+        &f.room_id,
+        "m.room.create",
+        "",
+        json!({"room_version":"11","type":"m.space"}),
+    )
+    .await;
+    f.sql(
+        "INSERT INTO room_summaries
+         (account_id, room_id, last_activity_ts, last_event_id, last_event_row_id, last_activity_is_content)
+         SELECT $1, '!bridge-' || n || ':localhost', 1, '$fixture', 1, false
+         FROM generate_series(1, 4864) n WHERE $2::text <> ''",
+    )
+    .await;
+    f.sql(
+        "WITH rooms AS (
+           SELECT '!bridge-' || n || ':localhost' AS room_id FROM generate_series(1, 4864) n
+         ), owner AS (SELECT user_id FROM accounts WHERE account_id = $1)
+         INSERT INTO room_state (account_id, room_id, event_type, state_key, event_id, sender, origin_ts, content)
+         SELECT $1, room_id, 'm.room.member', user_id, '$member', user_id, 1, '{\"membership\":\"join\"}'::jsonb
+         FROM rooms CROSS JOIN owner
+         UNION ALL
+         SELECT $1, $2, 'm.space.child', room_id, '$child', user_id, 1, '{\"via\":[\"localhost\"]}'::jsonb
+         FROM rooms CROSS JOIN owner",
+    )
+    .await;
+    let path = format!("/v1/accounts/{}/spaces/graph?limit=1000", f.account_id);
+    let mut cursor = None;
+    let mut children = std::collections::HashSet::new();
+    for expected in [1000, 1000, 1000, 1000, 864] {
+        let page = cursor.map_or_else(|| path.clone(), |cursor| format!("{path}&cursor={cursor}"));
+        let (status, body) = get(&f.app, &page).await;
+        assert_eq!(status, StatusCode::OK);
+        let links = body["data"]["links"].as_array().unwrap();
+        assert_eq!(links.len(), expected);
+        for link in links {
+            assert_eq!(link["parent_room_id"], f.room_id);
+            assert!(children.insert(link["child_room_id"].as_str().unwrap().to_owned()));
+        }
+        cursor = body["data"]["next_cursor"].as_str().map(str::to_owned);
+    }
+    assert!(cursor.is_none());
+    assert_eq!(children.len(), 4864);
+}

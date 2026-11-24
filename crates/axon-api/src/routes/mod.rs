@@ -60,6 +60,7 @@ pub mod room_metadata;
 pub mod room_settings;
 pub mod rooms;
 pub mod search;
+pub mod space_graph;
 pub mod status;
 pub mod uploads;
 pub mod verify;

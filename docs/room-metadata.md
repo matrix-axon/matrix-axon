@@ -486,7 +486,7 @@ No log line contains alias values, names, topics, state content, response bodies
 
 ## Change notification
 
-A `room_details.changed` WebSocket frame tells a client which of a room's reads to repeat ([ADR 0126](adr/0126-room-detail-acquisition-and-coverage.md) decision 5).
+A `room_details.changed` WebSocket frame tells a client which room or account read to repeat ([ADR 0126](adr/0126-room-detail-acquisition-and-coverage.md) decision 5).
 
 ```json
 {
@@ -507,6 +507,7 @@ A `room_details.changed` WebSocket frame tells a client which of a room's reads 
 | `space_hierarchy`    | `GET …/space/hierarchy`    | The frame's room is a space whose crawl committed a page that changed a cached child summary, or ended (`complete`, `truncated`, a failure, or `unsupported`)                    |
 | `discovery`          | `GET …/discovery`          | The frame's room is an unjoined room whose room-summary request changed its discovery row, the endpoint's `support`, or its failure category                                     |
 | `identity_changes`   | `GET …/info`               | A room member warning appears, changes, or clears. Transitions between `null` and `[]` are visible on read                                                                       |
+| `space_graph`        | `GET …/spaces/graph`       | A space link or the account's join, visibility, or parent-claim evidence changed                                                                                                 |
 
 An acquisition job also publishes its source when it ends if a read reported it as `queued` or `running`, so a panel showing a refresh in progress learns it finished even when nothing changed.
 A job dropped from a full queue publishes its source only if a read had seen it; the panel's next read asks again.
@@ -521,6 +522,8 @@ Each account has one coalescer.
 The primary sync hands state to Axon one event at a time with no end-of-room signal, so producers record changes and the coalescer publishes one frame per room, with the union of its sources, once the account has had no change for 100 ms.
 Under continuous changes it publishes no later than one second after the first pending change, and at once when 256 rooms are pending, so neither a busy account nor a large first sync can grow the queue without bound.
 A room whose changes straddle a flush receives two frames.
+For `space_graph`, each flush emits one invalidation for the account even when several rooms changed.
+Use the frame's `account_id` and start the graph read from the first page.
 The coalescer is canceled and joined with the account run, after the workers that feed it, and publishes what is pending when it stops.
 SDK event handlers keep their context after the run stops, so a change they record later is published at once rather than held.
 The bus is lossy like every other frame, so a lagged or reconnecting client re-reads.

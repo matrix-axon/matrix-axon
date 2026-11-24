@@ -7481,6 +7481,89 @@
         }
       }
     },
+    "/v1/accounts/{account_id}/spaces/graph": {
+      "get": {
+        "tags": [
+          "rooms"
+        ],
+        "summary": "Read joined space relationships",
+        "description": "Returns locally synced links between visible joined rooms for one account.\nCombine all pages with the room list to find roots and descendants. Pages\nfollow state-tuple identity, so sort siblings after reading them by valid\norder (absent last), origin timestamp, and child ID. Shared and cyclic edges\nare returned as stored. Verified parent claims can inform breadcrumbs and\ncanonical-parent navigation. An unknown or inactive account yields an empty\npage. The server never contacts the homeserver for this read.\n\nSubscribe to `room_details.changed` with source `space_graph` and re-read\nfrom the first page on invalidation and reconnect.",
+        "operationId": "space_graph",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 500, maximum 1,000).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque continuation from this account's previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of joined space relationships",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_SpaceGraphPageDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed cursor or a cursor from another account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid Axon bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal database failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{account_id}/users/{user_id}/identity/accept": {
       "post": {
         "tags": [
@@ -12707,6 +12790,36 @@
               "event_id": {
                 "type": "string",
                 "description": "The created Matrix event id."
+              }
+            }
+          }
+        }
+      },
+      "ApiResponse_SpaceGraphPageDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": [
+              "links"
+            ],
+            "properties": {
+              "links": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SpaceGraphLinkDto"
+                }
+              },
+              "next_cursor": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Opaque continuation. Null on the last page."
               }
             }
           }
@@ -18934,6 +19047,65 @@
           }
         }
       },
+      "SpaceGraphLinkDto": {
+        "type": "object",
+        "required": [
+          "parent_room_id",
+          "child_room_id",
+          "source",
+          "origin_ts",
+          "canonical"
+        ],
+        "properties": {
+          "canonical": {
+            "type": "boolean",
+            "description": "Whether this verified parent claim names a canonical parent."
+          },
+          "child_room_id": {
+            "type": "string"
+          },
+          "order": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Valid Matrix sibling order, present only on advertised child links."
+          },
+          "origin_ts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Origin timestamp of the state event in milliseconds."
+          },
+          "parent_room_id": {
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/SpaceLinkSource",
+            "description": "A link advertised by a space or a verified claim made in the child."
+          }
+        }
+      },
+      "SpaceGraphPageDto": {
+        "type": "object",
+        "required": [
+          "links"
+        ],
+        "properties": {
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SpaceGraphLinkDto"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque continuation. Null on the last page."
+          }
+        }
+      },
       "SpaceHierarchyChildDto": {
         "allOf": [
           {
@@ -19008,6 +19180,13 @@
             "description": "The space's current child links (an `m.space.child` with a valid\n`via`), counted in the same snapshot as the page, so a client can show\n\"120 of 1,340\"."
           }
         }
+      },
+      "SpaceLinkSource": {
+        "type": "string",
+        "enum": [
+          "child",
+          "parent_claim"
+        ]
       },
       "SpaceParentDto": {
         "type": "object",

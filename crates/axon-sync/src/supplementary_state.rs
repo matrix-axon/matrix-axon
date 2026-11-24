@@ -51,25 +51,32 @@ fn allowed_state(kind: &str, key: &str, local_user: &str) -> bool {
 }
 
 fn decode_state_event(raw: &str) -> serde_json::Result<(AnySyncStateEvent, serde_json::Value)> {
-    let value: serde_json::Value = serde_json::from_str(raw)?;
+    let mut value: serde_json::Value = serde_json::from_str(raw)?;
     let event = match serde_json::from_str(raw) {
         Ok(event) => event,
         Err(error) => {
-            // Matrix removes a space relationship by omitting `via`, including
-            // sending {}. Ruma's original-event content requires `via`, so use
-            // an empty list only to decode the typed identity/redaction data.
-            // The projection below must retain the untouched raw content.
-            let is_relationship = matches!(
+            if !matches!(
                 value.get("type").and_then(serde_json::Value::as_str),
                 Some("m.space.parent" | "m.space.child")
-            );
-            let missing_via = value
-                .get("content")
-                .and_then(serde_json::Value::as_object)
-                .is_some_and(|content| !content.contains_key("via"));
-            if !is_relationship || !missing_via {
+            ) {
                 return Err(error);
             }
+            let Some(content) = value
+                .get_mut("content")
+                .and_then(serde_json::Value::as_object_mut)
+            else {
+                return Err(error);
+            };
+            // An omitted or invalid via clears the current relationship.
+            // Keep the event identity and project missing routing information
+            // for invalid via, including arrays containing invalid server names.
+            if content.get("via").is_some_and(|via| {
+                serde_json::from_value::<Vec<matrix_sdk::ruma::OwnedServerName>>(via.clone())
+                    .is_ok()
+            }) {
+                return Err(error);
+            }
+            content.remove("via");
             let mut for_decode = value.clone();
             for_decode["content"]["via"] = serde_json::json!([]);
             serde_json::from_value(for_decode)?
@@ -336,8 +343,12 @@ mod tests {
             }
         ));
         value.as_object_mut().unwrap().remove("unsigned");
-        value["content"] = json!({"via":"invalid"});
-        assert!(decode_state_event(&value.to_string()).is_err());
+        for invalid in [json!("invalid"), json!([true]), json!(["invalid server"])] {
+            value["content"] = json!({"via":invalid});
+            let (event, projected) = decode_state_event(&value.to_string()).unwrap();
+            assert_eq!(event.event_id().as_str(), "$clear");
+            assert_eq!(projected["content"], json!({}));
+        }
         value["type"] = json!("m.room.name");
         value["state_key"] = json!("");
         value["content"] = json!({});
@@ -382,7 +393,7 @@ mod tests {
                     {"type":"m.space.parent","state_key":"!parent:localhost","sender":sender,
                         "event_id":"$clear-parent","origin_server_ts":2,"content":{}},
                     {"type":"m.space.child","state_key":"!parent:localhost","sender":sender,
-                        "event_id":"$clear-child","origin_server_ts":2,"content":{}}
+                        "event_id":"$clear-child","origin_server_ts":2,"content":{"via":["invalid server"]}}
                 ]}}}))
             }
         });

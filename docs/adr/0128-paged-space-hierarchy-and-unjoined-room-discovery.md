@@ -194,11 +194,29 @@ Its response is a bare array, so a cursor or truncation flag would break existin
 The OpenAPI description states the cap and points to `space/hierarchy`; the route is marked deprecated once the web client (issue 623), the TUI (issue 624), and the oversized-space work (issue 553) have moved to the new route.
 It is not removed, under the additive `/v1/` policy (ADR 0099).
 
-### 8. Nested spaces stay out of scope, with room to add them
+### 8. Joined space graph
 
-This ADR crawls and reads direct children only (`max_depth=1`).
-The paged read is shaped so that nesting can be added without another endpoint: rows carry `parent_room_id`, and a later `max_depth` parameter can walk joined subspaces from local state in depth-first MSC1772 order, with a cycle rule, once issue 808 decides how clients present subspaces.
-Discovering the children of unjoined subspaces would need deeper hierarchy requests and is not planned.
+The per-space directory and homeserver crawl continue to cover direct children (`max_depth=1`).
+Browsing descendants through an unjoined space requires a deeper homeserver hierarchy request.
+
+`GET /v1/accounts/{account_id}/spaces/graph` supplies the local relationships needed for joined-room navigation (issue 808).
+Clients combine it with the account's room list so isolated joined spaces also have an entry point.
+A graph page defaults to 500 links, contains at most 1,000, and uses a cursor scoped to the account and ordered by state-tuple identity.
+A change to sibling order leaves the link at the same pagination position.
+Clients sort siblings by normalized `order`, link origin timestamp, and child room ID, and break cycles while computing reachable rooms.
+
+Both ends of a link require positive local join evidence and a visible room summary.
+The parent must be a space.
+The response distinguishes advertised child links from verified parent claims, including the canonical flag.
+A parent claim needs a current reciprocal link or current evidence that its sender can publish a child link in the parent.
+Clients can use verified claims for breadcrumbs and canonical-parent navigation.
+The account-wide read contacts no homeserver.
+
+After a `room_details.changed` frame with source `space_graph`, re-read the affected account's graph starting from the first page.
+Graph changes coalesce across the account.
+The frame names one affected room, and the same batch can include changes in other rooms.
+If a frame arrives during pagination, schedule another walk.
+After reconnect, restart from the first page so removed links are dropped.
 
 ### 9. Change notification
 

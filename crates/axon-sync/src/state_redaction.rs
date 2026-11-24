@@ -1,5 +1,5 @@
-//! Bounded repair of singleton room state from the SDK's local, pruned cache.
-//! Timeline log rows are hints, never proof that a redaction was applied.
+//! Bounded repair of room state from the SDK cache and resolved redaction
+//! events. A stored redaction alone is not proof it may be applied.
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -15,7 +15,9 @@ use matrix_sdk::{Client, RoomInfo, RoomState};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::{parse_raw_json, state_redaction_evidence, PersistContext};
+use crate::engine::{
+    mark_room_state_changes, parse_raw_json, state_redaction_evidence, PersistContext,
+};
 
 /// Metadata plus the display state shared by /info, room lists, and spaces.
 /// Never request a member list or enumerate state keys.
@@ -38,6 +40,9 @@ pub(crate) const STATE_TYPES: &[&str] = &[
 /// so the SDK cache may never hold them and repair falls back to the stored
 /// tuple.
 const SUPPLEMENTARY_STATE_TYPES: &[&str] = &["m.room.guest_access", "m.room.server_acl"];
+// Keyed space links can also arrive only through supplementary sync. Repair
+// their stored forms without enumerating the SDK's state keys.
+const SPACE_LINK_TYPES: &[&str] = &["m.space.child", "m.space.parent"];
 
 pub(crate) async fn watch(
     client: Client,
@@ -200,57 +205,69 @@ async fn cached_state(
 /// redelivers a redacted target, so nothing else would apply the redaction.
 /// This is what the SDK store does to the state it holds: ruma's `redact`
 /// under the room's version rules, with the same trust in a synced redaction.
-async fn locally_redacted_state(
+async fn reconcile_stored_state(
     ctx: &PersistContext,
     client: &Client,
-    room_id: &RoomId,
+    room_id: &OwnedRoomId,
     event_types: &[&str],
-) -> Vec<(AnySyncStateEvent, serde_json::Value)> {
-    let candidates = match ctx
-        .store
-        .unapplied_room_state_redactions(ctx.account_id, room_id.as_str(), event_types)
-        .await
-    {
-        Ok(candidates) => candidates,
-        Err(error) => {
-            tracing::warn!(account_id = %ctx.account_id, room_id = %room_id, reason = error.diagnostic_reason(), "stored state redaction read failed; sweep will retry");
-            return Vec::new();
+) {
+    let mut after = None;
+    let mut room_rules = None;
+    loop {
+        let candidates = match ctx
+            .store
+            .unapplied_room_state_redactions(
+                ctx.account_id,
+                room_id.as_str(),
+                event_types,
+                after
+                    .as_ref()
+                    .map(|(kind, key): &(String, String)| (kind.as_str(), key.as_str())),
+            )
+            .await
+        {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                tracing::warn!(account_id = %ctx.account_id, %room_id, reason = error.diagnostic_reason(), "stored state redaction read failed; sweep will retry");
+                return;
+            }
+        };
+        let Some(last) = candidates.last() else {
+            return;
+        };
+        after = Some((last.event_type.clone(), last.state_key.clone()));
+        // Use the same version rules as the SDK's own state store.
+        if room_rules.is_none() {
+            let info = client
+                .state_store()
+                .get_room_infos(&RoomLoadSettings::One(room_id.clone()))
+                .await;
+            let Some(info) = info.ok().and_then(|infos| infos.into_iter().next()) else {
+                tracing::debug!(account_id = %ctx.account_id, %room_id, "no SDK room info for stored state redaction; sweep will retry");
+                return;
+            };
+            let rules = info.room_version_rules_or_default();
+            room_rules = Some((
+                rules.redaction.clone(),
+                power_levels(client, room_id, &info, &rules).await,
+            ));
         }
-    };
-    if candidates.is_empty() {
-        return Vec::new();
-    }
-    // The rules the SDK store itself redacts with: those of its stored
-    // `RoomInfo`, read from the same store.
-    let info = client
-        .state_store()
-        .get_room_infos(&RoomLoadSettings::One(room_id.to_owned()))
-        .await;
-    let Some(info) = info.ok().and_then(|infos| infos.into_iter().next()) else {
-        tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, "no SDK room info for stored state redaction; sweep will retry");
-        return Vec::new();
-    };
-    let rules = info.room_version_rules_or_default();
-    let power_levels = power_levels(client, room_id, &info, &rules).await;
-    candidates
-        .into_iter()
-        .filter_map(|candidate| {
+        let Some((rules, levels)) = &room_rules else {
+            return;
+        };
+        for candidate in candidates {
             let event_type = candidate.event_type.clone();
-            if !redaction_authorized(
-                &candidate.redaction,
-                &candidate.sender,
-                power_levels.as_ref(),
-            ) {
-                tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type, "stored redaction is not authorized; left unapplied");
-                return None;
+            if !redaction_authorized(&candidate.redaction, &candidate.sender, levels.as_ref()) {
+                tracing::debug!(account_id = %ctx.account_id, %room_id, event_type, "stored redaction is not authorized; left unapplied");
+                continue;
             }
-            let redacted = redact_stored(candidate, &rules.redaction);
-            if redacted.is_none() {
-                tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type, "stored state or its redaction is not redactable JSON");
+            if let Some((ev, value)) = redact_stored(candidate, rules) {
+                apply(ctx, client, room_id, &event_type, &ev, &value).await;
+            } else {
+                tracing::debug!(account_id = %ctx.account_id, %room_id, event_type, "stored state or its redaction is not redactable JSON");
             }
-            redacted
-        })
-        .collect()
+        }
+    }
 }
 
 /// The room's current power levels from the SDK cache, which the primary
@@ -299,7 +316,7 @@ fn redact_stored(
 ) -> Option<(AnySyncStateEvent, serde_json::Value)> {
     let event = serde_json::json!({
         "type": candidate.event_type,
-        "state_key": "",
+        "state_key": candidate.state_key,
         "event_id": candidate.event_id,
         "sender": candidate.sender,
         "origin_server_ts": candidate.origin_ts,
@@ -317,25 +334,23 @@ async fn reconcile_room(ctx: &PersistContext, client: &Client, room_id: &OwnedRo
     let mut missing = Vec::new();
     for event_type in STATE_TYPES {
         match cached_state(ctx, client, room_id, event_type).await {
-            Cached::Redacted(ev, value) => apply(ctx, room_id, event_type, &ev, &value).await,
+            Cached::Redacted(ev, value) => {
+                apply(ctx, client, room_id, event_type, &ev, &value).await
+            }
             Cached::Missing if SUPPLEMENTARY_STATE_TYPES.contains(event_type) => {
                 missing.push(*event_type);
             }
             Cached::Missing | Cached::Unusable => {}
         }
     }
-    if missing.is_empty() {
-        return;
-    }
-    for (ev, value) in locally_redacted_state(ctx, client, room_id, &missing).await {
-        let event_type = ev.event_type().to_string();
-        apply(ctx, room_id, &event_type, &ev, &value).await;
-    }
+    missing.extend_from_slice(SPACE_LINK_TYPES);
+    reconcile_stored_state(ctx, client, room_id, &missing).await;
 }
 
 /// Mirror one redacted form into the current tuple, if it still is current.
 async fn apply(
     ctx: &PersistContext,
+    client: &Client,
     room_id: &OwnedRoomId,
     event_type: &str,
     ev: &AnySyncStateEvent,
@@ -348,7 +363,7 @@ async fn apply(
         account_id: ctx.account_id,
         room_id: room_id.as_str(),
         event_type,
-        state_key: "",
+        state_key: ev.state_key(),
         event_id: ev.event_id().as_str(),
         sender: ev.sender().as_str(),
         origin_ts: i64::try_from(u64::from(ev.origin_server_ts().0)).unwrap_or(i64::MAX),
@@ -361,10 +376,7 @@ async fn apply(
     {
         Ok(true) => {
             tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type, event_id = %ev.event_id(), "reconciled redacted room state");
-            if axon_core::room_details::is_metadata_state(event_type, "") {
-                ctx.room_details
-                    .mark(room_id.as_str(), axon_core::RoomDetailSource::Metadata);
-            }
+            mark_room_state_changes(ctx, client, room_id, event_type, ev.state_key());
         }
         Ok(false) => {}
         Err(_) => {
@@ -479,28 +491,51 @@ mod tests {
             gaps: None,
         };
         // The supplementary transport's projection; the SDK never sees these.
-        for (event_type, event_id, content) in [
+        for (event_type, state_key, event_id, content) in [
             (
                 "m.room.guest_access",
+                "",
                 "$guest:localhost",
                 json!({"guest_access": "can_join"}),
             ),
             (
                 "m.room.server_acl",
+                "",
                 "$acl:localhost",
                 json!({"allow": ["*"], "deny": ["evil.example"], "allow_ip_literals": false}),
             ),
+            (
+                "m.space.child",
+                "!child:localhost",
+                "$child:localhost",
+                json!({"via":["localhost"]}),
+            ),
+            (
+                "m.space.parent",
+                "!parent:localhost",
+                "$parent:localhost",
+                json!({"via":["localhost"],"canonical":true}),
+            ),
         ] {
-            let value = json!({"type": event_type, "state_key": "", "event_id": event_id,
+            let value = json!({"type": event_type, "state_key": state_key, "event_id": event_id,
                 "sender": "@alice:localhost", "origin_server_ts": 10, "content": content});
             let ev: AnySyncStateEvent = serde_json::from_value(value.clone()).unwrap();
             crate::engine::persist_room_state_value(ev, &value, &room_id, &client, &ctx).await;
-            assert!(matches!(
-                cached_state(&ctx, &client, &room_id, event_type).await,
-                Cached::Missing
-            ));
+            assert!(client
+                .state_store()
+                .get_state_event(&room_id, event_type.into(), state_key)
+                .await
+                .unwrap()
+                .is_none());
         }
-        room_details.take_pending();
+        let sources = [
+            axon_core::RoomDetailSource::Metadata,
+            axon_core::RoomDetailSource::SpaceGraph,
+        ];
+        assert_eq!(
+            room_details.take_pending()[room_id.as_str()],
+            sources.into()
+        );
         // Nothing to repair before a redaction is stored.
         reconcile_room(&ctx, &client, &room_id).await;
         assert!(room_details.take_pending().is_empty());
@@ -508,6 +543,8 @@ mod tests {
         for (redaction_id, target) in [
             ("$redact-guest:localhost", "$guest:localhost"),
             ("$redact-acl:localhost", "$acl:localhost"),
+            ("$redact-child:localhost", "$child:localhost"),
+            ("$redact-parent:localhost", "$parent:localhost"),
         ] {
             let raw = json!({"type": "m.room.redaction", "event_id": redaction_id,
                 "sender": "@alice:localhost", "origin_server_ts": 11, "redacts": target,
@@ -533,20 +570,34 @@ mod tests {
             assert_eq!(state_redaction_rx.try_recv().unwrap(), room_id);
         }
         reconcile_room(&ctx, &client, &room_id).await;
-        for (event_type, event_id, redaction_id) in [
+        for (event_type, state_key, event_id, redaction_id) in [
             (
                 "m.room.guest_access",
+                "",
                 "$guest:localhost",
                 "$redact-guest:localhost",
             ),
             (
                 "m.room.server_acl",
+                "",
                 "$acl:localhost",
                 "$redact-acl:localhost",
             ),
+            (
+                "m.space.child",
+                "!child:localhost",
+                "$child:localhost",
+                "$redact-child:localhost",
+            ),
+            (
+                "m.space.parent",
+                "!parent:localhost",
+                "$parent:localhost",
+                "$redact-parent:localhost",
+            ),
         ] {
             let row = store
-                .room_state(account.account_id, room_id.as_str(), event_type, "")
+                .room_state(account.account_id, room_id.as_str(), event_type, state_key)
                 .await
                 .unwrap()
                 .unwrap();
@@ -556,11 +607,8 @@ mod tests {
             assert_eq!(row.content, Some(json!({})), "{event_type} is pruned");
         }
         assert_eq!(
-            room_details.take_pending()[room_id.as_str()]
-                .iter()
-                .copied()
-                .collect::<Vec<_>>(),
-            [axon_core::RoomDetailSource::Metadata]
+            room_details.take_pending()[room_id.as_str()],
+            sources.into()
         );
         // Applied once; the next sweep finds nothing left to apply.
         reconcile_room(&ctx, &client, &room_id).await;

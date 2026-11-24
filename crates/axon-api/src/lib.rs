@@ -348,6 +348,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/accounts/{account_id}/rooms/{room_id}/space/children",
             get(routes::rooms::space_children),
         )
+        .route(
+            "/v1/accounts/{account_id}/spaces/graph",
+            get(routes::space_graph::space_graph),
+        )
         // Paged replacement for space/children (ADR 0128).
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/space/hierarchy",
