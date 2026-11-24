@@ -32,7 +32,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axon_core::{UtdReason, UtdReasonKind};
+use axon_core::{EventDecryptedFrame, LiveFrame, UtdReason, UtdReasonKind};
 use axon_search::IndexHandle;
 use axon_store::{PendingUtd, Store, UtdReasonUpdate};
 use futures_util::stream::BoxStream;
@@ -47,7 +47,7 @@ use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{OwnedRoomId, RoomId};
 use matrix_sdk::{Client, Room};
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -65,6 +65,31 @@ use tokio::time::error::Elapsed;
 /// sweep's cancellation still ends the download at once ([`unless_cancelled`]),
 /// so recover keeps its own shorter deadline.
 const BACKUP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Account-scoped inputs shared by sweeps and session drains.
+pub(crate) struct RedecryptContext<'a> {
+    pub(crate) store: &'a Store,
+    pub(crate) account_id: Uuid,
+    pub(crate) index: Option<&'a IndexHandle>,
+    pub(crate) live_tx: &'a broadcast::Sender<LiveFrame>,
+}
+
+pub(crate) fn publish_decrypted(
+    live_tx: &broadcast::Sender<LiveFrame>,
+    account_id: Uuid,
+    room_id: &str,
+    event_id: &str,
+    arrival_order: i64,
+) {
+    if live_tx.receiver_count() > 0 {
+        let _ = live_tx.send(LiveFrame::EventDecrypted(EventDecryptedFrame {
+            account_id,
+            room_id: room_id.to_owned(),
+            event_id: event_id.to_owned(),
+            arrival_order,
+        }));
+    }
+}
 
 /// Which pending rows an account-wide sweep should load.
 #[derive(Debug, Clone, Copy)]
@@ -218,8 +243,15 @@ pub(crate) async fn run(
     account_id: Uuid,
     cancel: CancellationToken,
     index: Option<IndexHandle>,
+    live_tx: broadcast::Sender<LiveFrame>,
     mut withheld: mpsc::Receiver<WithheldSession>,
 ) {
+    let ctx = RedecryptContext {
+        store: &store,
+        account_id,
+        index: index.as_ref(),
+        live_tx: &live_tx,
+    };
     let stream = match client.encryption().room_keys_received_stream().await {
         Some(stream) => stream,
         None => {
@@ -240,11 +272,9 @@ pub(crate) async fn run(
                     for info in infos {
                         redecrypt_session(
                             &client,
-                            &store,
-                            account_id,
+                            &ctx,
                             info.room_id.as_str(),
                             &info.session_id,
-                            index.as_ref(),
                         )
                         .await;
                     }
@@ -263,11 +293,9 @@ pub(crate) async fn run(
             Some(session) = withheld.recv() => {
                 redecrypt_session(
                     &client,
-                    &store,
-                    account_id,
+                    &ctx,
                     &session.room_id,
                     &session.session_id,
-                    index.as_ref(),
                 )
                 .await;
             }
@@ -331,13 +359,14 @@ pub(crate) fn queue_withheld(tx: &mpsc::Sender<WithheldSession>, account_id: Uui
 /// user is waiting on, never wait and only report their outcome.
 pub(crate) async fn sweep_pending_utds(
     client: &Client,
-    store: &Store,
-    account_id: Uuid,
+    ctx: &RedecryptContext<'_>,
     scope: SweepScope,
-    index: Option<&IndexHandle>,
     cancel: &CancellationToken,
     backup: BackupSource<'_>,
 ) -> RedecryptSummary {
+    let RedecryptContext {
+        store, account_id, ..
+    } = *ctx;
     let rows = match scope {
         SweepScope::StartupUnattempted => store.pending_utds_for_startup_attempt(account_id).await,
         SweepScope::AllPending => store.pending_utds_for_account(account_id).await,
@@ -357,16 +386,7 @@ pub(crate) async fn sweep_pending_utds(
     // `from_backup`: recover() imported the backup *decryption key* but not the
     // room keys themselves, so the sweep must pull them from the server backup
     // before decrypting (see redecrypt_rows).
-    let mut summary = redecrypt_rows(
-        client,
-        store,
-        account_id,
-        rows,
-        Some(backup),
-        index,
-        Some(cancel),
-    )
-    .await;
+    let mut summary = redecrypt_rows(client, ctx, rows, Some(backup), Some(cancel)).await;
     summary.selected = selected;
     summary.still_pending = summary.selected.saturating_sub(summary.decrypted);
     if matches!(scope, SweepScope::StartupUnattempted) {
@@ -394,12 +414,13 @@ pub(crate) async fn sweep_pending_utds(
 /// Drain the pending UTDs in `room_id` waiting on `session_id`.
 async fn redecrypt_session(
     client: &Client,
-    store: &Store,
-    account_id: Uuid,
+    ctx: &RedecryptContext<'_>,
     room_id: &str,
     session_id: &str,
-    index: Option<&IndexHandle>,
 ) {
+    let RedecryptContext {
+        store, account_id, ..
+    } = *ctx;
     let rows = match store
         .pending_utds_for_session(account_id, room_id, session_id)
         .await
@@ -414,7 +435,7 @@ async fn redecrypt_session(
         return;
     }
     // The arrival stream's keys are already in the crypto store — no backup fetch.
-    redecrypt_rows(client, store, account_id, rows, None, index, None).await;
+    redecrypt_rows(client, ctx, rows, None, None).await;
 }
 
 /// How a sweep's key-backup downloads reach the homeserver: through its gate,
@@ -555,13 +576,17 @@ async fn unless_cancelled<F: Future>(
 /// Each download goes through the homeserver gate as the given caller.
 async fn redecrypt_rows(
     client: &Client,
-    store: &Store,
-    account_id: Uuid,
+    ctx: &RedecryptContext<'_>,
     rows: Vec<PendingUtd>,
     backup: Option<BackupSource<'_>>,
-    index: Option<&IndexHandle>,
     cancel: Option<&CancellationToken>,
 ) -> RedecryptSummary {
+    let RedecryptContext {
+        store,
+        account_id,
+        index,
+        live_tx,
+    } = *ctx;
     let mut summary = RedecryptSummary::default();
     let mut by_room: HashMap<String, Vec<PendingUtd>> = HashMap::new();
     for row in rows {
@@ -604,7 +629,16 @@ async fn redecrypt_rows(
             }
             summary.attempted += 1;
             match redecrypt_one(&room, store, account_id, row, index).await {
-                Attempt::Decrypted => {
+                Attempt::Decrypted(arrival_order) => {
+                    if let Some(arrival_order) = arrival_order {
+                        publish_decrypted(
+                            live_tx,
+                            account_id,
+                            &row.room_id,
+                            &row.event_id,
+                            arrival_order,
+                        );
+                    }
                     summary.decrypted += 1;
                     summary.attempted_event_ids.push(row.event_id.clone());
                 }
@@ -655,8 +689,9 @@ async fn flush_reasons(
 /// What one decryption attempt of a stored UTD did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Attempt {
-    /// The row was back-filled.
-    Decrypted,
+    /// Decryption succeeded. The arrival order is present when this attempt
+    /// committed the back-fill, and absent when the guarded update was a no-op.
+    Decrypted(Option<i64>),
     /// The SDK still could not decrypt it, and said why. The caller records
     /// the reason. A malformed envelope is `Other`.
     StillUtd(UtdReason),
@@ -722,7 +757,7 @@ async fn redecrypt_one(
     let body_text = crate::meta::body_text(&content).map(str::to_owned);
     let relates_to = crate::meta::relates_to(&content);
 
-    match store
+    let arrival_order = match store
         .update_decrypted_event(
             account_id,
             &row.event_id,
@@ -733,7 +768,7 @@ async fn redecrypt_one(
         )
         .await
     {
-        Ok(()) => {
+        Ok(arrival_order) => {
             // debug, not info, to match the sibling failure log a few lines up:
             // a startup sweep can back-fill thousands of rows in one burst, and
             // the per-account count already logged in `sweep_pending_utds` is
@@ -743,6 +778,7 @@ async fn redecrypt_one(
                 room_id = %room.room_id(),
                 event_id = row.event_id,
                 event_type = event_type.as_str(),
+                ?arrival_order,
                 "re-decrypted UTD"
             );
             // The body is now available, so re-indexing is owed. `update_decrypted_event`
@@ -752,6 +788,7 @@ async fn redecrypt_one(
             if let Some(index) = index {
                 index.notify();
             }
+            arrival_order
         }
         Err(err) => {
             tracing::warn!(
@@ -763,7 +800,7 @@ async fn redecrypt_one(
             );
             return Attempt::WriteFailed;
         }
-    }
+    };
 
     // Record the crypto-provenance siblings now that we know how it decrypted —
     // a UTD had no EncryptionInfo at persist time. Best-effort; never fatal.
@@ -782,7 +819,7 @@ async fn redecrypt_one(
             );
         }
     }
-    Attempt::Decrypted
+    Attempt::Decrypted(arrival_order)
 }
 
 /// Store why each row is still undecryptable, in one write, and log each at
@@ -1019,11 +1056,9 @@ fn sessions_to_recheck<'a>(
 /// start's sweep covers the rest. Returns how many sessions were re-checked.
 pub(crate) async fn recheck_backfilled_sessions(
     room: &Room,
-    store: &Store,
-    account_id: Uuid,
+    ctx: &RedecryptContext<'_>,
     page_sessions: &BTreeSet<String>,
     mut watch: KeyArrivalWatch,
-    index: Option<&IndexHandle>,
     cancel: &CancellationToken,
 ) -> usize {
     let arrivals = watch.buffered();
@@ -1032,7 +1067,7 @@ pub(crate) async fn recheck_backfilled_sessions(
         return 0;
     }
     tracing::debug!(
-        %account_id,
+        account_id = %ctx.account_id,
         room_id = %room.room_id(),
         sessions = sessions.len(),
         lagged = arrivals.iter().any(Option::is_none),
@@ -1044,15 +1079,7 @@ pub(crate) async fn recheck_backfilled_sessions(
         if cancel.is_cancelled() {
             break;
         }
-        redecrypt_session(
-            &client,
-            store,
-            account_id,
-            room.room_id().as_str(),
-            session_id,
-            index,
-        )
-        .await;
+        redecrypt_session(&client, ctx, room.room_id().as_str(), session_id).await;
         rechecked += 1;
     }
     rechecked

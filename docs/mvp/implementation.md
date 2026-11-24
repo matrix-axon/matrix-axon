@@ -191,7 +191,8 @@ Non-obvious choices made in 5b (see ADR 0020):
 - **Live-event bus = `tokio::sync::broadcast`, owned by the sync engine.** `SyncEngine::live_events()` hands a `broadcast::Sender<LiveEvent>` clone to `AppState`; the `/v1/ws` handler `subscribe()`s once per connection. A slow client gets `RecvError::Lagged` (skips the backlog, stays connected) — sync is **never** back-pressured by a client. Capacity 1024; the producer skips the work entirely when `receiver_count() == 0`.
 - **`LiveEvent` lives in `axon-core`** (the only crate both sibling producers/consumers share) and is **wire-neutral**; `axon-api` owns the envelope and maps `LiveEvent → EventDto`. The WS payload is the **same `EventDto`** the read API returns.
 - **Wire envelope** `{ "type": "timeline.event", "account_id": <uuid>, "payload": <EventDto> }`. `type` is namespaced so M5c verification frames extend it without colliding. Live frames are always `redacted: false` (a redaction is a separate later event).
-- **Live tail, not replay.** `/v1/ws` delivers events arriving _after_ connect; history is the HTTP read API's job. Not in the OpenAPI doc (a WS upgrade isn't expressible in OpenAPI 3.1) — golden test unaffected. No auth yet (M8). Re-decryption back-fill of a UTD is **not** re-emitted over WS (documented scope limit).
+- **Live tail, not replay.** `/v1/ws` delivers events arriving _after_ connect; history is the HTTP read API's job. Not in the OpenAPI doc (a WS upgrade isn't expressible in OpenAPI 3.1) — golden test unaffected. No auth yet (M8).
+  Since #948, a re-decryption back-fill emits `timeline.event_decrypted` with the existing event's identifiers (ADR 0020).
 
 Non-obvious choices made in 5a (see ADR 0019):
 

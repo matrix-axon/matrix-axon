@@ -856,6 +856,8 @@ impl Store {
     /// `relates_to`) that were unknown while it was a UTD. The `content IS NULL`
     /// guard keeps this idempotent and avoids clobbering a row another path
     /// already decrypted (e.g. a live dispatch that raced the queue).
+    /// Returns the existing arrival order only when this call updated the row
+    /// and committed. A missing or already decrypted row returns `None`.
     pub async fn update_decrypted_event(
         &self,
         account_id: Uuid,
@@ -864,7 +866,7 @@ impl Store {
         event_type: &str,
         decrypted_body_text: Option<&str>,
         relates_to: Option<&Value>,
-    ) -> Result<(), StoreError> {
+    ) -> Result<Option<i64>, StoreError> {
         // In-place decryption mints no new `events.id`, so the outbox is the only
         // durable signal that this row (and any relation/redaction target the now-
         // decrypted body reveals) needs re-indexing — appended atomically, and only
@@ -883,7 +885,7 @@ impl Store {
         let Some(room) = room else {
             // A missing row is a no-op. Do not let a concurrent insertion make
             // the later UPDATE write without first taking its room scope lock.
-            return Ok(());
+            return Ok(None);
         };
         crate::event_visibility::lock_redaction_scope(&mut tx, account_id, &room).await?;
         let proofs = crate::event_visibility::capture_redaction_proofs();
@@ -895,10 +897,11 @@ impl Store {
                WHERE account_id = $1 AND event_id = $2 AND room_id = $8 AND content IS NULL \
                RETURNING account_id, event_id, room_id, origin_ts, id, \
                          relates_to, redacts, decrypted_body_text, sender, event_type, raw_event \
-             ), summaries AS ( {ROOM_SUMMARY_TOUCH_TAIL} ), proofs AS ( {proofs} ) \
-             {SEARCH_FANOUT_TAIL}"
+             ), summaries AS ( {ROOM_SUMMARY_TOUCH_TAIL} ), proofs AS ( {proofs} ), \
+             outbox AS ( {SEARCH_FANOUT_TAIL} ) \
+             SELECT id FROM ins"
         );
-        sqlx_core::query::query(&sql)
+        let arrival_order = sqlx_core::query_scalar::query_scalar(&sql)
             .bind(account_id)
             .bind(event_id)
             .bind(content)
@@ -910,10 +913,10 @@ impl Store {
                 Some(content),
             ))
             .bind(&room)
-            .execute(&mut *tx)
+            .fetch_optional(&mut *tx)
             .await?;
         tx.commit().await?;
-        Ok(())
+        Ok(arrival_order)
     }
 
     /// Record why stored UTDs could not be decrypted (ADR 0136 decision 2), in

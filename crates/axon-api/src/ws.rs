@@ -7,7 +7,8 @@
 //! `{ "type", "account_id", "payload" }` ([`WsEnvelope`]) — the same
 //! `type`/`account_id`/`payload` shape used elsewhere on the wire. The `type`
 //! tag discriminates the kind: `timeline.event` carries the read API's
-//! [`EventDto`]; `verification.{requested,sas,done,cancelled}` carry a
+//! [`EventDto`]; `timeline.event_decrypted` names a stored event to reread
+//! after its content was decrypted. `verification.{requested,sas,done,cancelled}` carry a
 //! [`VerificationFramePayload`] (SAS emoji/decimals, optional target device,
 //! outcome); `ephemeral.passthrough` carries an allowlisted raw ephemeral
 //! event (`m.typing`, `m.receipt`, …) verbatim (ADR 0056);
@@ -82,6 +83,15 @@ use crate::state::{WsHeartbeatInterval, WsRevalidationInterval};
 /// kinds (e.g. the `verification.*` frames below) extend the protocol without
 /// colliding.
 const TIMELINE_EVENT: &str = "timeline.event";
+
+const TIMELINE_EVENT_DECRYPTED: &str = "timeline.event_decrypted";
+
+#[derive(Debug, Serialize)]
+struct EventDecryptedPayload {
+    room_id: String,
+    event_id: String,
+    arrival_order: i64,
+}
 
 /// The `type` tag for the periodic liveness beat. Carries no information: a
 /// client uses only the fact that it arrived, to distinguish a quiet socket
@@ -531,6 +541,15 @@ fn encode_frame(frame: LiveFrame) -> Result<String, serde_json::Error> {
             account_id: event.account_id,
             payload: EventDto::from(event),
         }),
+        LiveFrame::EventDecrypted(frame) => serde_json::to_string(&WsEnvelope {
+            kind: TIMELINE_EVENT_DECRYPTED,
+            account_id: frame.account_id,
+            payload: EventDecryptedPayload {
+                room_id: frame.room_id,
+                event_id: frame.event_id,
+                arrival_order: frame.arrival_order,
+            },
+        }),
         LiveFrame::Verification(frame) => serde_json::to_string(&WsEnvelope {
             kind: verification_type(frame.kind),
             account_id: frame.account_id,
@@ -764,13 +783,37 @@ async fn pump(
 mod tests {
     use super::*;
     use axon_core::{
-        AccountDataFrame, EphemeralFrame, LiveEvent, PreferencesFrame, SenderTrustFrame,
-        SyncStateFrame, UnreadCountsFrame, VerificationFrame, VerificationFrameKind,
+        AccountDataFrame, EphemeralFrame, EventDecryptedFrame, LiveEvent, PreferencesFrame,
+        SenderTrustFrame, SyncStateFrame, UnreadCountsFrame, VerificationFrame,
+        VerificationFrameKind,
     };
     use serde_json::Value;
 
     fn decode(frame: LiveFrame) -> Value {
         serde_json::from_str(&encode_frame(frame).expect("encode")).expect("json")
+    }
+
+    #[test]
+    fn event_decrypted_frame_identifies_the_stored_event() {
+        let account_id = Uuid::new_v4();
+        let frame = decode(LiveFrame::EventDecrypted(EventDecryptedFrame {
+            account_id,
+            room_id: "!room:example.org".to_owned(),
+            event_id: "$event:example.org".to_owned(),
+            arrival_order: 7,
+        }));
+        assert_eq!(
+            frame,
+            serde_json::json!({
+                "type": "timeline.event_decrypted",
+                "account_id": account_id,
+                "payload": {
+                    "room_id": "!room:example.org",
+                    "event_id": "$event:example.org",
+                    "arrival_order": 7
+                }
+            })
+        );
     }
 
     /// The beat is an ordinary envelope, so a client that predates it decodes it
