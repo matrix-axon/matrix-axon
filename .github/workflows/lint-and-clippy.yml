@@ -66,9 +66,9 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.x"
-          # Without this, `pip install pre-commit` re-resolves and re-downloads
-          # from PyPI on every run of a job that has no path filter.
-          cache: pip
+          # Hosted runners need a restored pip cache; the self-hosted runner
+          # retains its own cache between jobs.
+          cache: ${{ runner.environment != 'self-hosted' && 'pip' || '' }}
           # The repo has no requirements.txt or pyproject.toml, and `cache: pip`
           # fails outright ("No file matched to ...") rather than degrading when
           # it finds none. Any tracked file serves as the cache key; this is the
@@ -76,12 +76,11 @@ jobs:
           cache-dependency-path: .pre-commit-config.yaml
 
       - name: Cache pre-commit environments
+        if: runner.environment != 'self-hosted'
         uses: actions/cache@v6
         with:
           path: ~/.cache/pre-commit
-          # runner.environment keeps the self-hosted runner's environments, built
-          # against its own Python and system libraries, apart from the hosted ones
-          # (ADR 0141, decision 6).
+          # Keep hosted environments separate from older self-hosted caches.
           key: pre-commit-${{ runner.environment }}-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
 
       - name: Install pre-commit
