@@ -174,7 +174,7 @@ jobs:
           # A target/ built against the self-hosted machine's system libraries must
           # not be restored on ubuntu-latest, or the other way round (ADR 0141,
           # decision 6).
-          key: cargo-${{ runner.environment }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-${{ runner.environment }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'clients/web/src-tauri/Cargo.lock') }}
           restore-keys: cargo-${{ runner.environment }}-${{ runner.os }}-
 
       # After the toolchain: the script asks cargo for the workspace version.
