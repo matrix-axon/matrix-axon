@@ -33,7 +33,7 @@ Server-generated thumbnails, upstream uploads and event dispatch happen after ac
 
 Return `202 Accepted` with the committed status in the usual Axon response envelope and a `Location` pointing to `GET /v1/accounts/{account_id}/rooms/{room_id}/send-media/async/{send_id}`.
 The status includes the server-issued `send_id`, client `txn_id`, room ID, attempt number, monotonic revision and state.
-States are `queued`, `uploading`, `sending`, `sent` (with `event_id`), `failed` (with a stable error code and whether retry is allowed), and `outcome_unknown`.
+States are `queued`, `uploading`, `sending`, `sent` (with `event_id`), `failed` (with a stable error code and whether retry is allowed), and `outcome_unknown` (with `reconciliation_open` indicating whether the original session can still supply evidence).
 The GET is restricted to the same account and room and returns the current status with `Cache-Control: no-store`.
 A replay of the accepted POST returns `200 OK` with the same send ID and its current status, even if terminal.
 
@@ -50,9 +50,13 @@ The server keeps one PostgreSQL record per `(account_id, room_id, txn_id)` with 
 The record holds a send ID, the originating Matrix homeserver, user and device, attempt and state, and the bounded request fields and staged upload references needed to run an active send.
 Use an owned, bounded admission task and short transactions.
 Reserve the transaction key and claim the uploads together, validate any claimed client assets outside that DB transaction, then commit the validated job and its claim ownership before returning `202`.
-Serialize duplicate admissions by key, check their identity before looking up the upload rows, and compare the typed request with the accepted request using a canonical fingerprint.
-An exact replay joins an in-progress admission or returns the committed status, even after the original files have been removed.
-A conflicting body for an accepted attempt returns `409` and leaves its uploads available to that caller.
+Serialize admissions by transaction key and look up attempt identity before inspecting any staged upload rows.
+The canonical fingerprint covers the typed message and formatting fields, relations, declared `info`, the presence of a client thumbnail, and the ordered bundled preview fields and their image presence.
+It preserves meaningful distinctions such as omitted versus explicitly empty previews.
+The upload IDs and `retry_of` are outside the fingerprint.
+The accepted attempt is identified by the transaction key, its fingerprint, and its retry selector, with an absent `retry_of` identifying the initial request.
+An equivalent replay joins an in-progress admission for that selector or returns the committed status, even if the client has since staged replacement files or the original files have been removed.
+A conflicting fingerprint returns `409` and leaves the caller's uploads available.
 Failed preflight releases every claim and clears the provisional reservation for that attempt.
 Disconnecting the client leaves the admission task responsible for completing these steps.
 
@@ -60,16 +64,28 @@ A supervised worker claims each committed job once through a DB state transition
 On a restart, requeue work that was durably accepted and has yet to reach event dispatch.
 Restart the upload from byte zero, redoing encryption if necessary.
 An upload whose response was lost may leave an unreferenced object at the homeserver, which follows the homeserver's media retention policy.
-The boot reconciliation that currently resets stale `sending` upload rows releases provisional and legacy claims and preserves the claims of accepted jobs.
+Before enabling admission or workers at boot, release every abandoned provisional attempt's claims and delete its reservation in a single transaction.
+Remove the transaction-key row if the initial request was never accepted.
+For a provisional retry, retain the previously accepted job and its attempt history so the retry can be admitted again against the same failure.
+Only committed jobs enter the recovery queue and count toward the initial admission load after this cleanup.
+The existing reset of stale `sending` upload rows still releases legacy claims and preserves the claims of accepted jobs.
 Settle job state and upload ownership in a single DB transaction, with idempotent filesystem cleanup and startup recovery for files whose unlink was interrupted.
 Consume the originals and any client thumbnails or preview images on `sent`.
 Release them for retry with the ordinary staging TTL on a confirmed failure.
 Consume them after the active worker settles `outcome_unknown`, as another event dispatch for that send is unsafe and reconciliation needs only its identifying metadata.
 The staging sweeper and explicit upload deletion respect accepted job ownership.
-Account logout stops the account's work and settles it by the same dispatch boundary before releasing its files and dropping its session.
 A worker resumes only under the original Matrix identity and device.
 
-Commit a dispatch marker before entering the SDK's final `Room::send` future.
+Keep the SDK's joined-room check, encryption-state lookup, member sync, key query and preshare, and local event encryption in the preparation phase.
+These can all run before the room-event `PUT`.
+If preparation fails, settle it as a definite pre-dispatch failure and release the staged files for retry where the error allows it.
+A restart during preparation requeues the accepted attempt.
+
+Commit a dispatch marker immediately before the prepared room-event `PUT` can reach the transport.
+Matrix SDK 0.19.1 runs preparation and dispatch inside one [`Room::send`](https://docs.rs/matrix-sdk/0.19.1/matrix_sdk/room/struct.Room.html#method.send) future, so the async path needs a narrow SDK hook at the final request boundary.
+Use an upstream SDK hook or carry a pinned patch that exposes this boundary while sharing the SDK's existing preparation path.
+Run the hook for the final room-event request only, after serialization and before handing the request to the transport.
+The hook must commit the marker successfully for the current attempt before the transport may proceed.
 Use a server-derived Matrix transaction ID (`axon-media-async-<send_id>-<attempt>`) and pass it via `with_transaction_id`.
 An explicitly retried, definitively failed attempt gets a fresh Matrix transaction ID, while an auth resend within an attempt keeps its ID.
 Keep the SDK's room-event encryption and disable transient network retries on this send with `RequestConfig::disable_retry()`.
@@ -79,22 +95,29 @@ Axon's durable record is what prevents a second dispatch after an ambiguous firs
 
 Commit `sent` on a valid success response.
 Only a local failure known to precede the event request or an upstream response that proves rejection can produce `failed`.
-A timeout, dropped connection, ambiguous upstream error or restart after the dispatch marker becomes `outcome_unknown` unless success has already been recorded.
-This includes a crash between writing the marker and dispatching the request.
+A timeout, dropped connection, ambiguous upstream error or restart after the dispatch marker becomes `outcome_unknown` unless success or definitive failure has already been recorded.
+This includes the small crash window between committing the marker and handing the prepared request to the transport.
 The worker never dispatches that send again after an unknown outcome.
 If the sending device observes a matching `unsigned.transaction_id` on an event from its own Matrix identity in the exact room, reconcile the job to `sent` using that event ID.
 Record that positive evidence in the durable ingest path before the sync position can advance past it, including for encrypted events, and let it win over any racing unknown result.
 A missing transaction ID or a timeline gap leaves the state unknown.
-Keep the compact terminal records, including deduplication keys and the initial request fingerprint, for the account's lifetime so expiry cannot turn a replay into a new send.
+Keep the compact terminal records, canonical fingerprint and accepted attempt selectors for the account's lifetime so expiry cannot turn a replay into a new send.
 
-A plain POST replay is always a status lookup after acceptance.
-After a definitive retryable failure, the client can explicitly retry by posting the same transaction ID and `retry_of` set to the failed attempt number.
-The transition compares the attempt number under the same lock and runs preflight on the retry, so two retries for the same failure advance the attempt at most once.
-Once a retry has been accepted, a replay of that retry returns the current status.
-A stale `retry_of` can never start a further attempt.
-The client can use the released staged IDs or replacements if they expired, with the same message, relations and declared metadata.
-The server increments the attempt number only on acceptance and returns `202` and the new status.
-Keep the initial fingerprint through explicit retries so a delayed replay of the original POST can still recover the current status.
+On logout, block new admissions and new event requests, including auth resends, and settle active work using the dispatch boundary.
+Before stopping the original device's sync and invalidating its session, allow that existing sync task up to five seconds to record positive evidence for outstanding ambiguous attempts.
+Keep confirmed event IDs and close reconciliation durably for any remaining `outcome_unknown` sends, incrementing their status revision.
+Startup completes this settlement for an interrupted logout before allowing the account to resume work.
+A replacement session uses a new device and cannot supply the old device's transaction evidence.
+The status GET remains readable for deactivated accounts under the usual account authorization so clients can observe the final status.
+
+For a matching fingerprint, a POST without `retry_of` is always a status lookup after initial acceptance.
+A POST with `retry_of` and no previously accepted attempt returns `409`.
+A replay of any accepted retry selector also returns `200` with the current status, including after later attempts.
+A new retry selector on an `outcome_unknown`, `sent`, in-progress, or non-retryable `failed` send returns `200` with the current status and allocates no attempt or Matrix transaction ID.
+For a retryable `failed` send, an unmatched selector that differs from the current failed attempt returns `409`.
+The same lock guards all three conditions for admitting a retry: the state is `failed`, retry is allowed, and `retry_of` equals the current failed attempt number.
+Run preflight on that new attempt using the released staged IDs or replacements for the same files, with the same canonical fingerprint.
+The server increments the attempt number and records the selector only when it commits acceptance, then returns `202` and the new status.
 
 ### 3. Reconcile the local echo over WebSocket and HTTP
 
@@ -103,7 +126,11 @@ Correlate the echo by account, room and client transaction ID, so an update that
 Ignore older revisions if the HTTP response, updates or timeline arrive out of order.
 On `sent`, resolve by `event_id` and coalesce with any `timeline.event` already received, including for a thread echo.
 On `failed`, preserve the composer's contents or retryable echo according to where the error occurred.
-Show `outcome_unknown` as an unconfirmed send and keep it eligible for later reconciliation, with no automatic resend or ordinary retry action.
+Show `outcome_unknown` as an unconfirmed send, with no automatic resend or ordinary retry action.
+While reconciliation is open, keep the echo eligible for a later `sent` update.
+When reconciliation closes, show a final unconfirmed status and retire the persisted pending echo and its status polling.
+After re-login, render any event the new device receives as an ordinary timeline event.
+Only an exact event ID from confirmed status can coalesce it with an echo.
 
 The socket is lossy ([ADR 0061](0061-web-live-websocket-layer.md)).
 Read the status of outstanding sends on reconnect or reload, after a detected missed update, and with bounded backoff while pending if updates are absent.
@@ -149,7 +176,7 @@ Run the stall watchdog outside the body producer, so the timer still runs when t
 Reset it only on nonempty body chunks pulled by the backpressured transport.
 This measures progress at the HTTP stack, which can lead the peer by the size of fixed transport and socket buffers.
 Verify the bound for both HTTP/1.1 and HTTP/2 with a peer that stops reading.
-Use no SDK 30 s request timeout or 60 s total body timeout on the async route.
+Configure the custom upload client with no whole-request timeout, so it has neither the SDK HTTP client's default 30 s deadline nor the total `media.upstream_upload_timeout_secs` budget.
 Keep the send mutation, thumbnail and bundled-preview steps under their existing separate deadlines and retain per-homeserver overload accounting for actual upstream requests.
 Keep `media.upstream_upload_timeout_secs` as a wall-clock bound for the legacy path and its existing callers.
 
@@ -192,7 +219,9 @@ Four staging writers can take up to 4 GiB at the final default.
 The writer limit alone permits an arbitrary backlog of completed and claimed files.
 Add a global `media.max_staged_upload_bytes` budget, defaulting to `max_concurrent_uploads × max_upload_bytes`, with checked arithmetic.
 Count incomplete writes, staged files and accepted claims until their bytes leave disk, including normalized thumbnail files when persisted.
-Reserve from the budget before writing, incrementally for unknown-length bodies, and reject capacity exhaustion through the existing temporary-capacity error.
+Reserve from the budget before writing, incrementally for unknown-length bodies.
+If the budget is full, return `503` with code `service_unavailable` and the message `staged upload budget is full`.
+The generated-thumbnail quota keeps its existing error message.
 Make the staged file and directory entry durable before committing the upload row where the platform supports directory sync.
 Rebuild accounting from durable rows and reconcile temporary and orphan files before accepting new reservations after boot.
 Document how the staging budget competes for space with the separate media cache when they share a volume.
@@ -208,7 +237,13 @@ Document how the staging budget competes for space with the separate media cache
 
 1. **Design** ([1206](https://github.com/matrix-axon/matrix-axon/issues/1206)). This ADR.
 2. **Server limit discovery** ([1210](https://github.com/matrix-axon/matrix-axon/issues/1210)). Ship the account field and enforce it in staging at the current default. Cover a lower local cap, a lower upstream cap, missing and stale data, and a rejected body with an inaccurate or absent length.
-3. **Server async send and streaming** ([1185](https://github.com/matrix-axon/matrix-axon/issues/1185)). Build on ADR 0142's shared send path after the metadata and thumbnail server steps. Test immediate `400`s, partial-claim rollback and disconnect during validation. Exercise concurrent duplicate POSTs and retries, a lost `202`, server death before and after the dispatch marker, success with a lost Matrix response, and recovery after losing WebSocket updates. Assert at most one Matrix event across crash and replay cases, with upstream transaction deduplication disabled in the test. Test plaintext and encrypted uploads including decryption and hash checks, all relation shapes and preview and thumbnail failure. Measure peak memory with a 500 MB file and with the worker pool full, including a slow reader. Verify ingress and egress stall cancellation, a progressing upload exceeding the former deadline, and capacity and file cleanup after restart. Exercise the legacy response with existing clients.
+3. **Server async send and streaming** ([1185](https://github.com/matrix-axon/matrix-axon/issues/1185)). Build on ADR 0142's shared send path after the metadata and thumbnail server steps.
+   - Test immediate `400`s, partial-claim rollback, disconnect and process death during validation of an initial POST and a retry. Verify the next POST can reclaim the same transaction and that abandoned reservations free capacity.
+   - Exercise concurrent duplicate POSTs, a lost `202` on any attempt, replacement staged IDs, and stale or conflicting retry selectors. Verify an unknown send cannot allocate another attempt even when `retry_of` names its current attempt.
+   - Exercise encryption setup failure, process death during key preparation, process death immediately after committing the dispatch marker, and success with a lost Matrix response. Assert at most one event across crash and replay cases with upstream transaction deduplication disabled.
+   - Recover after losing WebSocket updates and exercise both logout outcomes. Confirm a matching sync event can resolve the send during the bounded drain, and an unresolved send closes permanently and retires its persisted echo even if a new device later sees the event.
+   - Test plaintext and encrypted uploads, decryption and hashes, all relation shapes, and preview and thumbnail failure. Measure peak memory with a 500 MB file and with the worker pool full, including a slow reader.
+   - Verify ingress and egress stall cancellation, a progressing upload exceeding the former deadline, the staging quota's own `503` message, and capacity and file cleanup after restart. Exercise the legacy response with existing clients.
 4. **Shell upload transport** ([921](https://github.com/matrix-axon/matrix-axon/issues/921)) and **web upload progress and stall handling** ([422](https://github.com/matrix-axon/matrix-axon/issues/422)). Stream slices through the native bridge with backpressure and cancellation. Use browser upload progress on the staging leg, using XHR where necessary, and show the subsequent async send state from the server. Confirm bounded memory on Android and iOS before lifting their cap.
 5. **Web adoption and limit rollout** ([1211](https://github.com/matrix-axon/matrix-axon/issues/1211)). Use the account limit and async capability where present and keep 100 MiB as the older-server fallback. Give blob previews and retained attachment batches independent budgets. Verify a 500 MB video on desktop, iPhone browser and packaged mobile shells, and playback through an [ADR 0139](0139-stream-large-video-and-audio.md) stream ticket. Raise the server default in a server-only change after the clients are ready. The TUI can honor a lower advertised cap and keeps its current ceiling and synchronous send contract until it has bounded upload transport and adopts the async capability.
 
