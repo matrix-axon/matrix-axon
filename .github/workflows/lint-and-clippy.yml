@@ -163,17 +163,23 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # Keep self-hosted artifacts outside the checkout, which checkout cleans.
+      # RUNNER_TEMP is inside the runner's writable _work directory, but is
+      # itself cleaned between jobs; its sibling persists on the runner's disk.
+      - name: Use persistent self-hosted Cargo target
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=$(dirname "$RUNNER_TEMP")/axon-lint-target" >> "$GITHUB_ENV"
+
       - name: Cache Cargo registry and build
-        if: steps.rust-changed.outputs.changed == 'true'
+        if: steps.rust-changed.outputs.changed == 'true' && runner.environment != 'self-hosted'
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          # A target/ built against the self-hosted machine's system libraries must
-          # not be restored on ubuntu-latest, or the other way round (ADR 0141,
-          # decision 6).
+          # Keep hosted artifacts separate from any older self-hosted cache.
           key: cargo-${{ runner.environment }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'clients/web/src-tauri/Cargo.lock') }}
           restore-keys: cargo-${{ runner.environment }}-${{ runner.os }}-
 
