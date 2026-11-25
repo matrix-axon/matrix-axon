@@ -155,8 +155,9 @@ const KEYBOARD_PIN_MS = 600
 const AUTO_SCROLL_BACK_PAGES = 5
 // Pages one arrival at the bottom may pull automatically. One forward read
 // can append a whole gap and still leave `atEnd` false; the next read is
-// the probe that retires "Load newer". The cap bounds an unattended chain,
-// same as scroll-back. A further scroll starts another.
+// the probe that retires "Load newer". The cap bounds an unattended chain.
+// A scroll while the chain runs does not start another: appending moves the
+// scroller on its own. A scroll after the chain returns still starts one.
 const AUTO_SCROLL_FORWARD_PAGES = 5
 // How far the scroll anchor may drift from the viewport, in viewport heights,
 // before a fresh one is taken. Growth between the anchor and the visible rows
@@ -3095,7 +3096,6 @@ function Timeline({
       }
       let cancelled = false
       let pumping = false
-      let requested = false
       let frame = 0
 
       // One intersection is not one page. `loadNewer` appends whatever the
@@ -3104,43 +3104,38 @@ function Timeline({
       // reports changes. A sentinel that stays fully inside the scroller
       // produces none, and Firefox often delivers none for a programmatic
       // `scrollTop` either. The chain keeps paging while the sentinel is
-      // actually on screen, up to a cap. Past that an idle reader stops,
-      // and any further scroll starts a new chain.
+      // actually on screen, up to a cap. A scroll during the chain does not
+      // raise that cap: appending moves the scroller on its own, so the
+      // event is not a new request. A scroll after the chain returns still
+      // starts another.
       const pump = async () => {
-        if (timeline.atEnd.value) {
-          return
-        }
-        if (pumping) {
-          requested = true
+        if (timeline.atEnd.value || pumping) {
           return
         }
         pumping = true
         try {
-          do {
-            requested = false
-            for (let page = 0; page < AUTO_SCROLL_FORWARD_PAGES; page += 1) {
-              if (cancelled || timeline.atEnd.value) {
-                return
-              }
-              if (
-                !sentinel.isConnected ||
-                !sentinelWithinScroller(sentinel, root)
-              ) {
-                return
-              }
-              const loaded = timeline.events.value.length
-              await timeline.loadNewer()
-              if (cancelled || timeline.atEnd.value) {
-                return
-              }
-              // A no-op (in flight, a failed read, a superseded slice) must
-              // not spin. The button stays, and the next scroll retries.
-              if (timeline.events.value.length === loaded) {
-                return
-              }
-              await nextFrame()
+          for (let page = 0; page < AUTO_SCROLL_FORWARD_PAGES; page += 1) {
+            if (cancelled || timeline.atEnd.value) {
+              return
             }
-          } while (requested && !cancelled)
+            if (
+              !sentinel.isConnected ||
+              !sentinelWithinScroller(sentinel, root)
+            ) {
+              return
+            }
+            const loaded = timeline.events.value.length
+            await timeline.loadNewer()
+            if (cancelled || timeline.atEnd.value) {
+              return
+            }
+            // A no-op (in flight, a failed read, a superseded slice) must
+            // not spin. The button stays, and the next scroll retries.
+            if (timeline.events.value.length === loaded) {
+              return
+            }
+            await nextFrame()
+          }
         } finally {
           pumping = false
         }
