@@ -15,6 +15,7 @@ Version: 1.0
 Architecture: $(dpkg --print-architecture)
 Maintainer: Axon
 Depends: libwebkit2gtk-4.1-0, libwebkit2gtk-4.1-0 (>= 2.42), libgtk-3-0
+Recommends: hunspell-dictionary, zenity
 Description: Axon desktop launcher test
 EOF
 cat > "$input/usr/share/applications/Axon.desktop" <<'EOF'
@@ -75,7 +76,8 @@ cc -shared -fPIC -Wl,-z,now,-soname,libwebkit2gtk-4.1.so.0 "$work/webkit.c" \
 
 dpkg-deb --root-owner-group --build "$input" "$work/input.deb"
 "$bundle_dir/finalize-deb.sh" "$work/input.deb" "$work/axon.deb"
-test "$(dpkg-deb --field "$work/axon.deb" Depends)" = 'libwebkit2gtk-4.1-0 (>= 2.42), libgtk-3-0, zenity'
+test "$(dpkg-deb --field "$work/axon.deb" Depends)" = 'libwebkit2gtk-4.1-0 (>= 2.42), libgtk-3-0'
+test "$(dpkg-deb --field "$work/axon.deb" Recommends)" = 'hunspell-dictionary, zenity'
 dpkg-deb --raw-extract "$work/axon.deb" "$work/installed"
 (cd "$work/installed" && md5sum --check DEBIAN/md5sums)
 grep -Fx 'Exec=env AXON_DESKTOP_LAUNCH=1 axon %u' "$work/installed/usr/share/applications/Axon.desktop"
@@ -127,6 +129,17 @@ AXON_DESKTOP_LAUNCH=1 LD_PRELOAD=$work/old/libwebkit2gtk-4.1.so.0 \
 test "$status" -eq 1
 grep -F -- '--title=Axon could not start' "$work/dialog"
 grep -F "WebKitGTK: $work/old/libwebkit2gtk-4.1.so.0" "$work/dialog"
+
+# Minimal installs can omit Zenity and still get the same stderr diagnostic.
+mkdir "$work/minimal-path"
+for tool in awk dpkg dpkg-query grep readlink; do
+    ln -s "$(command -v "$tool")" "$work/minimal-path/$tool"
+done
+status=0
+PATH=$work/minimal-path AXON_DESKTOP_LAUNCH=1 LD_PRELOAD=$work/old/libwebkit2gtk-4.1.so.0 \
+    "$axon" > "$work/out" 2> "$work/minimal-error" || status=$?
+test "$status" -eq 1
+cmp "$work/error" "$work/minimal-error"
 
 # The upgrade guidance uses the installed package version even when
 # the selected library comes from a different installation.

@@ -113,7 +113,7 @@ $guidance"
 printf '%s\n' "$message" >&2
 
 # Zenity can report the failure without loading WebKitGTK.
-if [ "$desktop_launch" = 1 ]; then
+if [ "$desktop_launch" = 1 ] && command -v zenity >/dev/null 2>&1; then
     zenity --error --no-markup --title='Axon could not start' --text="$message" || :
 fi
 exit 1

@@ -108,6 +108,8 @@ The Linux builds are made on Ubuntu 22.04, so they need glibc 2.35 or newer (Deb
 The `.deb` requires the distro's WebKitGTK 4.1 runtime (`libwebkit2gtk-4.1-0` version 2.42 or newer).
 `apt` installs it and its dependencies, including JavaScriptCore and libsoup.
 If a locally installed WebKitGTK or JavaScriptCore prevents Axon from starting, the launcher tries the distro libraries and reports the paths it found if startup still fails.
+The package recommends Zenity to show this error in a dialog on desktop-menu launches.
+The launcher always writes the diagnostic to standard error.
 The AppImage bundles its own WebKitGTK, so it needs only a new enough glibc.
 The Linux builds are not signed, so some Linux desktops will warn the first time you run them.
 

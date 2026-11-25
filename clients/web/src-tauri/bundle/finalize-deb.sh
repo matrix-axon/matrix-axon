@@ -39,21 +39,22 @@ fi
 mv "$desktop_entry.new" "$desktop_entry"
 
 # Tauri appends an unversioned WebKitGTK dependency to the versioned one
-# from tauri.conf.json. Zenity belongs to the package with the launcher.
+# from tauri.conf.json.
 control=$stage/DEBIAN/control
 if ! awk '
     /^Depends: / {
         count = split(substr($0, length("Depends: ") + 1), dependencies, /,[[:blank:]]*/)
-        printf "Depends: "
+        separator = "Depends: "
         for (i = 1; i <= count; i++) {
             dependency = dependencies[i]
             if (dependency == "libwebkit2gtk-4.1-0")
                 continue
             if (dependency ~ /^libwebkit2gtk-4[.]1-0 \(>= /)
                 minimum_found = 1
-            printf "%s, ", dependency
+            printf "%s%s", separator, dependency
+            separator = ", "
         }
-        print "zenity"
+        print ""
         next
     }
     { print }
