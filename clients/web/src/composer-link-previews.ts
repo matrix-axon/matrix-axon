@@ -583,13 +583,13 @@ export function createComposerLinkPreviews(
   function reset(
     next: string,
     edit?: EditPreviewSeed,
-    carried: ReadonlySet<string> = new Set(),
+    carriedPastes: ReadonlySet<string> = new Set(),
   ) {
     dropAll()
+    previewed.clear()
     const present = identities(next)
     text = next
-    pasted = new Set([...carried].filter((id) => present.has(id)))
-    previewed.clear()
+    pasted = new Set([...carriedPastes].filter((id) => present.has(id)))
     editing = edit !== undefined
     addNew = edit?.addNew ?? true
     existing = new Map(edit?.cards.map((card) => [card.url, card]) ?? [])
