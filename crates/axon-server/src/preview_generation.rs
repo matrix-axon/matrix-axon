@@ -30,6 +30,8 @@ impl PreviewSource for HomeserverPreviewGenerator {
     }
 }
 
+pub(crate) const PREVIEW_DECODE_PERMITS: usize = 4;
+
 pub struct PreviewGenerationService {
     source: Arc<dyn PreviewSource>,
     uploads: Arc<FilesystemStagedUploads>,
@@ -44,7 +46,7 @@ impl PreviewGenerationService {
             source: Arc::new(source),
             uploads,
             capacity: Default::default(),
-            decoder: Arc::new(Semaphore::new(4)),
+            decoder: Arc::new(Semaphore::new(PREVIEW_DECODE_PERMITS)),
         }
     }
 }
@@ -214,7 +216,7 @@ mod tests {
             source: source.clone(),
             uploads,
             capacity: Default::default(),
-            decoder: Arc::new(Semaphore::new(4)),
+            decoder: Arc::new(Semaphore::new(PREVIEW_DECODE_PERMITS)),
         });
         let mut tasks = Vec::new();
         for _ in 0..4 {
@@ -358,7 +360,7 @@ mod tests {
                 .unwrap(),
             ),
             capacity: Default::default(),
-            decoder: Arc::new(Semaphore::new(4)),
+            decoder: Arc::new(Semaphore::new(PREVIEW_DECODE_PERMITS)),
         };
         let result = service
             .generate(

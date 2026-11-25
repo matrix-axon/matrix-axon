@@ -178,6 +178,8 @@ pub struct AppState {
     /// The concrete implementation streams bytes to durable local storage and
     /// records metadata in Postgres.
     pub uploads: Arc<dyn StagedUploadService>,
+    /// Image inspection for outbound staged media.
+    send_thumbnailer: Option<Arc<dyn crate::SendThumbnailer>>,
     /// Full-text-search port for `GET /v1/search` (M9b). `None` when search is
     /// disabled (`search.enabled = false`), in which case the handler returns
     /// `503`. The concrete implementation is an adapter over the `axon-search`
@@ -437,6 +439,7 @@ impl AppState {
             media,
             member_profiles: Arc::new(NoopMemberProfileService),
             uploads: Arc::new(DisabledStagedUploads),
+            send_thumbnailer: None,
             preview_generator: Arc::new(crate::preview_generation::DisabledPreviewGenerator),
             search,
             backfill_status: Arc::new(NoBackfillStatus),
@@ -566,6 +569,12 @@ impl AppState {
     /// don't touch the route keep the default disabled stub.
     pub fn with_staged_uploads(mut self, uploads: Arc<dyn StagedUploadService>) -> Self {
         self.uploads = uploads;
+        self
+    }
+
+    /// Inject the image inspector used by staged media sends.
+    pub fn with_send_thumbnailer(mut self, service: Arc<dyn crate::SendThumbnailer>) -> Self {
+        self.send_thumbnailer = Some(service);
         self
     }
 
@@ -1123,6 +1132,12 @@ impl FromRef<AppState> for broadcast::Sender<LiveFrame> {
 impl FromRef<AppState> for Arc<dyn MessageSender> {
     fn from_ref(state: &AppState) -> Arc<dyn MessageSender> {
         state.sender.clone()
+    }
+}
+
+impl FromRef<AppState> for Option<Arc<dyn crate::SendThumbnailer>> {
+    fn from_ref(state: &AppState) -> Self {
+        state.send_thumbnailer.clone()
     }
 }
 

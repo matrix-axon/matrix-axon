@@ -37,7 +37,10 @@ pub use live::{
     VerificationFrameKind,
 };
 pub use media::{ThumbnailMethod, ThumbnailSpec};
-pub use message::{Formatted, MediaAttachment, MediaSendKind, MediaThumbnail, Relation};
+pub use message::{
+    Formatted, MediaAttachment, MediaSend, MediaSendKind, MediaThumbnail, Relation,
+    SendImageMetadata,
+};
 pub use power_levels::{PowerLevelChanges, ResolvedPowerLevels, ResolvedUserLevel};
 pub use push::{
     ApnsPushConfig, FcmPushConfig, LoadedApns, LoadedFcm, PushConfig, PushKeySource, PushMaterial,

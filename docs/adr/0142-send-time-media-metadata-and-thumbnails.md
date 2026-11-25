@@ -172,7 +172,9 @@ The TUI makes none of its own: it has no video decoder, and the server covers it
   - **In `send-media`, the claim comes first and the thumbnail work has a 5 s budget.**
     The task claims the thumbnail (staged to `sending`, reading at most 2 MiB) before it waits for a permit, so it owns the row on every path below.
     The permit wait, the decode, the normalisation and the encode then share one 5 s budget.
-    When the budget expires, the thumbnail is not attached and the send goes without it.
+    When the budget expires, the supplied thumbnail is skipped and the send continues.
+    A send with a supplied upload ID still probes the original for dimensions.
+    It skips server thumbnail generation to avoid starting another thumbnail job after the supplied thumbnail used its budget.
     A decode that is still running keeps its permit until it finishes, as section 5's does.
     The claimed thumbnail then settles with the send, like any other (see "shares the send's fate" below): consumed if the event is sent, released if the send fails.
     A busy or slow decoder is not a client error, so this is never a `400`; only a thumbnail whose validation finished and failed is.
@@ -215,7 +217,9 @@ The TUI makes none of its own: it has no video decoder, and the server covers it
   A thumbnail that fails validation fails the send with a `400`, so it is released too.
 - **Precedence.**
   - When the server can read an image's header, the dimensions it reads win; a client's `width` and `height` are used only for formats the server cannot read.
-  - A supplied thumbnail is used, normalised as above, and the server generates none.
+  - Supplying a thumbnail upload ID selects the client-thumbnail path.
+    Axon uses the normalized thumbnail when validation finishes in time.
+    A validation failure returns `400` and an expired validation budget sends without a thumbnail.
   - `duration_ms` and a video's dimensions always come from the client.
 - **The link-preview path takes the same fields.** A media send with `url_previews` goes through `bundled_previews::send`, which accepts and applies `info` and `thumbnail_upload_id` the same way.
 
@@ -227,7 +231,11 @@ When an `image` send arrives without a thumbnail, the server derives what it can
   Dimensions are swapped for orientations that rotate by 90°.
   It never copies the file: the `image` crate's `JpegDecoder::new` copies its whole input into a new `Vec` before it parses the headers, so the probe gives it only the first 1 MiB.
   The headers and EXIF sit before the first scan, and that is the only part a header parse reads.
-  A JPEG whose headers end past 1 MiB is probed again from the whole file, inside the decode permit and budget below.
+  A JPEG whose headers end past 1 MiB gets a second, 4 MiB probe inside the decode permit and budget below.
+  A WebP probe can make at most 4,096 seeks through the RIFF header.
+  If it reaches that limit, it keeps the canvas dimensions from the leading VP8X header and skips the thumbnail.
+  The first-frame check and WebP decoder construction share a separate 4,096-seek limit when generating a thumbnail.
+  Staged originals are read from their existing files during inspection, so the original upload can retain ownership of its buffer.
   The probe also covers images too large to thumbnail, sends where the pool is busy, and `media.send_thumbnails = false`.
 - **A thumbnail, when section 2 says one helps.** For PNG, JPEG, WebP and GIF; this adds the `image` crate's `gif` feature.
   - A dedicated pool of **one** decode permit, separate from link previews' four.
@@ -243,6 +251,11 @@ When an `image` send arrives without a thumbnail, the server derives what it can
     | PNG, 16-bit       | 2 to 8 (`Rgba16` is 8)                                  | none                                                                                                                              | about 25 MP for RGBA        |
     | WebP              | 3 or 4                                                  | up to 4: an opaque lossless image is decoded as RGBA and then copied to RGB; a lossy one keeps its YUV planes and its alpha plane | about 25 MP for RGBA        |
     | GIF, first frame  | 4                                                       | up to 4: a separate frame buffer, when the first frame is smaller than the canvas                                                 | about 25 MP                 |
+
+    The implementation budgets progressive coefficients for up to four components with MCU padding.
+    For WebP it also budgets the animation canvas when present, padded YUV planes, and the VP8 decoder's compressed partition buffers.
+    The server checks the first WebP frame's dimensions against the canvas before decoding.
+    The GIF cost includes the application metadata the decoder can retain.
 
     These come from `image` 0.25.10's colour-type mapping and from the decoders it uses (zune-jpeg 0.5.15, png 0.18.1, image-webp 0.2.4, gif 0.14.2).
     A thumbnail is made only when the pixel count times the decoded bytes and the scratch is at most 192 MiB, neither side is over 16,384 pixels, and a JPEG's compressed file is at most 50 MiB.
@@ -282,13 +295,17 @@ When an `image` send arrives without a thumbnail, the server derives what it can
   | Staging (`claim_preview_upload`): client thumbnails (section 4) and link-preview images | `media.max_concurrent_uploads`, 4 | 2 MiB of bytes, a decode of at most 4 MP under a 32 MiB `max_alloc`, and under 8 MiB for section 4's normalisation | about 42 MiB × 4 = 168 MiB |
   | Link-preview generation (`PreviewGenerationService`)                                    | 4                                 | 2 MiB of bytes and a decode under the same 32 MiB `max_alloc`                                                      | about 34 MiB × 4 = 136 MiB |
 
-  So decoding peaks near 556 MiB across the process.
+  The estimated combined bound for these three pools is about 556 MiB.
   This ADR adds the first pool and the normalisation share of the second, about 284 MiB; the rest exists today.
   An operator on a small machine turns off the largest part with `media.send_thumbnails = false`, and shrinks the second with `media.max_concurrent_uploads`.
   The staged originals are outside these pools.
   The `send-media` route reads the whole staged file into memory today, for every kind, before any of this runs: up to `media.max_upload_bytes` (100 MiB) for each send in flight.
   That is the send path's existing cost, not this ADR's, and [issue 1185](https://github.com/matrix-axon/matrix-axon/issues/1185) removes it.
-  Issue 1208's implementation measures the process's peak memory with all three pools busy before the caps are kept.
+  The Linux x86-64 stress test in `image_send::tests::image_decode_peak` reached 516,984 KiB (505 MiB) peak resident memory, with a 7,816 KiB idle test-process baseline.
+  It decoded one 8,192 × 8,192 RGB JPEG padded to 50 MiB while four staging and four preview-generation workers held decoded 2,000 × 2,000 16-bit RGBA images.
+  The staging workers also normalized their thumbnails.
+  This measures the three decoder workloads in isolation from a running server's SDK buffers and its separate preview-recovery pool.
+  The measured result keeps the 192 MiB decode-cost, 50 MiB JPEG, and 16,384-pixel side caps.
 
 - **Placement.** A consumer-owned port in `axon-api` (`SendThumbnailer`, called by the `send-media` route), with its adapter in `axon-server` next to `validate_preview_image` (ADR 0021).
   `axon-api` and `axon-sync` take no `image` dependency.
@@ -299,6 +316,12 @@ When an `image` send arrives without a thumbnail, the server derives what it can
 The thumbnail adds no work for any other kind: a `file`, `video` or `audio` send is unchanged unless the client supplied a thumbnail.
 
 ### 6. One send path builds every media event, and a thumbnail upload is best-effort
+
+Before uploading media, both the ordinary and preview-aware paths confirm room encryption with the homeserver when the SDK has no positive encryption evidence.
+For a plaintext upload, check again before publishing media references so a room upgrade observed during the upload requires a retry.
+The two checks share the network budget, and an error or timeout can stop the send.
+The first check covers stale state in a newly encrypted room.
+The second covers changes while the upload is in flight, including short uploads.
 
 `MediaAttachment` gains the optional width, height, duration and a verified thumbnail (bytes, type, width, height).
 `attachment_info` builds `BaseImageInfo`, `BaseVideoInfo`, `BaseAudioInfo` or `BaseFileInfo` from them.
@@ -393,10 +416,15 @@ Today steps 2 and 4 share one 60 s bound, so the ceiling rises by about 45 s.
 
 **Amended 2026-11-23, in the review of delivery step 3.**
 The shipped web client gives up on `send-media` after 65 s and sends no `txn_id`, so a send that succeeded past that would be retried and posted twice.
-Until clients wait for the sum above, step 3 keeps one `media.upstream_upload_timeout_secs` budget for everything but the thumbnail's upload, as today: resolving the room, the original's upload, the reply lookup and the event.
-The budget is paused while the thumbnail uploads under its own 10 s, so a slow thumbnail still never fails the send.
+Until clients wait for the sum above, the synchronous path keeps one `media.upstream_upload_timeout_secs` budget for resolving the room, checking encryption, uploading the original, looking up the replied-to event, and sending the event.
+Image inspection starts during the original upload.
+If the upload finishes first, the remaining inspection time can pause the network budget for up to 5 s.
+A thumbnail upload pauses the budget for up to another 10 s.
+With defaults, those bounded phases can total about 75 s for a generated thumbnail, or 80 s when the client first supplied a thumbnail for validation.
+These totals exclude local staging reads and network time between the client and Axon.
+Both exceed the shipped web client's 65 s wait, so a late success remains possible until the client uses a stable retry ID and a longer wait.
 The per-step bounds above arrive in the same release as delivery step 5 ([issue 1243](https://github.com/matrix-axon/matrix-axon/issues/1243)).
-Each step reaches its bound only when the homeserver is slow or failing; on a healthy one, the thumbnail adds well under a second, and generation adds nothing once the original takes longer than the decode.
+When the original upload outlasts inspection, inspection adds no time to the send.
 
 A client that bounds `send-media` must allow for the new ceiling.
 The web client derives its timeout from the upstream upload bound (`AXON_UPSTREAM_UPLOAD_MS` in `clients/web/src/api/client.ts`).

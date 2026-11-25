@@ -6022,7 +6022,7 @@
           "messages"
         ],
         "summary": "Send media",
-        "description": "Send a staged media upload to a room, as the event its staged kind names,\nwith optional `info` and a thumbnail (`thumbnail_upload_id`). A send with a\n`txn_id` already in flight or sent within 10 minutes in this room returns\nthat send's event id and sends nothing (ADR 0142 section 4).\n\nThe send runs in a task of its own, which settles every upload it\nclaimed even if the client disconnects: consumed when the event is sent,\nreleased when it fails. The send, from resolving the room to the event,\nhas one budget (`media.upstream_upload_timeout_secs`, 60 s by default), as\nbefore thumbnails. A thumbnail adds at most 5 s to prepare and 10 s to\nupload, outside that budget; without one, a send answers within it.",
+        "description": "Send a staged media upload to a room, as the event its staged kind names,\nwith optional `info` and a thumbnail (`thumbnail_upload_id`). A send with a\n`txn_id` already in flight or sent within 10 minutes in this room returns\nthat send's event id and sends nothing (ADR 0142 section 4).\n\nThe send runs in a task of its own, which settles every upload it\nclaimed even if the client disconnects: consumed when the event is sent,\nreleased when it fails. Room resolution, the original upload and the\nevent send share `media.upstream_upload_timeout_secs` (60 s by default).\nFor images, Axon probes dimensions and can generate a thumbnail while the\noriginal uploads. Preparation of a supplied thumbnail and inspection of\nan image original each have a 5 s budget. Thumbnail uploads are\nbest-effort with their own 10 s budget.",
         "operationId": "send_media",
         "parameters": [
           {

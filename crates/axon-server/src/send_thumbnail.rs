@@ -20,7 +20,7 @@ pub(crate) const MAX_HEIGHT: u32 = 600;
 pub(crate) const JPEG_QUALITY: u8 = 78;
 
 /// Whether `orientation` turns the image a quarter turn, swapping its sides.
-fn swaps_sides(orientation: Orientation) -> bool {
+pub(crate) fn swaps_sides(orientation: Orientation) -> bool {
     matches!(
         orientation,
         Orientation::Rotate90

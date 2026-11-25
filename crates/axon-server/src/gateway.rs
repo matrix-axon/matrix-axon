@@ -19,8 +19,8 @@ use axon_api::{
     RoomSettingsSender, SendError,
 };
 use axon_core::{
-    CreateRoomRequest, MatrixProfile, PowerLevelChanges, PublicRoomsPage, PublicRoomsQuery,
-    ResolvedPowerLevels,
+    CreateRoomRequest, MatrixProfile, MediaSend, PowerLevelChanges, PublicRoomsPage,
+    PublicRoomsQuery, ResolvedPowerLevels,
 };
 use axon_sync::{GatewayError, GatewayLeaveOutcome, InteractiveCall, MediaSendBounds, SdkGateway};
 use uuid::Uuid;
@@ -233,7 +233,7 @@ impl MessageSender for GatewayAdapter {
         account_id: Uuid,
         room_id: &str,
         message: axon_core::link_preview::PreviewSend<'_>,
-        attachment: Option<MediaAttachment>,
+        attachment: Option<MediaSend>,
         txn_id: Option<&str>,
     ) -> Result<String, SendError> {
         self.with_media_bounds(
@@ -287,7 +287,7 @@ impl MessageSender for GatewayAdapter {
         &self,
         account_id: Uuid,
         room_id: &str,
-        attachment: MediaAttachment,
+        attachment: MediaSend,
         caption: Option<&str>,
         formatted: Option<Formatted<'_>>,
         relation: Relation<'_>,

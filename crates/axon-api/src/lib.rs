@@ -110,8 +110,8 @@ pub use sync_state::SyncStateProvider;
 pub use sync_status::{AccountSyncSnapshot, SyncStatusProvider};
 pub use trust::{CurrentTrust, SenderTrustService, TrustBundle, TrustError, TrustSnapshot};
 pub use uploads::{
-    ClaimedUpload, SendThumbnail, StageUploadError, StageUploadRequest, StagedUpload,
-    StagedUploadService, UploadStream,
+    ClaimedUpload, SendThumbnail, SendThumbnailer, StageUploadError, StageUploadRequest,
+    StagedUpload, StagedUploadService, UploadStream,
 };
 pub use verification::{FlowStage, FlowSummary, VerificationService, VerifyError};
 pub use web::web_client_embedded;

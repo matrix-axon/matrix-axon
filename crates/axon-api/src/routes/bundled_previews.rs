@@ -132,6 +132,7 @@ pub(super) async fn send(
     room_id: String,
     request: Request,
     txn: Option<TxnGuard>,
+    thumbnailer: Option<Arc<dyn crate::SendThumbnailer>>,
 ) -> Result<ApiResponse<crate::dto::SendResultDto>, ApiError> {
     // No upload claims or SDK work on invalid input.
     request.validate()?;
@@ -152,10 +153,12 @@ pub(super) async fn send(
         let result = async {
             let previews = claim_previews(&*uploads, account_id, &request.previews, &mut claims.ids).await?;
             let attachment = match &request.media {
-                Some(media) => Some(
-                    super::media_send::claim_attachment(&*uploads, account_id, media, &mut claims.ids)
-                        .await?,
-                ),
+                Some(media) => {
+                    let attachment = super::media_send::claim_attachment(
+                        &*uploads, account_id, media, &mut claims.ids,
+                    ).await?;
+                    Some(super::media_send::inspect_image(attachment, thumbnailer, account_id, &room_id, media))
+                }
                 None => None,
             };
             let message = PreviewSend {

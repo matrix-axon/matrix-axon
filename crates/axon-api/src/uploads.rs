@@ -77,6 +77,19 @@ impl From<ClaimedUpload> for MediaAttachment {
     }
 }
 
+/// Inspect a claimed image while the sender uploads the original (ADR 0142
+/// section 5). Failures return the metadata that could be read in time.
+#[async_trait]
+pub trait SendThumbnailer: Send + Sync {
+    async fn inspect(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        upload_id: Uuid,
+        generate: bool,
+    ) -> axon_core::SendImageMetadata;
+}
+
 /// What [`StagedUploadService::claim_send_thumbnail`] made of a client's
 /// thumbnail. Either way the upload is claimed, and the caller settles it with
 /// the send (ADR 0142 section 4).

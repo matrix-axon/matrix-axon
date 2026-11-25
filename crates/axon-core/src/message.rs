@@ -77,6 +77,41 @@ pub struct MediaAttachment {
     pub thumbnail: Option<MediaThumbnail>,
 }
 
+/// A claimed attachment and its optional, best-effort image inspection.
+pub struct MediaSend {
+    pub attachment: MediaAttachment,
+    pub image:
+        Option<std::pin::Pin<Box<dyn std::future::Future<Output = SendImageMetadata> + Send>>>,
+}
+
+impl From<MediaAttachment> for MediaSend {
+    fn from(attachment: MediaAttachment) -> Self {
+        Self {
+            attachment,
+            image: None,
+        }
+    }
+}
+
+/// Image metadata read from the original during the upload.
+#[derive(Default)]
+pub struct SendImageMetadata {
+    pub dimensions: Option<(u32, u32)>,
+    pub thumbnail: Option<MediaThumbnail>,
+}
+
+impl SendImageMetadata {
+    pub fn apply(self, attachment: &mut MediaAttachment) {
+        if let Some((width, height)) = self.dimensions {
+            attachment.width = Some(u64::from(width));
+            attachment.height = Some(u64::from(height));
+        }
+        if attachment.thumbnail.is_none() {
+            attachment.thumbnail = self.thumbnail;
+        }
+    }
+}
+
 /// A thumbnail or poster ready to publish beside a media event (ADR 0142
 /// section 2): upright, fitted inside 800 × 600, JPEG or PNG, with no EXIF.
 /// `width`, `height` and `mimetype` describe `bytes` exactly, so they become
