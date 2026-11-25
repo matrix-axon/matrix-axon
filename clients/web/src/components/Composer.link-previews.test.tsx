@@ -181,6 +181,27 @@ describe('Composer link previews', () => {
     expect(device).toHaveBeenCalledTimes(1)
   })
 
+  it('forgets that a ready link is complete once it leaves the draft', async () => {
+    const { device, pending } = deferredDevice()
+    const { type } = setup({ sources: { setting: 'device', device } })
+    type(`${A} `)
+    await waitFor(() => expect(device).toHaveBeenCalledTimes(1))
+    pending[0].resolve({ url: A, title: 'An article', imageUnavailable: false })
+    await screen.findByText('An article')
+
+    type(`[An article](${A})`)
+    expect(screen.getByText('An article')).toBeTruthy()
+    type(`[An article](${B})`)
+    expect(cards()).toBeNull()
+    type(`[An article](${A})`)
+    expect(cards()).toBeNull()
+    type(`[An article](${A}) `)
+    expect(screen.getByText('An article')).toBeTruthy()
+    type(`[An article](${A})`)
+    expect(screen.getByText('An article')).toBeTruthy()
+    expect(device).toHaveBeenCalledTimes(1)
+  })
+
   it('discards a card with its X and sends the discard record', async () => {
     const { device, pending } = deferredDevice()
     const { paste, send, onSubmit } = setup({
