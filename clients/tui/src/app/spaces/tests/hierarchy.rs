@@ -189,6 +189,7 @@ async fn later_page_failure_retains_grouping_and_retries_from_the_first_page() {
     let state = &app.spaces.children[&key("!work:srv")];
     assert_eq!(state.children.as_ref().unwrap(), &["!a:srv", "!b:srv"]);
     assert!(state.error.is_some());
+    assert_eq!(state.failures, 1);
     let retry = state.retry_at.unwrap();
     assert!(state.dirty);
     let buffer = render(&mut app, 160, 20);
@@ -205,6 +206,8 @@ async fn later_page_failure_retains_grouping_and_retries_from_the_first_page() {
         &["!c:srv"]
     );
     assert!(app.spaces.children[&key("!work:srv")].error.is_none());
+    assert_eq!(app.spaces.children[&key("!work:srv")].failures, 0);
+    assert!(app.spaces.children[&key("!work:srv")].retry_at.is_none());
     assert!(!stub.request().await.contains("cursor="));
     assert!(stub.request().await.contains("cursor=next"));
     assert!(!stub.request().await.contains("cursor="));
@@ -273,6 +276,7 @@ async fn page_and_total_body_budgets_apply_before_decoding_ignored_summaries() {
     let err = walk_space_children(&stub.client, &key("!work:srv"))
         .await
         .unwrap_err();
+    assert!(matches!(err, WalkFailure::Budget(BudgetKind::PageBytes)));
     assert!(err.to_string().contains("size limit"));
 
     let replies = (0..9)
@@ -286,6 +290,7 @@ async fn page_and_total_body_budgets_apply_before_decoding_ignored_summaries() {
     let err = walk_space_children(&stub.client, &key("!work:srv"))
         .await
         .unwrap_err();
+    assert!(matches!(err, WalkFailure::Budget(BudgetKind::PageBytes)));
     assert!(err.to_string().contains("size limit"));
     for _ in 0..9 {
         stub.request().await;
@@ -312,6 +317,7 @@ async fn exactly_exhausted_walk_budget_stops_before_requesting_another_page() {
     let error = walk_space_children(&stub.client, &key("!work:srv"))
         .await
         .unwrap_err();
+    assert!(matches!(error, WalkFailure::Budget(BudgetKind::TotalBytes)));
     assert!(error.to_string().contains("byte budget exhausted"));
     for _ in 0..HIERARCHY_MAX_BYTES / HIERARCHY_PAGE_BYTES {
         stub.request().await;
@@ -327,6 +333,7 @@ async fn unique_cursors_and_empty_pages_still_have_a_work_limit() {
     let err = walk_space_children(&stub.client, &key("!work:srv"))
         .await
         .unwrap_err();
+    assert!(matches!(err, WalkFailure::Budget(BudgetKind::Pages)));
     assert!(err.to_string().contains("200 pages"));
 }
 
@@ -349,12 +356,9 @@ async fn whole_walk_deadline_bounds_multiple_individually_timely_pages() {
         stub.request().await;
     }
     tokio::time::advance(Duration::from_secs(10)).await;
-    assert!(task
-        .await
-        .unwrap()
-        .unwrap_err()
-        .to_string()
-        .contains("walk deadline"));
+    let err = task.await.unwrap().unwrap_err();
+    assert!(matches!(err, WalkFailure::Transient(_)));
+    assert!(err.to_string().contains("walk deadline"));
 }
 
 #[tokio::test]
@@ -477,4 +481,420 @@ async fn account_change_during_walk_cannot_consume_another_accounts_membership_o
         .visible_room_indices()
         .iter()
         .all(|&i| app.rooms.rooms[i].account_id != Uuid::nil()));
+}
+
+fn fail_membership(app: &mut App, now: Instant, request: u64, failure: WalkFailure) {
+    let id = key("!work:srv");
+    let state = app.spaces.children.get_mut(&id).unwrap();
+    // A sweep clears the dirty bit when it starts the walk. Leaving it set
+    // discards the result, which is the superseded-walk path.
+    state.dirty = false;
+    state.inflight = Some(request);
+    app.apply_space_outcome_at(
+        SpaceOutcome::Children {
+            key: id,
+            request,
+            result: Err(failure),
+        },
+        now,
+    );
+}
+
+fn timed_out() -> WalkFailure {
+    WalkFailure::Transient(crate::api::ApiError::Request(
+        "request timed out".to_owned(),
+    ))
+}
+
+#[test]
+fn transient_hierarchy_failures_double_until_four_minutes_and_success_resets() {
+    let now = Instant::now();
+    let mut app = app();
+    let expected = [30_u64, 60, 120, 240, 240];
+    for (step, delay) in expected.into_iter().enumerate() {
+        fail_membership(&mut app, now, step as u64 + 1, timed_out());
+        let state = &app.spaces.children[&key("!work:srv")];
+        assert_eq!(state.failures, (step as u32 + 1).min(4), "step {step}");
+        assert_eq!(state.retry_at, Some(now + Duration::from_secs(delay)));
+        assert_eq!(state.children.as_ref().unwrap(), &["!a:srv", "!b:srv"]);
+        assert!(state.error.is_some());
+        assert!(state.dirty);
+    }
+
+    let state = app.spaces.children.get_mut(&key("!work:srv")).unwrap();
+    state.dirty = false;
+    state.inflight = Some(9);
+    app.apply_space_outcome_at(
+        SpaceOutcome::Children {
+            key: key("!work:srv"),
+            request: 9,
+            result: Ok(vec!["!c:srv".to_owned()]),
+        },
+        now,
+    );
+    let state = &app.spaces.children[&key("!work:srv")];
+    assert_eq!(state.failures, 0);
+    assert!(state.retry_at.is_none());
+    assert!(state.error.is_none());
+    assert_eq!(state.children.as_ref().unwrap(), &["!c:srv"]);
+
+    fail_membership(&mut app, now, 10, timed_out());
+    let state = &app.spaces.children[&key("!work:srv")];
+    assert_eq!(state.failures, 1);
+    assert_eq!(state.retry_at, Some(now + Duration::from_secs(30)));
+    assert_eq!(state.children.as_ref().unwrap(), &["!c:srv"]);
+
+    app.refresh_spaces();
+    assert!(app.spaces.children[&key("!work:srv")].retry_at.is_none());
+    assert_eq!(app.spaces.children[&key("!work:srv")].failures, 0);
+    fail_membership(&mut app, now, 11, timed_out());
+    let state = &app.spaces.children[&key("!work:srv")];
+    assert_eq!(state.failures, 1);
+    assert_eq!(state.retry_at, Some(now + Duration::from_secs(30)));
+    assert_eq!(state.children.as_ref().unwrap(), &["!c:srv"]);
+}
+
+#[test]
+fn walk_deadline_stays_on_the_transient_ladder() {
+    let now = Instant::now();
+    let mut app = app();
+    for (step, delay) in [30_u64, 60].into_iter().enumerate() {
+        fail_membership(
+            &mut app,
+            now,
+            step as u64 + 1,
+            WalkFailure::Transient(crate::api::ApiError::Request(
+                HIERARCHY_DEADLINE_ERROR.to_owned(),
+            )),
+        );
+        let state = &app.spaces.children[&key("!work:srv")];
+        assert_eq!(state.failures, step as u32 + 1);
+        assert_eq!(state.retry_at, Some(now + Duration::from_secs(delay)));
+        assert_eq!(state.error.as_deref(), Some(HIERARCHY_DEADLINE_ERROR));
+        assert_eq!(state.children.as_ref().unwrap(), &["!a:srv", "!b:srv"]);
+    }
+}
+
+#[test]
+fn budget_hierarchy_failures_start_at_the_cap_and_keep_the_grouping() {
+    let now = Instant::now();
+    let budgets = [
+        BudgetKind::TotalBytes,
+        BudgetKind::Pages,
+        BudgetKind::PageBytes,
+    ];
+    for (index, kind) in budgets.into_iter().enumerate() {
+        let mut app = app();
+        app.display.debug = true;
+        let message = WalkFailure::Budget(kind).to_string();
+        fail_membership(&mut app, now, 1, WalkFailure::Budget(kind));
+        let state = &app.spaces.children[&key("!work:srv")];
+        assert_eq!(state.failures, 4, "{message}");
+        assert_eq!(
+            state.retry_at,
+            Some(now + Duration::from_secs(240)),
+            "{message}"
+        );
+        assert_eq!(state.children.as_ref().unwrap(), &["!a:srv", "!b:srv"]);
+        assert_eq!(state.error.as_deref(), Some(message.as_str()));
+        let status = app.status.text(true);
+        assert!(status.contains(&message), "{status}");
+        assert!(status.contains("retry in 240s"), "{status}");
+        if index == 0 {
+            let buffer = render(&mut app, 160, 20);
+            assert!(room_text(&app, &buffer).contains("Work (incomplete; retrying)"));
+        }
+        fail_membership(&mut app, now, 2, WalkFailure::Budget(kind));
+        let state = &app.spaces.children[&key("!work:srv")];
+        assert_eq!(state.failures, 4);
+        assert_eq!(state.retry_at, Some(now + Duration::from_secs(240)));
+        assert_eq!(state.children.as_ref().unwrap(), &["!a:srv", "!b:srv"]);
+    }
+}
+
+#[tokio::test]
+async fn relationship_changes_keep_a_capped_wait_and_refresh_clears_it() {
+    let now = Instant::now();
+    let mut app = app();
+    app.spaces.order_read_again = false;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    app.spaces.tx = Some(tx);
+    fail_membership(
+        &mut app,
+        now,
+        1,
+        WalkFailure::Budget(BudgetKind::TotalBytes),
+    );
+    let retry = app.spaces.children[&key("!work:srv")].retry_at.unwrap();
+    app.invalidate_space(&key("!work:srv"));
+    let state = &app.spaces.children[&key("!work:srv")];
+    assert_eq!(state.failures, 4);
+    assert_eq!(state.retry_at, Some(retry));
+    assert!(state.dirty);
+    assert_eq!(state.children.as_ref().unwrap(), &["!a:srv", "!b:srv"]);
+    app.sweep_spaces(retry - Duration::from_secs(1));
+    assert!(app.spaces.children[&key("!work:srv")].inflight.is_none());
+
+    // A child event during the capped attempt lets that attempt finish.
+    // It does not abort the worker or start the 240-second wait over.
+    let state = app.spaces.children.get_mut(&key("!work:srv")).unwrap();
+    let deadline = now - Duration::from_secs(1);
+    state.retry_at = Some(deadline);
+    state.inflight = Some(9);
+    state.dirty = false;
+    app.invalidate_space(&key("!work:srv"));
+    app.invalidate_space(&key("!work:srv"));
+    let state = &app.spaces.children[&key("!work:srv")];
+    assert_eq!(state.failures, 4);
+    assert_eq!(state.inflight, Some(9));
+    assert!(!state.dirty);
+    assert_eq!(state.retry_at, Some(deadline));
+
+    // The attempt fails on its own. The child events do not add a second delay.
+    app.apply_space_outcome_at(
+        SpaceOutcome::Children {
+            key: key("!work:srv"),
+            request: 9,
+            result: Err(WalkFailure::Budget(BudgetKind::Pages)),
+        },
+        now,
+    );
+    let state = &app.spaces.children[&key("!work:srv")];
+    assert_eq!(state.failures, 4);
+    assert_eq!(state.retry_at, Some(now + Duration::from_secs(240)));
+    assert!(state.dirty);
+    assert!(state.inflight.is_none());
+
+    app.refresh_spaces();
+    app.spaces.order_read_again = false;
+    let state = &app.spaces.children[&key("!work:srv")];
+    assert_eq!(state.failures, 0);
+    assert!(state.retry_at.is_none());
+    assert!(state.error.is_some());
+    app.sweep_spaces(Instant::now());
+    assert!(app.spaces.children[&key("!work:srv")].inflight.is_some());
+}
+
+#[test]
+fn stale_hierarchy_results_do_not_change_failure_history() {
+    let now = Instant::now();
+    let deadline = now + Duration::from_secs(60);
+    let mut app = app();
+    let other = RoomKey {
+        account_id: Uuid::from_u128(7),
+        room_id: "!work:srv".to_owned(),
+    };
+    app.spaces.children.insert(
+        other.clone(),
+        ChildrenState {
+            children: Some(vec!["!b:srv".to_owned()]),
+            failures: 2,
+            retry_at: Some(deadline),
+            ..Default::default()
+        },
+    );
+    let state = app.spaces.children.get_mut(&key("!work:srv")).unwrap();
+    state.inflight = Some(9);
+    state.failures = 2;
+    state.retry_at = Some(deadline);
+    state.error = Some("offline".to_owned());
+    state.dirty = true;
+
+    app.apply_space_outcome_at(
+        SpaceOutcome::Children {
+            key: key("!work:srv"),
+            request: 9,
+            result: Ok(Vec::new()),
+        },
+        now,
+    );
+    let state = &app.spaces.children[&key("!work:srv")];
+    assert_eq!(state.failures, 2);
+    assert_eq!(state.retry_at, Some(deadline));
+    assert_eq!(state.children.as_ref().unwrap(), &["!a:srv", "!b:srv"]);
+    assert!(state.inflight.is_none());
+    assert!(state.dirty);
+
+    let state = app.spaces.children.get_mut(&key("!work:srv")).unwrap();
+    state.inflight = Some(9);
+    state.dirty = false;
+    for result in [Err(timed_out()), Ok(vec!["!c:srv".to_owned()])] {
+        app.apply_space_outcome_at(
+            SpaceOutcome::Children {
+                key: key("!work:srv"),
+                request: 8,
+                result,
+            },
+            now,
+        );
+        let state = &app.spaces.children[&key("!work:srv")];
+        assert_eq!(state.failures, 2);
+        assert_eq!(state.retry_at, Some(deadline));
+        assert_eq!(state.children.as_ref().unwrap(), &["!a:srv", "!b:srv"]);
+        assert_eq!(state.inflight, Some(9));
+    }
+
+    app.invalidate_space(&key("!work:srv"));
+    app.apply_space_outcome_at(
+        SpaceOutcome::Children {
+            key: key("!work:srv"),
+            request: 9,
+            result: Err(WalkFailure::Transient(crate::api::ApiError::Request(
+                HIERARCHY_DEADLINE_ERROR.to_owned(),
+            ))),
+        },
+        now,
+    );
+    let state = &app.spaces.children[&key("!work:srv")];
+    assert_eq!(state.failures, 2);
+    assert!(state.retry_at.is_none());
+    assert_eq!(state.children.as_ref().unwrap(), &["!a:srv", "!b:srv"]);
+    assert_eq!(state.error.as_deref(), Some("offline"));
+    assert_eq!(app.spaces.children[&other].failures, 2);
+    assert_eq!(app.spaces.children[&other].retry_at, Some(deadline));
+}
+
+#[test]
+fn removing_a_root_drops_hierarchy_failure_history() {
+    let now = Instant::now();
+    let mut app = app();
+    fail_membership(&mut app, now, 1, timed_out());
+    assert_eq!(app.spaces.children[&key("!work:srv")].failures, 1);
+    app.rooms.rooms.remove(0);
+    app.reconcile_spaces();
+    app.apply_space_outcome_at(
+        SpaceOutcome::Children {
+            key: key("!work:srv"),
+            request: 1,
+            result: Err(WalkFailure::Budget(BudgetKind::Pages)),
+        },
+        now,
+    );
+    assert!(!app.spaces.children.contains_key(&key("!work:srv")));
+
+    app.rooms
+        .rooms
+        .insert(0, room(Uuid::nil(), "!work:srv", "Work", true));
+    seed(&mut app, "!work:srv", &["!a:srv"]);
+    app.apply_space_outcome_at(
+        SpaceOutcome::Children {
+            key: key("!work:srv"),
+            request: 1,
+            result: Err(timed_out()),
+        },
+        now,
+    );
+    let state = &app.spaces.children[&key("!work:srv")];
+    assert_eq!(state.failures, 0);
+    assert!(state.retry_at.is_none());
+    assert_eq!(state.children.as_ref().unwrap(), &["!a:srv"]);
+}
+
+#[tokio::test]
+async fn explicit_refresh_resets_backoff_and_a_relationship_change_retries_below_the_cap() {
+    for refresh in [true, false] {
+        let mut stub = Stub::new(vec![
+            Reply {
+                status: "503 Service Unavailable",
+                body: "{}".to_owned(),
+                delay: Duration::ZERO,
+            },
+            Reply::page(page(&["!c:srv".to_owned()], None, 1)),
+        ])
+        .await;
+        let mut app = app();
+        // One root, so the retry is not raced by another space's walk.
+        app.rooms.rooms.retain(|room| room.room_id != "!club:srv");
+        app.reconcile_spaces();
+        let mut rx = start(&mut app, &stub);
+        settle(&mut app, &mut rx).await;
+        let state = &app.spaces.children[&key("!work:srv")];
+        assert_eq!(state.failures, 1);
+        assert_eq!(state.children.as_ref().unwrap(), &["!a:srv", "!b:srv"]);
+        let retry = state.retry_at.unwrap();
+        if refresh {
+            app.refresh_spaces();
+            // `/refresh` also re-reads space order. That request is not this
+            // stub's hierarchy page, so keep the next connection for the walk.
+            app.spaces.order_read_again = false;
+        } else {
+            app.invalidate_space(&key("!work:srv"));
+        }
+        let state = &app.spaces.children[&key("!work:srv")];
+        assert!(state.retry_at.is_none());
+        // `/refresh` starts the ladder over. A relationship change below the
+        // cap retries immediately and keeps the count.
+        assert_eq!(state.failures, if refresh { 0 } else { 1 });
+        assert!(state.error.is_some());
+        assert_eq!(state.children.as_ref().unwrap(), &["!a:srv", "!b:srv"]);
+        app.sweep_spaces(retry - Duration::from_secs(1));
+        settle(&mut app, &mut rx).await;
+        let state = &app.spaces.children[&key("!work:srv")];
+        assert_eq!(state.failures, 0);
+        assert!(state.retry_at.is_none());
+        assert!(state.error.is_none());
+        assert_eq!(state.children.as_ref().unwrap(), &["!c:srv"]);
+        let first = stub.request().await;
+        assert!(!first.contains("cursor="), "{first}");
+        let second = stub.request().await;
+        assert!(!second.contains("cursor="), "{second}");
+    }
+}
+
+#[tokio::test]
+async fn a_capped_walk_that_succeeds_after_a_child_event_walks_once_more() {
+    let now = Instant::now();
+    let mut app = app();
+    app.spaces.order_read_again = false;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    app.spaces.tx = Some(tx);
+    fail_membership(
+        &mut app,
+        now,
+        1,
+        WalkFailure::Budget(BudgetKind::TotalBytes),
+    );
+    let state = app.spaces.children.get_mut(&key("!work:srv")).unwrap();
+    state.retry_at = Some(now - Duration::from_secs(1));
+    state.inflight = Some(9);
+    state.dirty = false;
+    app.invalidate_space(&key("!work:srv"));
+    app.invalidate_space(&key("!work:srv"));
+
+    app.apply_space_outcome_at(
+        SpaceOutcome::Children {
+            key: key("!work:srv"),
+            request: 9,
+            result: Ok(vec!["!c:srv".to_owned()]),
+        },
+        now,
+    );
+    let state = &app.spaces.children[&key("!work:srv")];
+    assert_eq!(state.failures, 0);
+    assert!(state.retry_at.is_none());
+    assert!(state.dirty);
+    assert!(state.inflight.is_none());
+    assert!(state.error.is_none());
+    assert_eq!(state.children.as_ref().unwrap(), &["!c:srv"]);
+
+    app.sweep_spaces(now);
+    let follow = app.spaces.children[&key("!work:srv")].inflight;
+    assert!(follow.is_some());
+    app.sweep_spaces(now);
+    assert_eq!(app.spaces.children[&key("!work:srv")].inflight, follow);
+
+    app.apply_space_outcome_at(
+        SpaceOutcome::Children {
+            key: key("!work:srv"),
+            request: follow.unwrap(),
+            result: Ok(vec!["!d:srv".to_owned()]),
+        },
+        now,
+    );
+    let state = &app.spaces.children[&key("!work:srv")];
+    assert_eq!(state.failures, 0);
+    assert!(!state.dirty);
+    assert!(state.inflight.is_none());
+    assert!(state.retry_at.is_none());
+    assert_eq!(state.children.as_ref().unwrap(), &["!d:srv"]);
 }

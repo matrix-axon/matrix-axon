@@ -557,8 +557,15 @@ The web spaces store still reads `space/children` ([issue 1054](https://github.c
 The TUI sidebar pages `space/hierarchy` with `enrich=false` through its existing four-worker pool ([ADR 0135](adr/0135-tui-room-details-and-discovery.md)).
 It deduplicates direct child IDs and intersects them with the same account's joined-room list; unjoined discoveries never enter sidebar navigation.
 Walks are bounded to 100 children per page, 200 pages, 2 MiB per response, 16 MiB in total, and 60 seconds overall.
-Only complete walks replace grouping; failures retain cached grouping, mark the root incomplete, and retry after 30 seconds.
-Relationship changes, reconnect, and explicit refresh reconcile membership.
+Only complete walks replace grouping; failures retain cached grouping, mark the root incomplete, and retry from the first page after 30, 60, 120, then 240 seconds.
+A byte-total, per-page size, or page-count failure starts at 240 seconds.
+The 60-second walk deadline stays on that ladder.
+A complete walk clears the count.
+`/refresh` retries immediately and clears the count.
+A relationship change retries immediately while the count is below the cap, and keeps the wait at the cap.
+At the cap, child-link changes do not abort the in-flight walk or extend its wait.
+A successful walk then schedules one follow-up.
+Reconnect keeps a failed walk's deadline and count.
 TUI discovery browsing, selected-child previews, enrichment, and joins remain for PR 3 of [issue 624](https://github.com/matrix-axon/matrix-axon/issues/624).
 
 ## Verification
