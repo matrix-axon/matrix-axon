@@ -55,6 +55,16 @@ struct Pending {
 }
 
 impl Pending {
+    fn is_full(&self) -> bool {
+        let room_count = self.rooms.len();
+        room_count >= MAX_PENDING_ROOMS
+            || (room_count + 1 == MAX_PENDING_ROOMS
+                && self
+                    .space_graph_room
+                    .as_ref()
+                    .is_some_and(|room_id| !self.rooms.contains_key(room_id)))
+    }
+
     fn take_rooms(&mut self) -> Rooms {
         if let Some(room_id) = self.space_graph_room.take() {
             self.rooms
@@ -104,7 +114,7 @@ impl RoomDetailsChanges {
                     .or_default()
                     .insert(source);
             }
-            let publish = pending.closed || pending.rooms.len() >= MAX_PENDING_ROOMS;
+            let publish = pending.closed || pending.is_full();
             (wake, publish.then(|| pending.take_rooms()))
         };
         match publish {
@@ -296,6 +306,31 @@ mod tests {
             changes.mark(&format!("!{room}:x"), Metadata);
         }
         assert_eq!(received(&mut rx).len(), MAX_PENDING_ROOMS);
+        cancel.cancel();
+        task.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_graph_room_counts_toward_the_flush_limit_once() {
+        let (changes, mut rx, cancel, task) = start();
+        for room in 0..MAX_PENDING_ROOMS - 1 {
+            changes.mark(&format!("!{room}:x"), Metadata);
+        }
+        changes.mark("!0:x", SpaceGraph);
+        assert!(received(&mut rx).is_empty(), "an existing room counts once");
+        changes.mark("!extra:x", Metadata);
+        let frames = received(&mut rx);
+        assert_eq!(frames.len(), MAX_PENDING_ROOMS);
+        assert!(frames.contains(&("!0:x".to_owned(), vec![Metadata, SpaceGraph])));
+
+        for room in 0..MAX_PENDING_ROOMS - 1 {
+            changes.mark(&format!("!{room}:x"), Metadata);
+        }
+        assert!(received(&mut rx).is_empty());
+        changes.mark("!graph:x", SpaceGraph);
+        let frames = received(&mut rx);
+        assert_eq!(frames.len(), MAX_PENDING_ROOMS);
+        assert!(frames.contains(&("!graph:x".to_owned(), vec![SpaceGraph])));
         cancel.cancel();
         task.await.unwrap();
     }

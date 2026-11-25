@@ -93,16 +93,10 @@ pub(crate) async fn watch(
                 return;
             }
             let mut after = pending.remove(&room_id);
-            let Some(room) = client.get_room(&room_id) else {
-                continue;
-            };
-            if room.state() != RoomState::Joined {
-                continue;
-            }
             let outcome = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => return,
-                result = tokio::time::timeout(Duration::from_secs(2), reconcile_room(&ctx, &client, &room_id, check_space_links, &mut after)) => result,
+                result = tokio::time::timeout(Duration::from_secs(2), reconcile_joined_room(&ctx, &client, &room_id, check_space_links, &mut after)) => result,
             };
             if let Some(after) = after {
                 pending.insert(room_id.clone(), after);
@@ -112,6 +106,42 @@ pub(crate) async fn watch(
             }
         }
     }
+}
+
+async fn reconcile_joined_room(
+    ctx: &PersistContext,
+    client: &Client,
+    room_id: &OwnedRoomId,
+    check_space_links: bool,
+    after: &mut Option<RepairCursor>,
+) {
+    let state = match client.get_room(room_id) {
+        Some(room) => Some(room.state()),
+        // A space-link pass can use durable SDK membership even without a
+        // live room. Ordinary sweep entries need no extra cache lookup.
+        None if check_space_links => stored_room_info(client, room_id)
+            .await
+            .map(|info| info.state()),
+        None => None,
+    };
+    match state {
+        Some(RoomState::Joined) => {
+            reconcile_room(ctx, client, room_id, check_space_links, after).await;
+        }
+        Some(_) => *after = None,
+        // The SDK has no membership evidence yet. Keep the cursor for a retry.
+        None => {}
+    }
+}
+
+async fn stored_room_info(client: &Client, room_id: &OwnedRoomId) -> Option<RoomInfo> {
+    client
+        .state_store()
+        .get_room_infos(&RoomLoadSettings::One(room_id.clone()))
+        .await
+        .ok()?
+        .into_iter()
+        .next()
 }
 
 /// Stop at the room budget, preserving the channel's tail for the next tick.
@@ -258,11 +288,7 @@ async fn reconcile_stored_state(
         return;
     }
     let more = candidates.len() == STATE_REDACTION_PAGE_SIZE;
-    let info = client
-        .state_store()
-        .get_room_infos(&RoomLoadSettings::One(room_id.clone()))
-        .await;
-    let Some(info) = info.ok().and_then(|infos| infos.into_iter().next()) else {
+    let Some(info) = stored_room_info(client, room_id).await else {
         tracing::debug!(account_id = %ctx.account_id, %room_id, "no SDK room info for stored state redaction; sweep will retry");
         return;
     };
@@ -526,6 +552,7 @@ mod tests {
     #[ignore = "requires Postgres"]
     async fn stored_space_repair_resumes_past_a_timeout_and_unauthorized_prefix() {
         let (ctx, client, room, _) = repair_fixture().await;
+        assert!(client.get_room(&room).is_none());
         let last = STATE_REDACTION_PAGE_SIZE;
         let key = |i| format!("!child-{i:03}:localhost");
         for i in 0..=last {
@@ -583,14 +610,14 @@ mod tests {
         let mut after = None;
         assert!(tokio::time::timeout(
             Duration::from_millis(250),
-            reconcile_room(&ctx, &client, &room, true, &mut after)
+            reconcile_joined_room(&ctx, &client, &room, true, &mut after)
         )
         .await
         .is_err());
         assert_eq!(after, Some(("m.space.child".into(), key(0))));
         lock.rollback().await.unwrap();
 
-        reconcile_room(&ctx, &client, &room, true, &mut after).await;
+        reconcile_joined_room(&ctx, &client, &room, true, &mut after).await;
         assert_eq!(after, Some(("m.space.child".into(), key(last))));
         for (i, redacted) in [(0, None), (1, None), (last, Some(true))] {
             let state = ctx
@@ -618,6 +645,25 @@ mod tests {
                 .redacted,
             Some(true)
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn missing_sdk_membership_preserves_a_pending_cursor() {
+        let (ctx, client, _, _) = repair_fixture().await;
+        let room = "!missing:localhost".parse().unwrap();
+        let cursor = ("m.space.child".to_owned(), "!child:localhost".to_owned());
+        let mut after = Some(cursor.clone());
+
+        reconcile_joined_room(&ctx, &client, &room, true, &mut after).await;
+        assert_eq!(after, Some(cursor));
+
+        let mut changes = StateChanges::default();
+        changes.add_room(RoomInfo::new(&room, RoomState::Left));
+        client.state_store().save_changes(&changes).await.unwrap();
+
+        reconcile_joined_room(&ctx, &client, &room, true, &mut after).await;
+        assert_eq!(after, None);
     }
 
     #[tokio::test]
