@@ -28,9 +28,9 @@
 //!
 //! Delivery is **best-effort live tail**, not a replay: a client sees events
 //! that arrive after it connects, and uses the HTTP read API for history. The
-//! fan-out rides a [`tokio::sync::broadcast`] channel, so a client too slow to
-//! keep up is told it lagged (and skips the backlog) rather than ever stalling
-//! the sync engine. Writing a frame to the socket itself is bounded too (see
+//! fan-out rides a [`tokio::sync::broadcast`] channel. When a subscriber lags,
+//! the server logs the skipped frames and keeps the socket open (#1048).
+//! Writing a frame to the socket itself is bounded too (see
 //! `WRITE_TIMEOUT`): a peer that stops draining its TCP receive buffer gets
 //! disconnected rather than parking the connection's task forever (#290).
 //!
@@ -84,8 +84,10 @@ use crate::state::{WsHeartbeatInterval, WsRevalidationInterval};
 /// colliding.
 const TIMELINE_EVENT: &str = "timeline.event";
 
+/// The `type` tag for the identifier-only re-decryption update (ADR 0020).
 const TIMELINE_EVENT_DECRYPTED: &str = "timeline.event_decrypted";
 
+/// The stored event to reread through `GET /v1/accounts/{account_id}/events/{event_id}`.
 #[derive(Debug, Serialize)]
 struct EventDecryptedPayload {
     room_id: String,

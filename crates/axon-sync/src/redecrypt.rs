@@ -74,6 +74,7 @@ pub(crate) struct RedecryptContext<'a> {
     pub(crate) live_tx: &'a broadcast::Sender<LiveFrame>,
 }
 
+/// Publish a best-effort update after the back-fill commits, when the bus has receivers.
 pub(crate) fn publish_decrypted(
     live_tx: &broadcast::Sender<LiveFrame>,
     account_id: Uuid,

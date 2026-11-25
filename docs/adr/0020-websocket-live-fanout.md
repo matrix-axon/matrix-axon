@@ -93,7 +93,10 @@ The update can arrive before a concurrent live-sync delivery, so reconcile with 
 A historical event may have no earlier frame.
 Keep the existing arrival cursor and unread count when applying the update.
 Clients that do not recognize this additive tag ignore it.
-On reconnect, refresh cached UTDs that are still displayed, since a missed update cannot be found by asking only for later arrivals.
+Refresh displayed UTDs after reconnecting or detecting a gap in live delivery.
+Each update keeps the row's original arrival order, so a query for later arrivals alone cannot recover a missed update.
+The server logs broadcast lag and keeps the socket open, which means the client may receive no signal that updates were dropped.
+Issue #1048 tracks a server-side way to trigger resync after lag.
 
 ### Live tail, not replay
 
