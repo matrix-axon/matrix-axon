@@ -141,3 +141,29 @@ arrival order.
   pass-through again. The route's failure logging (added alongside this ADR)
   stays, because a receipt that never lands is otherwise invisible and presents
   as a room that will not stop showing unread.
+
+## Amendment — folded redactions are receipt candidates (2026-11-25, #1273)
+
+"The events it has displayed" includes the redactions folded onto them. Timeline
+reads strip bare `m.room.redaction` events and report each one on the event it
+redacted (`redaction_event_id`), so until this amendment no client could name a
+redaction. Usually that does not matter, because default push rules do not
+count redactions. A room rule set to notify on every event does count them, and
+there a redaction that is the room's newest event pins the homeserver's
+notification count for good. Unlike #337, the receipt already reached the
+redacted message there, and stopped one event short.
+
+`EventDto.redaction_arrival_order` carries the arrival order of
+`redaction_event_id`. A client that may name an event may also name that
+event's redaction, on the same terms: everything the redaction did is visible
+on the row it redacted, so acknowledging it claims nothing unseen. When an event
+was redacted more than once, the read reports the redaction that arrived last,
+so a single receipt covers all of them.
+
+The rule is still the client's to apply, and the server still sends the id it
+is given unchanged. The server now supplies one more fact, as it already does
+with `arrival_order`. It still does not infer what the client displayed.
+
+Not covered: a redaction whose target is not loaded, other folded relations
+(edits, reactions, and redactions of those), and redactions of thread replies,
+which the room view does not display. These are recorded in #1273.

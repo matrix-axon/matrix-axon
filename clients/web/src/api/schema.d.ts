@@ -3151,7 +3151,24 @@ export interface components {
                 } | null;
                 /** @description `true` when this event has been redacted (content/body masked). */
                 redacted: boolean;
-                /** @description The `event_id` of the redaction that masked this event, if redacted. */
+                /**
+                 * Format: int64
+                 * @description The [`arrival_order`](Self::arrival_order) of
+                 *     [`redaction_event_id`](Self::redaction_event_id), set exactly when it is.
+                 *
+                 *     Timeline reads strip bare `m.room.redaction` events and fold each onto the
+                 *     event it redacted, so this is the only place a client learns where a
+                 *     redaction arrived. A client that may name this event in a read receipt
+                 *     may name its redaction too: everything the redaction did is visible on
+                 *     this event. Without that, a trailing redaction that the homeserver counts
+                 *     as a notification (a room rule set to notify on every event counts
+                 *     redactions) can never be acknowledged (#1273, ADR 0089).
+                 */
+                redaction_arrival_order?: number | null;
+                /**
+                 * @description The `event_id` of the redaction that masked this event, if redacted.
+                 *     When several redactions match, the one that arrived last.
+                 */
                 redaction_event_id?: string | null;
                 /** @description The event's `m.relates_to` object, if any. */
                 relates_to?: Record<string, never> | null;
@@ -4095,7 +4112,24 @@ export interface components {
                 } | null;
                 /** @description `true` when this event has been redacted (content/body masked). */
                 redacted: boolean;
-                /** @description The `event_id` of the redaction that masked this event, if redacted. */
+                /**
+                 * Format: int64
+                 * @description The [`arrival_order`](Self::arrival_order) of
+                 *     [`redaction_event_id`](Self::redaction_event_id), set exactly when it is.
+                 *
+                 *     Timeline reads strip bare `m.room.redaction` events and fold each onto the
+                 *     event it redacted, so this is the only place a client learns where a
+                 *     redaction arrived. A client that may name this event in a read receipt
+                 *     may name its redaction too: everything the redaction did is visible on
+                 *     this event. Without that, a trailing redaction that the homeserver counts
+                 *     as a notification (a room rule set to notify on every event counts
+                 *     redactions) can never be acknowledged (#1273, ADR 0089).
+                 */
+                redaction_arrival_order?: number | null;
+                /**
+                 * @description The `event_id` of the redaction that masked this event, if redacted.
+                 *     When several redactions match, the one that arrived last.
+                 */
                 redaction_event_id?: string | null;
                 /** @description The event's `m.relates_to` object, if any. */
                 relates_to?: Record<string, never> | null;
@@ -5385,7 +5419,24 @@ export interface components {
             } | null;
             /** @description `true` when this event has been redacted (content/body masked). */
             redacted: boolean;
-            /** @description The `event_id` of the redaction that masked this event, if redacted. */
+            /**
+             * Format: int64
+             * @description The [`arrival_order`](Self::arrival_order) of
+             *     [`redaction_event_id`](Self::redaction_event_id), set exactly when it is.
+             *
+             *     Timeline reads strip bare `m.room.redaction` events and fold each onto the
+             *     event it redacted, so this is the only place a client learns where a
+             *     redaction arrived. A client that may name this event in a read receipt
+             *     may name its redaction too: everything the redaction did is visible on
+             *     this event. Without that, a trailing redaction that the homeserver counts
+             *     as a notification (a room rule set to notify on every event counts
+             *     redactions) can never be acknowledged (#1273, ADR 0089).
+             */
+            redaction_arrival_order?: number | null;
+            /**
+             * @description The `event_id` of the redaction that masked this event, if redacted.
+             *     When several redactions match, the one that arrived last.
+             */
             redaction_event_id?: string | null;
             /** @description The event's `m.relates_to` object, if any. */
             relates_to?: Record<string, never> | null;

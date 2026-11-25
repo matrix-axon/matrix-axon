@@ -12104,12 +12104,20 @@
                 "type": "boolean",
                 "description": "`true` when this event has been redacted (content/body masked)."
               },
+              "redaction_arrival_order": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "The [`arrival_order`](Self::arrival_order) of\n[`redaction_event_id`](Self::redaction_event_id), set exactly when it is.\n\nTimeline reads strip bare `m.room.redaction` events and fold each onto the\nevent it redacted, so this is the only place a client learns where a\nredaction arrived. A client that may name this event in a read receipt\nmay name its redaction too: everything the redaction did is visible on\nthis event. Without that, a trailing redaction that the homeserver counts\nas a notification (a room rule set to notify on every event counts\nredactions) can never be acknowledged (#1273, ADR 0089)."
+              },
               "redaction_event_id": {
                 "type": [
                   "string",
                   "null"
                 ],
-                "description": "The `event_id` of the redaction that masked this event, if redacted."
+                "description": "The `event_id` of the redaction that masked this event, if redacted.\nWhen several redactions match, the one that arrived last."
               },
               "relates_to": {
                 "type": [
@@ -13962,12 +13970,20 @@
                   "type": "boolean",
                   "description": "`true` when this event has been redacted (content/body masked)."
                 },
+                "redaction_arrival_order": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64",
+                  "description": "The [`arrival_order`](Self::arrival_order) of\n[`redaction_event_id`](Self::redaction_event_id), set exactly when it is.\n\nTimeline reads strip bare `m.room.redaction` events and fold each onto the\nevent it redacted, so this is the only place a client learns where a\nredaction arrived. A client that may name this event in a read receipt\nmay name its redaction too: everything the redaction did is visible on\nthis event. Without that, a trailing redaction that the homeserver counts\nas a notification (a room rule set to notify on every event counts\nredactions) can never be acknowledged (#1273, ADR 0089)."
+                },
                 "redaction_event_id": {
                   "type": [
                     "string",
                     "null"
                   ],
-                  "description": "The `event_id` of the redaction that masked this event, if redacted."
+                  "description": "The `event_id` of the redaction that masked this event, if redacted.\nWhen several redactions match, the one that arrived last."
                 },
                 "relates_to": {
                   "type": [
@@ -16688,12 +16704,20 @@
             "type": "boolean",
             "description": "`true` when this event has been redacted (content/body masked)."
           },
+          "redaction_arrival_order": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The [`arrival_order`](Self::arrival_order) of\n[`redaction_event_id`](Self::redaction_event_id), set exactly when it is.\n\nTimeline reads strip bare `m.room.redaction` events and fold each onto the\nevent it redacted, so this is the only place a client learns where a\nredaction arrived. A client that may name this event in a read receipt\nmay name its redaction too: everything the redaction did is visible on\nthis event. Without that, a trailing redaction that the homeserver counts\nas a notification (a room rule set to notify on every event counts\nredactions) can never be acknowledged (#1273, ADR 0089)."
+          },
           "redaction_event_id": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The `event_id` of the redaction that masked this event, if redacted."
+            "description": "The `event_id` of the redaction that masked this event, if redacted.\nWhen several redactions match, the one that arrived last."
           },
           "relates_to": {
             "type": [

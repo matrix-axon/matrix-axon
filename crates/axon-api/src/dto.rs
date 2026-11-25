@@ -479,7 +479,19 @@ pub struct EventDto {
     /// `true` when this event has been redacted (content/body masked).
     pub redacted: bool,
     /// The `event_id` of the redaction that masked this event, if redacted.
+    /// When several redactions match, the one that arrived last.
     pub redaction_event_id: Option<String>,
+    /// The [`arrival_order`](Self::arrival_order) of
+    /// [`redaction_event_id`](Self::redaction_event_id), set exactly when it is.
+    ///
+    /// Timeline reads strip bare `m.room.redaction` events and fold each onto the
+    /// event it redacted, so this is the only place a client learns where a
+    /// redaction arrived. A client that may name this event in a read receipt
+    /// may name its redaction too: everything the redaction did is visible on
+    /// this event. Without that, a trailing redaction that the homeserver counts
+    /// as a notification (a room rule set to notify on every event counts
+    /// redactions) can never be acknowledged (#1273, ADR 0089).
+    pub redaction_arrival_order: Option<i64>,
     /// Sender-device trust snapshot at decrypt time (M7c): `verified`,
     /// `unverified`, `unknown`, `verification_violation`, or
     /// `mismatched_sender` (the Megolm session belongs to a user other than
@@ -544,6 +556,7 @@ impl From<axon_core::LiveEvent> for EventDto {
             relates_to: e.relates_to,
             redacted: false,
             redaction_event_id: None,
+            redaction_arrival_order: None,
             sender_trust: e.sender_trust,
             utd_reason: e.utd_reason.map(UtdReasonDto::from),
             // A live frame is a raw, pre-aggregation event: edits/reactions arrive
@@ -667,6 +680,7 @@ impl EventDto {
             relates_to: row.relates_to,
             redacted: row.redaction_event_id.is_some(),
             redaction_event_id: row.redaction_event_id,
+            redaction_arrival_order: row.redaction_arrival_order,
             sender_trust: row.sender_trust,
             utd_reason: row.utd_reason.map(UtdReasonDto::from),
             edited: row.edited,
