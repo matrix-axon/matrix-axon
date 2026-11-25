@@ -61,7 +61,7 @@ Failed preflight releases every claim and clears the provisional reservation for
 Disconnecting the client leaves the admission task responsible for completing these steps.
 
 A supervised worker claims each committed job once through a DB state transition.
-On a restart, requeue work that was durably accepted and has yet to reach event dispatch.
+On a restart, requeue work that was durably accepted and has yet to reach event dispatch, applying the queue deadline in section 5.
 Restart the upload from byte zero, redoing encryption if necessary.
 An upload whose response was lost may leave an unreferenced object at the homeserver, which follows the homeserver's media retention policy.
 Before enabling admission or workers at boot, release every abandoned provisional attempt's claims and delete its reservation in a single transaction.
@@ -71,7 +71,7 @@ Only committed jobs enter the recovery queue and count toward the initial admiss
 The existing reset of stale `sending` upload rows still releases legacy claims and preserves the claims of accepted jobs.
 Settle job state and upload ownership in a single DB transaction, with idempotent filesystem cleanup and startup recovery for files whose unlink was interrupted.
 Consume the originals and any client thumbnails or preview images on `sent`.
-Release them for retry with the ordinary staging TTL on a confirmed failure.
+Release them on a confirmed failure, with the short retry retention in section 6.
 Consume them after the active worker settles `outcome_unknown`, as another event dispatch for that send is unsafe and reconciliation needs only its identifying metadata.
 The staging sweeper and explicit upload deletion respect accepted job ownership.
 A worker resumes only under the original Matrix identity and device.
@@ -84,6 +84,9 @@ A restart during preparation requeues the accepted attempt.
 Commit a dispatch marker immediately before the prepared room-event `PUT` can reach the transport.
 Matrix SDK 0.19.1 runs preparation and dispatch inside one [`Room::send`](https://docs.rs/matrix-sdk/0.19.1/matrix_sdk/room/struct.Room.html#method.send) future, so the async path needs a narrow SDK hook at the final request boundary.
 Use an upstream SDK hook or carry a pinned patch that exposes this boundary while sharing the SDK's existing preparation path.
+Verify both options in the [SDK feasibility spike](https://github.com/matrix-axon/matrix-axon/issues/1260) before implementing asynchronous send.
+If a pinned patch is needed, assign an `axon-sync` maintainer to upstream it and revalidate it on SDK upgrades.
+If neither option can guarantee the boundary, revise this design before implementing or advertising asynchronous send.
 Run the hook for the final room-event request only, after serialization and before handing the request to the transport.
 The hook must commit the marker successfully for the current attempt before the transport may proceed.
 Use a server-derived Matrix transaction ID (`axon-media-async-<send_id>-<attempt>`) and pass it via `with_transaction_id`.
@@ -164,14 +167,23 @@ No event is sent when the original's upload fails.
 Reuse ADR 0142 § 6's hand-built content and SDK event send for every relation shape, including normal replies, thread members and replies in threads.
 Keep the kind, filename, plain and formatted caption, dimensions, duration, reply mentions, thumbnail and bundled link previews.
 Use `url` and `thumbnail_url` in plain rooms and `file` and `thumbnail_file` in encrypted rooms.
-Recheck encryption state before building the event for dispatch.
-If a room becomes encrypted during a plain upload, rebuild the media sources using encryption before dispatching the event.
+Use the SDK's room encryption state as the source of truth for both uploads and the event.
+Use its first reading to choose how to upload, then have SDK event preparation expose the exact encryption decision it uses to build the room event.
+Proceed to the dispatch marker only if the prepared event and all its media sources agree with that decision.
+If SDK preparation sees that the room gained encryption during a plain upload, discard the prepared content and re-upload the original and any attached thumbnails and bundled preview images as ciphertext.
+Leave the earlier plaintext objects unreferenced under the homeserver's retention policy.
+Rebuild the content with encrypted media descriptors and prepare the event again before committing the dispatch marker.
+For sending, encryption stays enabled once the SDK has observed it, as described in the [Matrix encryption guide](https://matrix.org/docs/matrix-concepts/end-to-end-encryption/#handling-an-m-room-encryption-state-event).
+If preparation ever reports plaintext for a room already known to be encrypted, fail before dispatch and keep the media encrypted.
 The original's upload can run alongside bounded image thumbnail generation.
 A rejected thumbnail upload still permits sending the original under ADR 0142 § 6.
 
 ### 5. Bound stalled transfers and resource use
 
-Give the upstream request a fixed connection bound (10 s initially, including DNS and TLS), a body stall bound (`media.upstream_upload_stall_timeout_secs`, default 60 s), and a fixed bound after the last body byte for the response headers and small response body (60 s initially).
+Give the upstream request a fixed connection bound (10 s initially, including DNS and TLS) and a body stall bound (`media.upstream_upload_stall_timeout_secs`, default 60 s).
+After the last body byte is handed to the transport, use `media.upstream_upload_response_timeout_secs` (default 60 s) for the response headers and complete bounded response body.
+Operators can raise the response deadline for homeservers and storage providers that take longer to finalize large media.
+Expiration while uploading the original is a definite pre-dispatch failure and is retryable, even if the homeserver finished storing an unreferenced object.
 Run the stall watchdog outside the body producer, so the timer still runs when the transport stops polling the body.
 Reset it only on nonempty body chunks pulled by the backpressured transport.
 This measures progress at the HTTP stack, which can lead the peer by the size of fixed transport and socket buffers.
@@ -191,6 +203,9 @@ Before rollout, verify any reverse proxy on either leg also allows the chosen si
 Staging writers and upstream workers have separate limits (`media.max_concurrent_uploads` and new `media.max_concurrent_upstream_uploads`, both default four).
 Both send routes use the upstream pool, and the synchronous route's existing deadline includes waiting for a permit.
 Allow at most 16 asynchronous sends globally in validation, queued or running at once, and schedule queued work across accounts in turn.
+An asynchronous attempt that waits in the queue for 15 minutes without a worker settles as a retryable pre-dispatch failure and releases its claims under section 6.
+Persist the queue deadline so a restart preserves it for an already queued attempt.
+An interrupted worker that requeues pre-dispatch work starts a new queue wait.
 Return `503` with `Retry-After` when admission is full, before claiming any files.
 A retry looking up an already accepted send uses no additional slot.
 Keep DB transactions short and release connections before file decoding and network work.
@@ -213,12 +228,18 @@ Use the same effective value in staging and recheck the latest known cap before 
 Give buffered consumers such as room and profile avatars independent claim ceilings with the current 100 MiB default at most, and preserve existing tighter preview and thumbnail limits.
 An upstream `413` is a definite upload failure, before any event dispatch.
 
-Set the final default `media.max_upload_bytes` to **1 GiB (1,073,741,824 bytes)** after the client transport prerequisites below.
+Set the final default `media.max_upload_bytes` to **1 GiB (1,073,741,824 bytes)** after the client transport prerequisites and the synchronous-client compatibility gate in Delivery and verification.
 Keep the current 100 MiB default in the earlier server releases and preserve explicit operator settings.
 Four staging writers can take up to 4 GiB at the final default.
 The writer limit alone permits an arbitrary backlog of completed and claimed files.
 Add a global `media.max_staged_upload_bytes` budget, defaulting to `max_concurrent_uploads × max_upload_bytes`, with checked arithmetic.
 Count incomplete writes, staged files and accepted claims until their bytes leave disk, including normalized thumbnail files when persisted.
+The budget is shared across accounts and paths, so a handful of large jobs can temporarily exhaust it for both asynchronous and synchronous clients.
+Keep active claims through a progressing transfer, and apply section 5's deadline to attempts still waiting for a worker.
+On confirmed asynchronous failure, cap the retained staged files' expiry at the earlier of their existing expiry and 15 minutes after failure.
+Clean up any derived files that cannot be reused when settling the attempt.
+The expiry sweeper reclaims those files on its next pass, within five minutes under normal operation, and explicit deletion can release them sooner.
+An eligible retry after expiry can stage replacement files for the same logical send.
 Reserve from the budget before writing, incrementally for unknown-length bodies.
 If the budget is full, return `503` with code `service_unavailable` and the message `staged upload budget is full`.
 The generated-thumbnail quota keeps its existing error message.
@@ -237,15 +258,19 @@ Document how the staging budget competes for space with the separate media cache
 
 1. **Design** ([1206](https://github.com/matrix-axon/matrix-axon/issues/1206)). This ADR.
 2. **Server limit discovery** ([1210](https://github.com/matrix-axon/matrix-axon/issues/1210)). Ship the account field and enforce it in staging at the current default. Cover a lower local cap, a lower upstream cap, missing and stale data, and a rejected body with an inaccurate or absent length.
-3. **Server async send and streaming** ([1185](https://github.com/matrix-axon/matrix-axon/issues/1185)). Build on ADR 0142's shared send path after the metadata and thumbnail server steps.
+3. **SDK dispatch feasibility** ([1260](https://github.com/matrix-axon/matrix-axon/issues/1260)). Prove that event preparation exposes its encryption choice and that the final request waits for a successful marker write. Compare an upstream hook with a maintained pinned patch and record the patch owner if needed.
+4. **Server async send and streaming** ([1185](https://github.com/matrix-axon/matrix-axon/issues/1185)). Build on ADR 0142's shared send path after the metadata and thumbnail server steps and the SDK feasibility spike.
    - Test immediate `400`s, partial-claim rollback, disconnect and process death during validation of an initial POST and a retry. Verify the next POST can reclaim the same transaction and that abandoned reservations free capacity.
    - Exercise concurrent duplicate POSTs, a lost `202` on any attempt, replacement staged IDs, and stale or conflicting retry selectors. Verify an unknown send cannot allocate another attempt even when `retry_of` names its current attempt.
    - Exercise encryption setup failure, process death during key preparation, process death immediately after committing the dispatch marker, and success with a lost Matrix response. Assert at most one event across crash and replay cases with upstream transaction deduplication disabled.
    - Recover after losing WebSocket updates and exercise both logout outcomes. Confirm a matching sync event can resolve the send during the bounded drain, and an unresolved send closes permanently and retires its persisted echo even if a new device later sees the event.
-   - Test plaintext and encrypted uploads, decryption and hashes, all relation shapes, and preview and thumbnail failure. Measure peak memory with a 500 MB file and with the worker pool full, including a slow reader.
-   - Verify ingress and egress stall cancellation, a progressing upload exceeding the former deadline, the staging quota's own `503` message, and capacity and file cleanup after restart. Exercise the legacy response with existing clients.
-4. **Shell upload transport** ([921](https://github.com/matrix-axon/matrix-axon/issues/921)) and **web upload progress and stall handling** ([422](https://github.com/matrix-axon/matrix-axon/issues/422)). Stream slices through the native bridge with backpressure and cancellation. Use browser upload progress on the staging leg, using XHR where necessary, and show the subsequent async send state from the server. Confirm bounded memory on Android and iOS before lifting their cap.
-5. **Web adoption and limit rollout** ([1211](https://github.com/matrix-axon/matrix-axon/issues/1211)). Use the account limit and async capability where present and keep 100 MiB as the older-server fallback. Give blob previews and retained attachment batches independent budgets. Verify a 500 MB video on desktop, iPhone browser and packaged mobile shells, and playback through an [ADR 0139](0139-stream-large-video-and-audio.md) stream ticket. Raise the server default in a server-only change after the clients are ready. The TUI can honor a lower advertised cap and keeps its current ceiling and synchronous send contract until it has bounded upload transport and adopts the async capability.
+   - Test plaintext and encrypted uploads, decryption and hashes, all relation shapes, and preview and thumbnail failure. Enable encryption mid-upload and verify that the single dispatched event refers only to encrypted media, with a simulated SDK downgrade failing before dispatch. Measure peak memory with a 500 MB file and with the worker pool full, including a slow reader.
+   - Verify ingress and egress stall cancellation, a progressing upload exceeding the former deadline, and a homeserver finalization delay that succeeds with a longer response timeout. Show that a response timeout is retryable and produces zero room-event PUTs.
+   - Fill the staging budget with queued and failed jobs, restart, and verify that queue expiry, shorter retry retention and the sweeper restore capacity. Exercise the staging quota's own `503` message and the legacy response with existing clients.
+5. **Shell upload transport** ([921](https://github.com/matrix-axon/matrix-axon/issues/921)) and **web upload progress and stall handling** ([422](https://github.com/matrix-axon/matrix-axon/issues/422)). Stream slices through the native bridge with backpressure and cancellation. Use browser upload progress on the staging leg, using XHR where necessary, and show the subsequent async send state from the server. Confirm bounded memory on Android and iOS before lifting their cap.
+6. **Web adoption and limit rollout** ([1211](https://github.com/matrix-axon/matrix-axon/issues/1211)). Use the account limit and async capability where present and keep 100 MiB as the older-server fallback. Give blob previews and retained attachment batches independent budgets. Verify a 500 MB video on desktop, iPhone browser and packaged mobile shells, and playback through an [ADR 0139](0139-stream-large-video-and-audio.md) stream ticket.
+   - Keep the 100 MiB server default until issue 1211 selects and verifies how synchronous-only clients are protected from accepting uploads they cannot send within their wall-clock deadline. Exercise older TUI and web clients against a server configured for 1 GiB and verify that new async clients can use the higher limit.
+   - Raise the default in a server-only change after the compatibility gate and client transport work are complete. The TUI can honor a lower advertised cap and keeps its current ceiling and synchronous send contract until it has bounded upload transport and adopts the async capability.
 
 Keep server, shell and client work in their respective silos.
 Update OpenAPI and generated contracts with API changes, the server configuration reference and environment examples with new settings, and client parity and demo coverage where behavior changes.
