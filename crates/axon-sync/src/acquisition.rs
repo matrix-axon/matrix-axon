@@ -130,6 +130,7 @@ fn frame_source(job: RoomDetailJob) -> RoomDetailSource {
             RoomDetailSource::HomeserverDetails
         }
         RoomDetailJob::Hierarchy => RoomDetailSource::SpaceHierarchy,
+        RoomDetailJob::BrowseHierarchy => RoomDetailSource::SpaceBrowse,
         RoomDetailJob::Summary => RoomDetailSource::Discovery,
     }
 }
@@ -800,7 +801,14 @@ impl<U: Upstream> Worker<U> {
             }
         };
         match job {
-            RoomDetailJob::Hierarchy => self.run_hierarchy(room_id, epoch).await,
+            RoomDetailJob::Hierarchy | RoomDetailJob::BrowseHierarchy => {
+                let depth = if job == RoomDetailJob::Hierarchy {
+                    axon_store::HierarchyDepth::Direct
+                } else {
+                    axon_store::HierarchyDepth::Nested
+                };
+                self.run_hierarchy(room_id, epoch, depth).await
+            }
             // Returned above, before any membership read.
             RoomDetailJob::Summary => ran,
             RoomDetailJob::LocalAliases | RoomDetailJob::DirectoryVisibility => {

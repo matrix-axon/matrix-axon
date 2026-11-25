@@ -37,7 +37,7 @@ pub struct SpaceGraphPage {
 
 // Scalar lookups keep eligibility checks off the graph scan's join tree so the
 // ordered, limited scan can stop as soon as it has a page of eligible links.
-fn visible_joined_room(room_id: &str) -> String {
+pub(crate) fn visible_joined_room(room_id: &str) -> String {
     let joined = joined_child("summary.room_id");
     format!(
         "(SELECT NOT summary.hidden_left AND NOT summary.hidden_tombstoned AND {joined}

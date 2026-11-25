@@ -3,7 +3,7 @@
 //! A crawl is a sequence of [`axon_core::RoomDetailJob::Hierarchy`] jobs, one page each,
 //! on the account's acquisition worker. Each job asks the store where the
 //! crawl stands, sends one `GET /_matrix/client/v1/rooms/{space}/hierarchy`
-//! with `max_depth=1`, and records the page; the worker then queues the next
+//! with the crawl's fixed depth, and records the page. The worker queues the next
 //! page behind whatever is already waiting.
 //!
 //! Entries are validated field by field: a field that fails is withheld and
@@ -11,8 +11,13 @@
 //! counts and categories, never names, topics, aliases, bodies, or tokens.
 use std::time::Duration;
 
-use axon_store::{CrawlBegin, CrawlLimits, CrawlStep, CrawlWrite, DiscoveredEntry};
-use matrix_sdk::ruma::{OwnedMxcUri, OwnedRoomAliasId, OwnedRoomId, RoomId};
+use axon_store::{
+    CrawlBegin, CrawlLimits, CrawlPosition, CrawlStep, CrawlWrite, DiscoveredEntry, HierarchyDepth,
+    SPACE_BROWSE_MAX_DEPTH, SPACE_BROWSE_TTL,
+};
+use matrix_sdk::ruma::{
+    OwnedMxcUri, OwnedRoomAliasId, OwnedRoomId, OwnedServerName, OwnedUserId, RoomId,
+};
 use serde_json::{Map, Value};
 
 use super::CONCLUSIVE_DENIAL_TTL;
@@ -45,12 +50,19 @@ pub(crate) const MAX_TOKEN_BYTES: usize = 1024;
 /// The spec's limit on a room id.
 const MAX_ROOM_ID_BYTES: usize = 255;
 
-pub(crate) fn limits() -> CrawlLimits {
+pub(crate) fn limits(depth: HierarchyDepth) -> CrawlLimits {
     CrawlLimits {
+        depth,
         page_limit: PAGE_LIMIT,
-        max_pages: MAX_PAGES,
+        max_pages: match depth {
+            HierarchyDepth::Direct => MAX_PAGES,
+            HierarchyDepth::Nested => 12,
+        },
         max_cursor_restarts: MAX_CURSOR_RESTARTS,
-        crawl_ttl_ms: ms(CRAWL_TTL),
+        crawl_ttl_ms: ms(match depth {
+            HierarchyDepth::Direct => CRAWL_TTL,
+            HierarchyDepth::Nested => SPACE_BROWSE_TTL,
+        }),
         min_backoff_ms: ms(FAILURE_BACKOFF_MIN),
         max_backoff_ms: ms(FAILURE_BACKOFF_MAX),
     }
@@ -111,7 +123,7 @@ impl Field {
 pub(crate) fn parse_entry(entry: &Value) -> Option<DiscoveredEntry> {
     let object = entry.as_object()?;
     let room_id = object.get("room_id")?.as_str()?;
-    if room_id.len() > MAX_ROOM_ID_BYTES || OwnedRoomId::try_from(room_id).is_err() {
+    if !valid_room_id(room_id) {
         return None;
     }
     let mut summary = Map::new();
@@ -129,17 +141,66 @@ pub(crate) fn parse_entry(entry: &Value) -> Option<DiscoveredEntry> {
         room_id: room_id.to_owned(),
         summary: Value::Object(summary),
         withheld,
+        children: Map::new(),
     })
+}
+
+fn valid_room_id(id: &str) -> bool {
+    id.len() <= MAX_ROOM_ID_BYTES
+        && !id.bytes().any(|byte| byte.is_ascii_control())
+        && OwnedRoomId::try_from(id).is_ok()
+}
+
+fn child_link(event: &Value) -> Option<(&str, Value)> {
+    let child = event.get("state_key")?.as_str()?;
+    let sender = event.get("sender")?.as_str()?;
+    let origin_ts = event.get("origin_server_ts")?.as_u64()?;
+    let content = event.get("content")?.as_object()?;
+    let via = content.get("via")?.as_array()?;
+    if event.get("type")?.as_str()? != "m.space.child"
+        || !valid_room_id(child)
+        || sender.len() > MAX_SHORT_BYTES
+        || sender.bytes().any(|byte| byte.is_ascii_control())
+        || OwnedUserId::try_from(sender).is_err()
+        || origin_ts > 9_007_199_254_740_991
+        || via.is_empty()
+        || !via.iter().all(|value| {
+            value.as_str().is_some_and(|server| {
+                server.len() <= MAX_SHORT_BYTES
+                    && !server.bytes().any(|byte| byte.is_ascii_control())
+                    && OwnedServerName::try_from(server).is_ok()
+            })
+        })
+    {
+        return None;
+    }
+    let order = content
+        .get("order")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            value.len() <= 50 && value.bytes().all(|byte| (b' '..=b'~').contains(&byte))
+        });
+    Some((
+        child,
+        serde_json::json!({
+            "order": order,
+            "origin_ts": origin_ts,
+            "suggested": content.get("suggested").and_then(Value::as_bool).unwrap_or(false),
+        }),
+    ))
 }
 
 /// A `200` hierarchy body as a page, or `None` when its shape is wrong: no
 /// `rooms` array, or a `next_batch` that is not a usable token (empty, over
 /// [`MAX_TOKEN_BYTES`], or carrying a U+0000 PostgreSQL cannot store). The
-/// requested space's own entry is skipped; `children_state` and every other
-/// unknown field are ignored.
-pub(crate) fn parse_page(body: &[u8], space_id: &str) -> Option<CrawlStep> {
+/// requested space's own entry is skipped. Nested browsing also validates
+/// stripped child events for returned spaces.
+fn parse_page(body: &[u8], space_id: &str, depth: HierarchyDepth) -> Option<CrawlStep> {
     let body: Value = serde_json::from_slice(body).ok()?;
     let rooms = body.get("rooms")?.as_array()?;
+    if depth == HierarchyDepth::Nested && rooms.len() > PAGE_LIMIT as usize {
+        return None;
+    }
     let next_batch = match body.get("next_batch") {
         None | Some(Value::Null) => None,
         Some(Value::String(token))
@@ -151,10 +212,28 @@ pub(crate) fn parse_page(body: &[u8], space_id: &str) -> Option<CrawlStep> {
     };
     let mut entries = Vec::with_capacity(rooms.len());
     let mut unidentified = 0_i32;
-    for entry in rooms {
-        match parse_entry(entry) {
+    for raw in rooms {
+        match parse_entry(raw) {
             Some(entry) if entry.room_id == space_id => {}
-            Some(entry) => entries.push(entry),
+            Some(mut entry) => {
+                if depth == HierarchyDepth::Nested
+                    && entry.summary.get("room_type").and_then(Value::as_str) == Some("m.space")
+                {
+                    for event in raw
+                        .get("children_state")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                    {
+                        if let Some((id, link)) =
+                            child_link(event).filter(|(id, _)| *id != entry.room_id)
+                        {
+                            entry.children.entry(id.to_owned()).or_insert(link);
+                        }
+                    }
+                }
+                entries.push(entry);
+            }
             None => unidentified = unidentified.saturating_add(1),
         }
     }
@@ -174,14 +253,19 @@ fn failure(category: &'static str, retry_after_ms: Option<i64>) -> CrawlStep {
 
 /// What the crawl records for `reply`. `resumed` says the request carried a
 /// `from` token, so `M_INVALID_PARAM` means the session expired.
-pub(crate) fn interpret(reply: Reply, space_id: &str, resumed: bool) -> CrawlStep {
+fn interpret_for_depth(
+    reply: Reply,
+    space_id: &str,
+    resumed: bool,
+    depth: HierarchyDepth,
+) -> CrawlStep {
     match reply {
         Reply::Failed(NoAnswer::Timeout) => failure("timeout", None),
         Reply::Failed(NoAnswer::Transport) => failure("transport", None),
         Reply::Failed(NoAnswer::Unauthorized) => failure("unauthorized", None),
         Reply::TooLarge => CrawlStep::TooLarge,
         Reply::Ok(body) => {
-            parse_page(&body, space_id).unwrap_or_else(|| failure("invalid_response", None))
+            parse_page(&body, space_id, depth).unwrap_or_else(|| failure("invalid_response", None))
         }
         Reply::Status {
             status,
@@ -223,10 +307,19 @@ fn step_label(step: &CrawlStep) -> &'static str {
 impl<U: Upstream> Worker<U> {
     /// Run one page of `space_id`'s crawl, fenced by the membership `epoch`
     /// the job started in.
-    pub(super) async fn run_hierarchy(&mut self, space_id: &RoomId, epoch: i64) -> Ran {
+    pub(super) async fn run_hierarchy(
+        &mut self,
+        space_id: &RoomId,
+        epoch: i64,
+        depth: HierarchyDepth,
+    ) -> Ran {
         let account_id = self.account_id;
+        let kind = match depth {
+            HierarchyDepth::Direct => "hierarchy",
+            HierarchyDepth::Nested => "nested_hierarchy",
+        };
         let mut ran = Ran::default();
-        let limits = limits();
+        let limits = limits(depth);
         let position = match self
             .store
             .begin_space_crawl(account_id, space_id.as_str(), epoch, limits)
@@ -235,18 +328,23 @@ impl<U: Upstream> Worker<U> {
             Ok(CrawlBegin::Page(position)) => position,
             Ok(CrawlBegin::NotDue) => return ran,
             Ok(CrawlBegin::Fenced) => {
-                tracing::debug!(target: "axon_sync::acquisition", %account_id, room_id = %space_id, kind = "hierarchy", outcome = "not_joined", "skipped space hierarchy page");
+                tracing::debug!(target: "axon_sync::acquisition", %account_id, room_id = %space_id, kind, outcome = "not_joined", "skipped space hierarchy page");
                 return ran;
             }
             Err(error) => {
-                tracing::warn!(target: "axon_sync::acquisition", %account_id, room_id = %space_id, kind = "hierarchy", reason = error.diagnostic_reason(), "space hierarchy crawl could not read its state");
+                tracing::warn!(target: "axon_sync::acquisition", %account_id, room_id = %space_id, kind, reason = error.diagnostic_reason(), "space hierarchy crawl could not read its state");
                 ran.local_failure = true;
                 return ran;
             }
         };
         let limit = position.page_limit.to_string();
+        let max_depth = match depth {
+            HierarchyDepth::Direct => 1,
+            HierarchyDepth::Nested => SPACE_BROWSE_MAX_DEPTH,
+        }
+        .to_string();
         let mut query = vec![
-            ("max_depth", "1"),
+            ("max_depth", max_depth.as_str()),
             ("suggested_only", "false"),
             ("limit", limit.as_str()),
         ];
@@ -263,7 +361,7 @@ impl<U: Upstream> Worker<U> {
                 timeout: HIERARCHY_TIMEOUT,
             })
             .await;
-        let step = interpret(reply, space_id.as_str(), position.from.is_some());
+        let step = interpret_for_depth(reply, space_id.as_str(), position.from.is_some(), depth);
         let label = step_label(&step);
         let (returned, withheld_fields, unidentified) = match &step {
             CrawlStep::Page {
@@ -296,7 +394,7 @@ impl<U: Upstream> Worker<U> {
         {
             Ok(write) => write,
             Err(error) => {
-                tracing::warn!(target: "axon_sync::acquisition", %account_id, room_id = %space_id, kind = "hierarchy", outcome = label, page, reason = error.diagnostic_reason(), "space hierarchy crawl could not record its page");
+                tracing::warn!(target: "axon_sync::acquisition", %account_id, room_id = %space_id, kind, outcome = label, page, reason = error.diagnostic_reason(), "space hierarchy crawl could not record its page");
                 ran.local_failure = true;
                 return ran;
             }
@@ -304,14 +402,15 @@ impl<U: Upstream> Worker<U> {
         log_page(
             account_id,
             space_id,
-            label,
-            elapsed_ms,
-            page,
-            position.page_limit,
-            position.restarts,
-            returned,
-            unidentified,
-            &withheld_fields,
+            kind,
+            &position,
+            PageStats {
+                label,
+                elapsed_ms,
+                returned,
+                unidentified,
+                withheld: &withheld_fields,
+            },
             &write,
         );
         if write.fenced {
@@ -324,21 +423,32 @@ impl<U: Upstream> Worker<U> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct PageStats<'a> {
+    label: &'static str,
+    elapsed_ms: u64,
+    returned: usize,
+    unidentified: i32,
+    withheld: &'a [&'a str],
+}
+
 fn log_page(
     account_id: uuid::Uuid,
     space_id: &RoomId,
-    label: &'static str,
-    elapsed_ms: u64,
-    page: i32,
-    page_limit: i32,
-    restarts: i32,
-    returned: usize,
-    unidentified: i32,
-    withheld: &[&str],
+    kind: &'static str,
+    position: &CrawlPosition,
+    stats: PageStats<'_>,
     write: &CrawlWrite,
 ) {
-    let kind = "hierarchy";
+    let PageStats {
+        label,
+        elapsed_ms,
+        returned,
+        unidentified,
+        withheld,
+    } = stats;
+    let page = position.pages + 1;
+    let page_limit = position.page_limit;
+    let restarts = position.restarts;
     let outcome = if write.fenced {
         "fenced"
     } else {
@@ -392,6 +502,10 @@ fn log_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn interpret(reply: Reply, space_id: &str, resumed: bool) -> CrawlStep {
+        interpret_for_depth(reply, space_id, resumed, HierarchyDepth::Direct)
+    }
     use serde_json::json;
 
     const SPACE: &str = "!space:localhost";

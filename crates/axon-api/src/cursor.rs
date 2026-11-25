@@ -227,6 +227,38 @@ pub fn decode_hierarchy(
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SpaceBrowseCursorWire {
+    scope: String,
+    parent: String,
+    child: String,
+}
+
+pub fn encode_space_browse(account_id: Uuid, root: &str, parent: &str, child: &str) -> String {
+    let wire = SpaceBrowseCursorWire {
+        scope: hierarchy_scope(account_id, root),
+        parent: parent.to_owned(),
+        child: child.to_owned(),
+    };
+    URL_SAFE_NO_PAD.encode(serde_json::to_vec(&wire).expect("space browse cursor serializes"))
+}
+
+pub fn decode_space_browse(account_id: Uuid, root: &str, cursor: &str) -> Option<(String, String)> {
+    if cursor.len() > MAX_HIERARCHY_ENCODED_LEN {
+        return None;
+    }
+    let bytes = URL_SAFE_NO_PAD.decode(cursor).ok()?;
+    let wire: SpaceBrowseCursorWire = serde_json::from_slice(&bytes).ok()?;
+    let valid = |id: &str| {
+        id.len() <= MAX_HIERARCHY_ROOM_ID_BYTES
+            && id.starts_with('!')
+            && !id.bytes().any(|b| b.is_ascii_control())
+    };
+    (wire.scope == hierarchy_scope(account_id, root) && valid(&wire.parent) && valid(&wire.child))
+        .then_some((wire.parent, wire.child))
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SpaceGraphCursorWire {
     a: Uuid,
     r: String,

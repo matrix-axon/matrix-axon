@@ -301,9 +301,11 @@ struct RoomDetailsFramePayload {
     /// `metadata` (`GET …/metadata`), `member_counts` (`GET …/info`),
     /// `homeserver_details` (`GET …/homeserver_details`),
     /// `space_hierarchy` (`GET …/space/hierarchy` of this room, a space),
-    /// `discovery` (`GET …/discovery` of this room, an unjoined room), and
-    /// `identity_changes` (`GET …/info`), and `space_graph` (the account's
-    /// `GET …/spaces/graph`), in that order.
+    /// `discovery` (`GET …/discovery` of this room, an unjoined room),
+    /// `identity_changes` (`GET …/info`), `space_graph` (the account's
+    /// `GET …/spaces/graph`), and `space_browse` (the root's
+    /// `GET …/space/browse` and the account's cached discovered memberships),
+    /// in that order.
     /// Clients ignore values they do not know. Route `space_graph` by the
     /// envelope's account ID alone. Its room ID names one affected room.
     sources: Vec<&'static str>,
@@ -319,6 +321,7 @@ fn room_detail_source(source: RoomDetailSource) -> &'static str {
         RoomDetailSource::Discovery => "discovery",
         RoomDetailSource::IdentityChanges => "identity_changes",
         RoomDetailSource::SpaceGraph => "space_graph",
+        RoomDetailSource::SpaceBrowse => "space_browse",
     }
 }
 
@@ -1070,6 +1073,7 @@ mod tests {
             account_id,
             room_id: "!r:localhost".to_owned(),
             sources: [
+                RoomDetailSource::SpaceBrowse,
                 RoomDetailSource::SpaceGraph,
                 RoomDetailSource::IdentityChanges,
                 RoomDetailSource::Discovery,
@@ -1084,7 +1088,7 @@ mod tests {
         assert_eq!(v["account_id"], account_id.to_string());
         assert_eq!(
             v["payload"],
-            serde_json::json!({"room_id": "!r:localhost", "sources": ["metadata", "member_counts", "homeserver_details", "space_hierarchy", "discovery", "identity_changes", "space_graph"]})
+            serde_json::json!({"room_id": "!r:localhost", "sources": ["metadata", "member_counts", "homeserver_details", "space_hierarchy", "discovery", "identity_changes", "space_graph", "space_browse"]})
         );
     }
 

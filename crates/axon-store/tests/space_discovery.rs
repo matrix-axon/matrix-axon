@@ -14,6 +14,7 @@ const SPACE_B: &str = "!space-b:localhost";
 const CHILD: &str = "!child:localhost";
 
 const LIMITS: CrawlLimits = CrawlLimits {
+    depth: axon_store::HierarchyDepth::Direct,
     page_limit: 50,
     max_pages: 40,
     max_cursor_restarts: 1,
@@ -109,6 +110,7 @@ async fn crawl(store: &Store, account_id: Uuid, space: &str, name: &str) {
                     room_id: CHILD.to_owned(),
                     summary: json!({ "name": name }),
                     withheld: Vec::new(),
+                    children: Default::default(),
                 }],
                 unidentified: 0,
                 next_batch: None,
@@ -288,6 +290,7 @@ async fn a_page_from_before_a_leave_and_rejoin_is_fenced_even_in_the_same_genera
                     room_id: CHILD.to_owned(),
                     summary: json!({ "name": "stale" }),
                     withheld: Vec::new(),
+                    children: Default::default(),
                 }],
                 unidentified: 0,
                 next_batch: None,

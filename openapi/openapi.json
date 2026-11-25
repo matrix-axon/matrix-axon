@@ -6288,6 +6288,175 @@
         }
       }
     },
+    "/v1/accounts/{account_id}/rooms/{room_id}/space/browse": {
+      "get": {
+        "tags": [
+          "rooms"
+        ],
+        "summary": "Read cached nested browse results",
+        "description": "Pages a joined root's fresh browse cache by parent and child room ID.\nUse the synced room list for joined room details. Restart from the first\npage on a `room_details.changed` frame with source `space_browse` for\nthis root or `space_graph` for this account. This read is local only.",
+        "operationId": "space_browse",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "path",
+            "description": "Joined root space id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 50, maximum 100).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque continuation from the preceding page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cached nested browse links and crawl progress",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_SpaceBrowsePageDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed room id or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "rooms"
+        ],
+        "summary": "Request nested discovery for a joined space",
+        "description": "Explicit browsing can queue a bounded background crawl. Axon returns\nimmediately. Poll the local GET or re-read on a live invalidation. A fresh\ncrawl, queued work, or backoff suppresses a duplicate request.",
+        "operationId": "request_space_browse",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "path",
+            "description": "Joined root space id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Nested browse crawl status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_SpaceDiscoveryDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed room id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No visible joined space at this root",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{account_id}/rooms/{room_id}/space/children": {
       "get": {
         "tags": [
@@ -7456,6 +7625,87 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiResponse_RoomUpgradeDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/spaces/discovered": {
+      "get": {
+        "tags": [
+          "rooms"
+        ],
+        "summary": "Read cached space memberships for the sidebar",
+        "description": "Lists joined descendants reached through fresh browsed unjoined paths.\nCombine this with the joined graph and room list. Use `expires_at` to\nremove stale memberships and restart paging on reconnect or on account\ninvalidations with source `space_graph` or `space_browse`. This read is\nlocal only, including when the cache is empty or expired.",
+        "operationId": "discovered_space_memberships",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 50, maximum 100).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque continuation from the preceding page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cached joined room memberships via unjoined spaces",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_DiscoveredSpaceMembershipPageDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -11488,6 +11738,35 @@
           }
         }
       },
+      "ApiResponse_DiscoveredSpaceMembershipPageDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": [
+              "memberships"
+            ],
+            "properties": {
+              "memberships": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/DiscoveredSpaceMembershipDto"
+                }
+              },
+              "next_cursor": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_EnableBackupResponseDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -12790,6 +13069,139 @@
               "event_id": {
                 "type": "string",
                 "description": "The created Matrix event id."
+              }
+            }
+          }
+        }
+      },
+      "ApiResponse_SpaceBrowsePageDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": [
+              "links",
+              "discovery"
+            ],
+            "properties": {
+              "discovery": {
+                "$ref": "#/components/schemas/SpaceDiscoveryDto"
+              },
+              "links": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SpaceBrowseLinkDto"
+                }
+              },
+              "next_cursor": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "ApiResponse_SpaceDiscoveryDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A space's discovery crawl (ADR 0128 decision 3). `state` lives in memory\nonly, so after a restart it is `idle`; everything else persists.",
+            "required": [
+              "state",
+              "pages",
+              "rooms_cached",
+              "support"
+            ],
+            "properties": {
+              "completed_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "Unix ms when the crawl ended `complete` or `truncated`."
+              },
+              "expires_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "Unix ms until which an ended crawl, a denial, or `unsupported` stands;\nan `enrich` read after it starts a new crawl."
+              },
+              "failure": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CrawlFailure",
+                    "description": "The last failure, or the limit a `truncated` crawl stopped at."
+                  }
+                ]
+              },
+              "next_attempt_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "Unix ms before which a failed crawl is not resumed."
+              },
+              "outcome": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CrawlOutcome",
+                    "description": "`null` when the space has never been crawled."
+                  }
+                ]
+              },
+              "page_limit": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "The rooms the crawl asks for per page; halved for the rest of a crawl\nafter a page over Axon's size limit. `null` before the first crawl."
+              },
+              "pages": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Pages the current crawl has committed."
+              },
+              "rooms_cached": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Children the current crawl has returned so far."
+              },
+              "started_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "Unix ms when the current crawl started from its first page."
+              },
+              "state": {
+                "$ref": "#/components/schemas/RefreshState",
+                "description": "Whether a page is waiting for, or using, the account's worker."
+              },
+              "support": {
+                "$ref": "#/components/schemas/CrawlSupport"
               }
             }
           }
@@ -15670,6 +16082,49 @@
           "world_readable": {
             "type": [
               "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "DiscoveredSpaceMembershipDto": {
+        "type": "object",
+        "required": [
+          "space_id",
+          "room_id",
+          "expires_at"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix milliseconds when the sidebar should stop using this membership."
+          },
+          "room_id": {
+            "type": "string",
+            "description": "A currently joined room reached through at least one unjoined space."
+          },
+          "space_id": {
+            "type": "string",
+            "description": "The joined space where browsing started."
+          }
+        }
+      },
+      "DiscoveredSpaceMembershipPageDto": {
+        "type": "object",
+        "required": [
+          "memberships"
+        ],
+        "properties": {
+          "memberships": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DiscoveredSpaceMembershipDto"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
               "null"
             ]
           }
@@ -18899,6 +19354,76 @@
         "properties": {
           "topic": {
             "type": "string"
+          }
+        }
+      },
+      "SpaceBrowseLinkDto": {
+        "type": "object",
+        "required": [
+          "parent_room_id",
+          "child_room_id",
+          "joined",
+          "origin_ts",
+          "suggested"
+        ],
+        "properties": {
+          "child_room_id": {
+            "type": "string"
+          },
+          "discovered": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DiscoveredRoomDto",
+                "description": "From this root's fresh homeserver crawl. Null for joined children."
+              }
+            ]
+          },
+          "joined": {
+            "type": "boolean",
+            "description": "Whether the account has joined the child. Use the synced room list for its display fields."
+          },
+          "order": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "origin_ts": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "parent_room_id": {
+            "type": "string"
+          },
+          "suggested": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SpaceBrowsePageDto": {
+        "type": "object",
+        "required": [
+          "links",
+          "discovery"
+        ],
+        "properties": {
+          "discovery": {
+            "$ref": "#/components/schemas/SpaceDiscoveryDto"
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SpaceBrowseLinkDto"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

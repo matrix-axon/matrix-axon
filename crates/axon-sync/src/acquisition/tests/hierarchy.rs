@@ -152,7 +152,7 @@ impl Fixture {
                 SPACE,
                 epoch,
                 generation,
-                super::super::hierarchy::limits(),
+                super::super::hierarchy::limits(axon_store::HierarchyDepth::Direct),
                 step,
             )
             .await
@@ -957,4 +957,131 @@ async fn a_nul_in_a_field_or_token_cannot_wedge_the_crawl() {
         ("failed", Some("invalid_response"), 1)
     );
     assert!(crawl.next_attempt_at.is_some());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn nested_browse_resolves_a_joined_room_via_an_unjoined_space() {
+    const BRANCH: &str = "!branch:localhost";
+    const LEAF: &str = "!leaf:localhost";
+    const HIDDEN: &str = "!hidden:localhost";
+    const UNLINKED: &str = "!unlinked:localhost";
+    let mut fx = fixture().await;
+    state(
+        &fx.store,
+        fx.account_id,
+        &fx.user,
+        "m.room.create",
+        "",
+        json!({"type":"m.space"}),
+    )
+    .await;
+    fx.link(BRANCH).await;
+    sqlx_core::query::query(
+        "INSERT INTO room_summaries (account_id, room_id, last_activity_ts, last_event_id, last_event_row_id, last_activity_is_content)
+         VALUES ($1, $2, 1, '$fixture', 1, false)",
+    )
+    .bind(fx.account_id).bind(LEAF).execute(fx.store.pool()).await.unwrap();
+    state_in(
+        &fx.store,
+        fx.account_id,
+        &fx.user,
+        LEAF,
+        "m.room.member",
+        &fx.user,
+        json!({"membership":"join"}),
+    )
+    .await;
+
+    let nested_path = |suffix: &str| {
+        format!("rooms/{SPACE}/hierarchy?max_depth=3&suggested_only=false&limit=50{suffix}")
+    };
+    let link = |id, via| {
+        json!({
+            "type": "m.space.child", "state_key": id, "sender": "@owner:localhost",
+            "origin_server_ts": 123, "content": {"via": via, "order": "A", "suggested": true}
+        })
+    };
+    fx.script.reply(nested_path(""), page(json!([
+        {"room_id": SPACE, "name": "Remote root", "room_type": "m.space",
+         "children_state": [link(UNLINKED, json!(["localhost"]))]},
+        {"room_id": BRANCH, "name": "Browsable branch", "room_type": "m.space",
+         "children_state": [link(LEAF, json!(["localhost"])), link(UNLINKED, json!(["!bad_host"])),
+                            link(HIDDEN, json!(["localhost"]))]},
+        child(UNLINKED, "Unlinked"),
+    ]), Some("next")));
+    fx.script.reply(
+        nested_path("&from=next"),
+        page(json!([child(LEAF, "Remote name")]), None),
+    );
+    fx.run(RoomDetailJob::BrowseHierarchy, true).await;
+    let browse = || fx.store.space_browse_links(fx.account_id, SPACE, None, 10);
+    assert_eq!(browse().await.unwrap().len(), 1);
+    let (room, job) = fx.worker.queue.next().await;
+    assert_eq!(job, RoomDetailJob::BrowseHierarchy);
+    fx.worker.step(&room, job).await;
+
+    let links = browse().await.unwrap();
+    assert_eq!(links.len(), 2);
+    let leaf = links
+        .iter()
+        .find(|link| link.child_room_id == LEAF)
+        .unwrap();
+    assert_eq!(leaf.parent_room_id, BRANCH);
+    assert_eq!(leaf.order.as_deref(), Some("A"));
+    assert!(leaf.suggested && leaf.joined && leaf.discovered.is_none());
+    let branch = links
+        .iter()
+        .find(|link| link.child_room_id == BRANCH)
+        .unwrap();
+    assert_eq!(branch.parent_room_id, SPACE);
+    assert_eq!(
+        branch
+            .discovered
+            .as_ref()
+            .unwrap()
+            .summary
+            .as_ref()
+            .unwrap()["name"],
+        "Browsable branch"
+    );
+    let store = fx.store.clone();
+    let account_id = fx.account_id;
+    let memberships = || store.discovered_space_memberships(account_id, None, 10);
+    let rows = memberships().await.unwrap();
+    assert_eq!(
+        (rows[0].space_id.as_str(), rows[0].room_id.as_str()),
+        (SPACE, LEAF)
+    );
+    assert_eq!(rows.len(), 1);
+    assert!(fx.snapshot().await.crawl.is_none());
+
+    fx.unlink(BRANCH).await;
+    assert!(memberships().await.unwrap().is_empty());
+    assert!(browse().await.unwrap().is_empty());
+    fx.link(BRANCH).await;
+    assert_eq!(memberships().await.unwrap().len(), 1);
+
+    // Freshness applies to a local read even when no further browse is requested.
+    sqlx_core::query::query(
+        "UPDATE space_browse_crawl SET started_at = 0, expires_at = 0 WHERE account_id = $1",
+    )
+    .bind(fx.account_id)
+    .execute(fx.store.pool())
+    .await
+    .unwrap();
+    assert!(memberships().await.unwrap().is_empty());
+    fx.script.reply(
+        nested_path(""),
+        page(json!([child(LEAF, "Unreachable")]), None),
+    );
+    fx.run(RoomDetailJob::BrowseHierarchy, true).await;
+    assert!(memberships().await.unwrap().is_empty());
+    assert!(fx
+        .store
+        .space_browse_links(fx.account_id, SPACE, None, 10)
+        .await
+        .unwrap()
+        .is_empty());
+    fx.store.delete_account_row(fx.account_id).await.unwrap();
 }
