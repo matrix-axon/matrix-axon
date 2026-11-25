@@ -23,5 +23,6 @@ pub async fn get_capabilities() -> ApiResponse<CapabilitiesDto> {
     ApiResponse::new(CapabilitiesDto {
         edit_url_previews: true,
         media_upload_kinds: MediaUploadKindDto::ALL.to_vec(),
+        send_media_thumbnails: true,
     })
 }

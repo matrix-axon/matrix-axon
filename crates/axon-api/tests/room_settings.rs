@@ -225,6 +225,10 @@ async fn set_avatar_claims_sends_and_completes_upload() {
                 content_type: Some("image/png".to_owned()),
                 size_bytes: 3,
                 bytes: b"abc".to_vec(),
+                width: None,
+                height: None,
+                duration_ms: None,
+                thumbnail: None,
             },
         }]
     );

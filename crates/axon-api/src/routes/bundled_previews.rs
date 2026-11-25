@@ -24,6 +24,7 @@ use crate::{
     uploads::StagedUploadService,
 };
 
+use super::media_send::{Claims, MediaFields, TxnGuard};
 use super::messages::formatted;
 
 static SEND_SLOTS: LazyLock<crate::AccountSlots> = LazyLock::new(crate::AccountSlots::default);
@@ -35,7 +36,7 @@ pub(super) struct Request {
     reply_to: Option<String>,
     thread_root: Option<String>,
     previews: Vec<LinkPreviewRequest>,
-    attachment_id: Option<Uuid>,
+    media: Option<MediaFields>,
 }
 
 impl From<SendMessageRequest> for Request {
@@ -47,13 +48,14 @@ impl From<SendMessageRequest> for Request {
             reply_to: r.reply_to,
             thread_root: r.thread_root,
             previews: r.url_previews.unwrap_or_default(),
-            attachment_id: None,
+            media: None,
         }
     }
 }
 
 impl From<SendMediaRequest> for Request {
     fn from(r: SendMediaRequest) -> Self {
+        let media = MediaFields::from(&r);
         Self {
             body: r.caption.unwrap_or_default(),
             format: r.format,
@@ -61,7 +63,7 @@ impl From<SendMediaRequest> for Request {
             reply_to: r.reply_to,
             thread_root: r.thread_root,
             previews: r.url_previews.unwrap_or_default(),
-            attachment_id: Some(r.upload_id),
+            media: Some(media),
         }
     }
 }
@@ -79,14 +81,15 @@ impl Request {
             body,
         })
     }
-    fn validate(&self) -> Result<(), ApiError> {
+    pub(super) fn validate(&self) -> Result<(), ApiError> {
         formatted(&self.format, &self.formatted_body)?;
-        if self.attachment_id.is_some() && self.body.is_empty() && self.formatted_body.is_some() {
+        if self.media.is_some() && self.body.is_empty() && self.formatted_body.is_some() {
             return Err(ApiError::bad_request("formatting requires a caption"));
         }
         let mut ids = HashSet::new();
-        if let Some(id) = self.attachment_id {
-            ids.insert(id);
+        if let Some(media) = &self.media {
+            media.validate()?;
+            ids.extend(media.upload_ids());
         }
         for p in &self.previews {
             if p.image_upload_id.is_some_and(|id| !ids.insert(id)) {
@@ -104,7 +107,7 @@ impl Request {
                 .iter()
                 .map(|p| (p.metadata(), p.image_upload_id.is_some()))
                 .collect::<Vec<_>>(),
-            self.attachment_id.is_some(),
+            self.media.is_some(),
         )
         .map_err(preview_error)
     }
@@ -120,18 +123,22 @@ fn preview_error(error: link_preview::PreviewError) -> ApiError {
     }
 }
 
+/// `txn` is the `send-media` request's `txn_id` guard, if it has one, which
+/// the task settles with the send (ADR 0142 section 4).
 pub(super) async fn send(
     sender: Arc<dyn MessageSender>,
     uploads: Arc<dyn StagedUploadService>,
     account_id: Uuid,
     room_id: String,
     request: Request,
+    txn: Option<TxnGuard>,
 ) -> Result<ApiResponse<crate::dto::SendResultDto>, ApiError> {
-    request.validate()?; // No upload claims or SDK work on invalid input.
-                         // Metadata-only text sends (including []) claim no bytes and bypass the
-                         // upload gate. They still emit the explicit preview field and share preflight.
-    let has_uploads = request.attachment_id.is_some()
-        || request.previews.iter().any(|p| p.image_upload_id.is_some());
+    // No upload claims or SDK work on invalid input.
+    request.validate()?;
+    // Metadata-only text sends (including []) claim no bytes and bypass the
+    // upload gate. They still emit the explicit preview field and share preflight.
+    let has_uploads =
+        request.media.is_some() || request.previews.iter().any(|p| p.image_upload_id.is_some());
     let permit = if has_uploads {
         Some(acquire_slot(account_id).await?)
     } else {
@@ -141,15 +148,15 @@ pub(super) async fn send(
         let _permit = permit;
         let started = std::time::Instant::now();
         tracing::debug!(%account_id, %room_id, preview_count = request.previews.len(), "preview-aware send started");
-        let mut claimed = Vec::new();
+        let mut claims = Claims::new(uploads.clone(), account_id, &room_id);
         let result = async {
-            let previews = claim_previews(&*uploads, account_id, &request.previews, &mut claimed).await?;
-            let attachment = if let Some(id) = request.attachment_id {
-                let upload = uploads.claim_upload(account_id, id).await?;
-                claimed.push(id);
-                Some(upload.into())
-            } else {
-                None
+            let previews = claim_previews(&*uploads, account_id, &request.previews, &mut claims.ids).await?;
+            let attachment = match &request.media {
+                Some(media) => Some(
+                    super::media_send::claim_attachment(&*uploads, account_id, media, &mut claims.ids)
+                        .await?,
+                ),
+                None => None,
             };
             let message = PreviewSend {
                 body: &request.body,
@@ -157,13 +164,17 @@ pub(super) async fn send(
                 relation: request.relation(),
                 previews,
             };
+            let txn_id = request.media.as_ref().and_then(|m| m.txn_id.as_deref());
             sender
-                .send_with_previews(account_id, &room_id, message, attachment)
+                .send_with_previews(account_id, &room_id, message, attachment, txn_id)
                 .await
                 .map_err(ApiError::from)
         }
         .await;
-        settle_claims(&*uploads, account_id, &room_id, claimed, result.is_ok()).await;
+        claims.settle(result.is_ok()).await;
+        if let Some(txn) = txn {
+            txn.settle(&result);
+        }
         match result {
             Ok(event_id) => {
                 tracing::info!(%account_id, %room_id, %event_id, preview_count = request.previews.len(), elapsed_ms = started.elapsed().as_millis(), "sent message with bundled previews");
@@ -205,28 +216,6 @@ async fn claim_previews(
     Ok(previews)
 }
 
-/// Consume the claimed uploads after a success, or release them for a retry.
-async fn settle_claims(
-    uploads: &dyn StagedUploadService,
-    account_id: Uuid,
-    room_id: &str,
-    claimed: Vec<Uuid>,
-    sent: bool,
-) {
-    for id in claimed {
-        let cleanup = if sent {
-            uploads.complete_upload(account_id, id).await
-        } else {
-            uploads.release_upload(account_id, id).await
-        };
-        if let Err(error) = cleanup {
-            // Never format error detail: it can contain private input.
-            let kind = error.diagnostic_kind();
-            tracing::warn!(%account_id, %room_id, upload_id = %id, sent, error_kind = kind, "preview upload bookkeeping failed; boot reconciliation/expiry will recover");
-        }
-    }
-}
-
 /// An edit (ADR 0132 section 8), validated before any claim or store read.
 pub(super) async fn edit(
     sender: Arc<dyn MessageSender>,
@@ -261,10 +250,10 @@ pub(super) async fn edit(
     };
     tokio::spawn(async move {
         let _permit = permit;
-        let mut claimed = Vec::new();
+        let mut claims = Claims::new(uploads.clone(), account_id, &room_id);
         let result = async {
             let mut claimed_new =
-                claim_previews(&*uploads, account_id, &new, &mut claimed).await?.into_iter();
+                claim_previews(&*uploads, account_id, &new, &mut claims.ids).await?.into_iter();
             let previews = request.url_previews.as_ref().map(|list| {
                 list.iter()
                     .filter_map(|p| match p {
@@ -299,7 +288,7 @@ pub(super) async fn edit(
                 .map_err(ApiError::from)
         }
         .await;
-        settle_claims(&*uploads, account_id, &room_id, claimed, result.is_ok()).await;
+        claims.settle(result.is_ok()).await;
         if let Err(error) = &result {
             let (status, code) = error.diagnostics();
             tracing::debug!(%account_id, %room_id, status, code, "edit failed; upload cleanup attempted");

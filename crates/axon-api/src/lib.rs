@@ -50,7 +50,7 @@ mod web;
 mod ws;
 
 pub use auth::{AuthedToken, StoreTokenVerifier, TokenVerifier, RECENT_SIGN_IN_WINDOW};
-pub use axon_core::{Formatted, MediaAttachment, MediaSendKind, Relation};
+pub use axon_core::{Formatted, MediaAttachment, MediaSendKind, MediaThumbnail, Relation};
 pub use backfill::{BackfillStatusProvider, BackfillStatusSnapshot};
 pub use backup_state::BackupStateProvider;
 pub use build_info::BuildInfo;
@@ -110,8 +110,8 @@ pub use sync_state::SyncStateProvider;
 pub use sync_status::{AccountSyncSnapshot, SyncStatusProvider};
 pub use trust::{CurrentTrust, SenderTrustService, TrustBundle, TrustError, TrustSnapshot};
 pub use uploads::{
-    ClaimedUpload, StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService,
-    UploadStream,
+    ClaimedUpload, SendThumbnail, StageUploadError, StageUploadRequest, StagedUpload,
+    StagedUploadService, UploadStream,
 };
 pub use verification::{FlowStage, FlowSummary, VerificationService, VerifyError};
 pub use web::web_client_embedded;
