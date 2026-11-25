@@ -2381,12 +2381,22 @@ p.timeline-edge {
   padding: 0;
 }
 
+/* Do not grow. A `flex-grow` child of `.timeline` is resolved against the
+   scrollport in Firefox, and the scroll range then stops at this shell.
+   The sentinel and the Load newer button that follow it sit past
+   `scrollHeight`, so assigning `scrollTop = scrollHeight` never reveals
+   them and the probe that retires the button never runs. Short rooms
+   still sit on the composer: the room rule below pushes the shell down
+   with `margin-top: auto`. A thread timeline stays top-aligned. */
 .timeline-list-shell {
-  flex: 1 0 auto;
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
-  min-height: 0;
+}
+
+.timeline > .timeline-list-shell {
+  margin-top: auto;
 }
 
 .day-separator {
