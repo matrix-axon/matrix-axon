@@ -1,6 +1,6 @@
 //! Bounded repair of room state from the SDK cache and resolved redaction
 //! events. A stored redaction alone is not proof it may be applied.
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
 use std::time::Duration;
 
@@ -68,13 +68,14 @@ pub(crate) async fn watch(
             _ = tick.tick() => {},
         }
         let Some(page) = sweep
-            .page(&ctx.store, ctx.account_id, &cancel, "state_redaction")
+            .page(&ctx.store, ctx.account_id, &cancel, "state_redaction", true)
             .await
         else {
             return;
         };
-        let mut rooms: HashSet<_> = page.into_iter().collect();
-        rooms.extend(take_hints(&mut hints));
+        let mut rooms: HashMap<_, _> = page.into_iter().collect();
+        // Live hints can precede the next room-page probe.
+        rooms.extend(take_hints(&mut hints).into_iter().map(|room| (room, true)));
         let next = last_resumed
             .as_ref()
             .and_then(|last| {
@@ -84,10 +85,10 @@ pub(crate) async fn watch(
             })
             .or_else(|| pending.first_key_value());
         if let Some((room, _)) = next {
-            rooms.insert(room.clone());
+            rooms.insert(room.clone(), true);
             last_resumed = Some(room.clone());
         }
-        for room_id in rooms {
+        for (room_id, check_space_links) in rooms {
             if cancel.is_cancelled() {
                 return;
             }
@@ -101,7 +102,7 @@ pub(crate) async fn watch(
             let outcome = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => return,
-                result = tokio::time::timeout(Duration::from_secs(2), reconcile_room(&ctx, &client, &room_id, &mut after)) => result,
+                result = tokio::time::timeout(Duration::from_secs(2), reconcile_room(&ctx, &client, &room_id, check_space_links, &mut after)) => result,
             };
             if let Some(after) = after {
                 pending.insert(room_id.clone(), after);
@@ -351,6 +352,7 @@ async fn reconcile_room(
     ctx: &PersistContext,
     client: &Client,
     room_id: &OwnedRoomId,
+    check_space_links: bool,
     after: &mut Option<RepairCursor>,
 ) {
     let mut missing = Vec::new();
@@ -363,8 +365,16 @@ async fn reconcile_room(
             Cached::Missing | Cached::Unusable => {}
         }
     }
-    missing.extend_from_slice(SPACE_LINK_TYPES);
-    reconcile_stored_state(ctx, client, room_id, &missing, after).await;
+    // Singleton repairs run ahead of bounded space-link paging on every
+    // pass. A singleton hint may arrive after this room's link cursor moved.
+    if !missing.is_empty() {
+        reconcile_stored_state(ctx, client, room_id, &missing, &mut None).await;
+    }
+    if check_space_links {
+        reconcile_stored_state(ctx, client, room_id, SPACE_LINK_TYPES, after).await;
+    } else {
+        *after = None;
+    }
 }
 
 /// Mirror one redacted form into the current tuple, if it still is current.
@@ -395,7 +405,7 @@ async fn apply(
     {
         Ok(true) => {
             tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type, event_id = %ev.event_id(), "reconciled redacted room state");
-            mark_room_state_changes(ctx, room_id, event_type, ev.state_key()).await;
+            mark_room_state_changes(ctx, room_id, event_type, ev.state_key(), false);
         }
         Ok(false) => {}
         Err(_) => {
@@ -573,14 +583,14 @@ mod tests {
         let mut after = None;
         assert!(tokio::time::timeout(
             Duration::from_millis(250),
-            reconcile_room(&ctx, &client, &room, &mut after)
+            reconcile_room(&ctx, &client, &room, true, &mut after)
         )
         .await
         .is_err());
         assert_eq!(after, Some(("m.space.child".into(), key(0))));
         lock.rollback().await.unwrap();
 
-        reconcile_room(&ctx, &client, &room, &mut after).await;
+        reconcile_room(&ctx, &client, &room, true, &mut after).await;
         assert_eq!(after, Some(("m.space.child".into(), key(last))));
         for (i, redacted) in [(0, None), (1, None), (last, Some(true))] {
             let state = ctx
@@ -596,9 +606,9 @@ mod tests {
             [axon_core::RoomDetailSource::SpaceGraph].into()
         );
 
-        reconcile_room(&ctx, &client, &room, &mut after).await;
+        reconcile_room(&ctx, &client, &room, true, &mut after).await;
         assert!(after.is_none());
-        reconcile_room(&ctx, &client, &room, &mut after).await;
+        reconcile_room(&ctx, &client, &room, true, &mut after).await;
         assert_eq!(
             ctx.store
                 .room_state(ctx.account_id, room.as_str(), "m.space.child", &key(0))
@@ -607,6 +617,67 @@ mod tests {
                 .unwrap()
                 .redacted,
             Some(true)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn singleton_hint_repairs_state_ahead_of_a_paused_space_link_cursor() {
+        let (ctx, client, room, mut hints) = repair_fixture().await;
+        let event_id = "$stored-acl:localhost";
+        let redaction_id = "$acl-redaction:localhost";
+        let event_type = "m.room.server_acl";
+        let state = RoomStateUpsert {
+            account_id: ctx.account_id,
+            room_id: room.as_str(),
+            event_type,
+            state_key: "",
+            event_id,
+            sender: "@alice:localhost",
+            origin_ts: 10,
+            content: Some(json!({"allow":["*"],"deny":["blocked.example"]})),
+        };
+        ctx.store.upsert_room_state(&state).await.unwrap();
+        assert!(matches!(
+            cached_state(&ctx, &client, &room, event_type).await,
+            Cached::Missing
+        ));
+
+        let content = json!({"redacts": event_id});
+        ctx.store
+            .upsert_event(&axon_store::NewEvent {
+                event_id: redaction_id,
+                room_id: room.as_str(),
+                account_id: ctx.account_id,
+                sender: state.sender,
+                origin_ts: 11,
+                event_type: "m.room.redaction",
+                content: Some(content.clone()),
+                raw_event: json!({"type":"m.room.redaction","event_id":redaction_id,
+                "sender":state.sender,"origin_server_ts":11,"redacts":event_id,"content":content}),
+                megolm_session_id: None,
+                redacts: Some(event_id),
+                relates_to: None,
+                decrypted_body_text: None,
+            })
+            .await
+            .unwrap();
+        queue_redaction_hint(&ctx, &room, event_id).await;
+        assert_eq!(hints.try_recv().unwrap(), room);
+        let mut after = Some(("m.space.child".to_owned(), "!cursor:localhost".to_owned()));
+        reconcile_room(&ctx, &client, &room, true, &mut after).await;
+
+        let row = ctx
+            .store
+            .room_state(ctx.account_id, room.as_str(), event_type, "")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.redacted, Some(true));
+        assert_eq!(row.content, Some(json!({})));
+        assert_eq!(
+            ctx.room_details.take_pending()[room.as_str()],
+            [axon_core::RoomDetailSource::Metadata].into()
         );
     }
 
@@ -625,6 +696,18 @@ mod tests {
             }
         };
         use axon_core::RoomDetailSource::{Metadata, SpaceGraph};
+        // Creation state can arrive while a membership write is in flight.
+        persist(
+            "m.room.member",
+            "@alice:localhost",
+            "$early-member",
+            json!({"membership":"join"}),
+        )
+        .await;
+        assert_eq!(
+            ctx.room_details.take_pending()[room.as_str()],
+            [SpaceGraph].into()
+        );
         persist(
             "m.room.create",
             "",
@@ -709,7 +792,7 @@ mod tests {
             sources.into()
         );
         // Nothing to repair before a redaction is stored.
-        reconcile_room(&ctx, &client, &room_id, &mut None).await;
+        reconcile_room(&ctx, &client, &room_id, true, &mut None).await;
         assert!(room_details.take_pending().is_empty());
         // The primary connection persists the timeline redactions.
         for (redaction_id, target) in [
@@ -741,7 +824,7 @@ mod tests {
             queue_redaction_hint(&ctx, &room_id, target).await;
             assert_eq!(state_redaction_rx.try_recv().unwrap(), room_id);
         }
-        reconcile_room(&ctx, &client, &room_id, &mut None).await;
+        reconcile_room(&ctx, &client, &room_id, true, &mut None).await;
         for (event_type, state_key, event_id, redaction_id) in [
             (
                 "m.room.guest_access",
@@ -783,7 +866,7 @@ mod tests {
             sources.into()
         );
         // Applied once; the next sweep finds nothing left to apply.
-        reconcile_room(&ctx, &client, &room_id, &mut None).await;
+        reconcile_room(&ctx, &client, &room_id, true, &mut None).await;
         assert!(room_details.take_pending().is_empty());
         // A replacement is not touched by its predecessor's redaction.
         let value = json!({"type": "m.room.server_acl", "state_key": "", "event_id": "$acl2:localhost",
@@ -792,7 +875,7 @@ mod tests {
         let ev: AnySyncStateEvent = serde_json::from_value(value.clone()).unwrap();
         crate::engine::persist_room_state_value(ev, &value, &room_id, &client, &ctx).await;
         room_details.take_pending();
-        reconcile_room(&ctx, &client, &room_id, &mut None).await;
+        reconcile_room(&ctx, &client, &room_id, true, &mut None).await;
         let row = store
             .room_state(ctx.account_id, room_id.as_str(), "m.room.server_acl", "")
             .await
@@ -830,7 +913,7 @@ mod tests {
             })
             .await
             .unwrap();
-        reconcile_room(&ctx, &client, &room_id, &mut None).await;
+        reconcile_room(&ctx, &client, &room_id, true, &mut None).await;
         let row = store
             .room_state(ctx.account_id, room_id.as_str(), "m.room.server_acl", "")
             .await
@@ -949,7 +1032,7 @@ mod tests {
         queue_redaction_hint(&ctx, &room_id, state.event_id).await;
         assert_eq!(state_redaction_rx.try_recv().unwrap(), room_id);
         // A marker-free form does not overwrite or certify existing content.
-        reconcile_room(&ctx, &client, &room_id, &mut None).await;
+        reconcile_room(&ctx, &client, &room_id, true, &mut None).await;
         assert_eq!(
             store
                 .room_state(
@@ -999,7 +1082,7 @@ mod tests {
         .await;
         assert!(state_redaction_rx.is_empty());
         // This is the worker's actual consumer; no persist_room_state_event call.
-        reconcile_room(&ctx, &client, &room_id, &mut None).await;
+        reconcile_room(&ctx, &client, &room_id, true, &mut None).await;
         let row = store
             .room_state(
                 account.account_id,
@@ -1039,7 +1122,7 @@ mod tests {
             ]
         );
         // Repeated repair is idempotent; it cannot recreate purged state.
-        reconcile_room(&ctx, &client, &room_id, &mut None).await;
+        reconcile_room(&ctx, &client, &room_id, true, &mut None).await;
         assert!(room_details.take_pending().is_empty());
         // The SDK cache still holds the old redacted event. Even though its
         // content differs, it must not touch a newer Axon current-state event.
@@ -1050,7 +1133,7 @@ mod tests {
             ..state
         };
         store.upsert_room_state(&replacement).await.unwrap();
-        reconcile_room(&ctx, &client, &room_id, &mut None).await;
+        reconcile_room(&ctx, &client, &room_id, true, &mut None).await;
         let current = store
             .room_state(
                 account.account_id,
@@ -1070,7 +1153,7 @@ mod tests {
             .purge_room(account.account_id, room_id.as_str())
             .await
             .unwrap();
-        reconcile_room(&ctx, &client, &room_id, &mut None).await;
+        reconcile_room(&ctx, &client, &room_id, true, &mut None).await;
         assert!(store
             .room_state(
                 account.account_id,

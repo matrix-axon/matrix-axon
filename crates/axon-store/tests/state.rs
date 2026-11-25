@@ -153,6 +153,7 @@ async fn changed(
         .upsert_room_state_with_redaction_and_purge(&state, None, evidence, false)
         .await
         .expect("upsert")
+        .changed
 }
 
 /// The upsert reports a change only when the stored tuple differs afterwards,
@@ -504,16 +505,45 @@ async fn redacted_state_repair_updates_shared_display_and_pages_rooms() {
     }
     common::insert_message(&store, other, "!other:localhost", 1, "fixture").await;
     rooms.sort();
+    let link = RoomStateUpsert {
+        account_id,
+        room_id: &rooms[1],
+        event_type: "m.space.parent",
+        state_key: "!parent:localhost",
+        event_id: "$parent:localhost",
+        sender: "@alice:localhost",
+        origin_ts: 2,
+        content: Some(json!({"via":["localhost"]})),
+    };
+    store.upsert_room_state(&link).await.unwrap();
     let first = store
-        .state_reconciliation_rooms(account_id, "")
+        .state_reconciliation_rooms(account_id, "", true)
         .await
         .unwrap();
-    assert_eq!(first, rooms[..4]);
+    assert_eq!(
+        first,
+        rooms[..4]
+            .iter()
+            .enumerate()
+            .map(|(i, room)| (room.clone(), i == 1))
+            .collect::<Vec<_>>()
+    );
     let second = store
-        .state_reconciliation_rooms(account_id, first.last().unwrap())
+        .state_reconciliation_rooms(account_id, &first.last().unwrap().0, true)
         .await
         .unwrap();
-    assert_eq!(second, rooms[4..]);
+    assert_eq!(second, [(rooms[4].clone(), false)]);
+    let without_probes = store
+        .state_reconciliation_rooms(account_id, "", false)
+        .await
+        .unwrap();
+    assert_eq!(
+        without_probes,
+        rooms[..4]
+            .iter()
+            .map(|room| (room.clone(), false))
+            .collect::<Vec<_>>()
+    );
     let mut state = RoomStateUpsert {
         account_id,
         room_id: &rooms[0],

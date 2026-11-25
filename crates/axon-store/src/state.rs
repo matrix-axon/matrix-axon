@@ -35,6 +35,15 @@ fn summary_display_state(event_type: &str, state_key: &str) -> bool {
         )
 }
 
+/// Changes made by a current room-state write.
+#[derive(Debug)]
+pub struct RoomStateChanges {
+    pub changed: bool,
+    /// A third-party membership change can affect the space graph.
+    /// Missing creation state is treated as a possible space.
+    pub space_member_changed: bool,
+}
+
 /// A current tuple and the stored redaction event that targets it
 /// (see [`Store::unapplied_room_state_redactions`]).
 #[derive(Debug, Clone)]
@@ -285,22 +294,27 @@ impl Store {
 
     /// Persist redaction evidence and atomically enqueue cleanup for local leaves.
     ///
-    /// Returns whether the stored tuple changed: it was inserted, or its event,
+    /// Reports whether the stored tuple changed: it was inserted, or its event,
     /// content, or redaction evidence differs from what was stored. An
     /// identical rewrite or a write the freshness guard refused is `false`
     /// (ADR 0126 decision 5). The comparison reads the prior row from the
     /// statement's snapshot, so a concurrent write to the same tuple can make
-    /// both writers report a change.
+    /// both writers report a change. A changed third-party member also checks
+    /// the parent space's stored type in the same statement. An unknown room
+    /// type invalidates conservatively because creation state can arrive
+    /// while that membership write is in flight.
     pub async fn upsert_room_state_with_redaction_and_purge(
         &self,
         s: &RoomStateUpsert<'_>,
         local_user_id: Option<&str>,
         evidence: RoomStateRedaction<'_>,
         purge_on_leave: bool,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<RoomStateChanges, StoreError> {
         let (redacted, redaction_event_id) = evidence.columns();
         let purge = purge_on_leave && s.is_local_departure(local_user_id);
-        let query = sqlx_core::query_as::query_as::<Postgres, (bool, bool)>(
+        let own_membership = s.event_type == "m.room.member" && local_user_id == Some(s.state_key);
+        let other_membership = s.event_type == "m.room.member" && !own_membership;
+        let query = sqlx_core::query_as::query_as::<Postgres, (bool, bool, bool)>(
             "WITH prior AS MATERIALIZED (\
                  SELECT event_id, sender, origin_ts, content, redacted, redaction_event_id \
                  FROM room_state \
@@ -325,11 +339,17 @@ impl Store {
                    ELSE EXCLUDED.redaction_event_id END \
              WHERE EXCLUDED.origin_ts >= room_state.origin_ts \
              RETURNING event_id, sender, origin_ts, content, redacted, redaction_event_id\
-             ) SELECT EXISTS (SELECT 1 FROM written), \
-                 EXISTS (SELECT 1 FROM written w WHERE NOT EXISTS (SELECT 1 FROM prior p WHERE \
+             ), changed AS MATERIALIZED (\
+                 SELECT 1 FROM written w WHERE NOT EXISTS (SELECT 1 FROM prior p WHERE \
                      (p.event_id, p.sender, p.origin_ts, p.content, p.redacted, p.redaction_event_id) \
                      IS NOT DISTINCT FROM \
-                     (w.event_id, w.sender, w.origin_ts, w.content, w.redacted, w.redaction_event_id)))",
+                     (w.event_id, w.sender, w.origin_ts, w.content, w.redacted, w.redaction_event_id))\
+             ) SELECT EXISTS (SELECT 1 FROM written), EXISTS (SELECT 1 FROM changed), \
+                 CASE WHEN $11::boolean AND EXISTS (SELECT 1 FROM changed) \
+                 THEN COALESCE((SELECT creation.content->>'type' IS NOT DISTINCT FROM 'm.space' \
+                          FROM room_state creation WHERE creation.account_id = $1 AND creation.room_id = $2 \
+                            AND creation.event_type = 'm.room.create' AND creation.state_key = ''), true) \
+                 ELSE false END",
         )
         .bind(s.account_id)
         .bind(s.room_id)
@@ -340,18 +360,19 @@ impl Store {
         .bind(s.origin_ts)
         .bind(&s.content)
         .bind(redacted)
-        .bind(redaction_event_id);
+        .bind(redaction_event_id)
+        .bind(other_membership);
         let authority = s.state_key.is_empty()
             && matches!(s.event_type, "m.room.power_levels" | "m.room.create");
-        let own_membership = s.event_type == "m.room.member" && local_user_id == Some(s.state_key);
-        let changed = if purge || authority || own_membership {
+        let (_, changed, space_member_changed) = if purge || authority || own_membership {
             let mut tx = self.pool.begin().await?;
             if authority {
                 crate::event_visibility::lock_redaction_scope(&mut tx, s.account_id, s.room_id)
                     .await?;
             }
             // Any accepted leave write advances the purge, including a replay.
-            let (written, changed) = query.fetch_one(&mut *tx).await?;
+            let outcome = query.fetch_one(&mut *tx).await?;
+            let (written, changed, _) = outcome;
             if written && authority {
                 // A second statement sees the newly written authority state.
                 let proofs = crate::event_visibility::capture_room_redaction_proofs();
@@ -400,15 +421,18 @@ impl Store {
                 self.purge_wakeup.notify_one();
                 tracing::info!(account_id = %s.account_id, room_id = %s.room_id, "queued room purge with local leave state");
             }
-            changed
+            outcome
         } else {
-            query.fetch_one(&self.pool).await?.1
+            query.fetch_one(&self.pool).await?
         };
         if summary_display_state(s.event_type, s.state_key) || own_membership {
             self.refresh_room_summary_display(s.account_id, s.room_id)
                 .await?;
         }
-        Ok(changed)
+        Ok(RoomStateChanges {
+            changed,
+            space_member_changed,
+        })
     }
 
     /// Read a single resolved room-state tuple, or `None` if unset.
@@ -464,24 +488,30 @@ impl Store {
         Ok(rows)
     }
 
-    /// Keyset-page room IDs without materializing all rooms or member state.
-    /// The room_summaries primary key supports the account/cursor lookup.
+    /// Keyset-page room IDs. State repair can also request a cheap partial
+    /// index probe for current, unredacted space links in each room.
     pub async fn state_reconciliation_rooms(
         &self,
         account_id: Uuid,
         after: &str,
-    ) -> Result<Vec<String>, StoreError> {
+        include_space_links: bool,
+    ) -> Result<Vec<(String, bool)>, StoreError> {
         let mut tx = self.reconciliation_transaction().await?;
-        let rows = sqlx_core::query_as::query_as::<Postgres, (String,)>(
-            "SELECT room_id FROM room_summaries WHERE account_id = $1 AND room_id > $2 \
-             ORDER BY room_id LIMIT 4",
+        let rooms = sqlx_core::query_as::query_as::<Postgres, (String, bool)>(
+            "SELECT summary.room_id, CASE WHEN $3::boolean THEN EXISTS (\
+                 SELECT 1 FROM room_state s WHERE s.account_id = $1 AND s.room_id = summary.room_id \
+                   AND s.event_type IN ('m.space.child', 'm.space.parent') \
+                   AND s.redacted IS DISTINCT FROM true) ELSE false END \
+             FROM room_summaries summary WHERE summary.account_id = $1 AND summary.room_id > $2 \
+             ORDER BY summary.room_id LIMIT 4",
         )
         .bind(account_id)
         .bind(after)
+        .bind(include_space_links)
         .fetch_all(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(rows.into_iter().map(|(room,)| room).collect())
+        Ok(rooms)
     }
 
     /// Match a live redaction target against a fixed set of singleton types

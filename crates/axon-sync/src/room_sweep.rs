@@ -80,9 +80,10 @@ impl RoomSweep {
         self.next = tokio::time::Instant::now();
     }
 
-    fn advance(&mut self, page: &[String]) {
-        if let Some(last) = page.last() {
-            self.cursor.clone_from(last);
+    fn advance(&mut self, last_room: Option<&str>) {
+        if let Some(last) = last_room {
+            self.cursor.clear();
+            self.cursor.push_str(last);
         } else {
             self.cursor.clear();
             self.next = tokio::time::Instant::now()
@@ -105,7 +106,8 @@ impl RoomSweep {
         account_id: Uuid,
         cancel: &CancellationToken,
         worker: &'static str,
-    ) -> Option<Vec<OwnedRoomId>> {
+        include_space_links: bool,
+    ) -> Option<Vec<(OwnedRoomId, bool)>> {
         if cancel.is_cancelled() {
             return None;
         }
@@ -120,7 +122,7 @@ impl RoomSweep {
         let result = tokio::select! {
             biased;
             _ = cancel.cancelled() => return None,
-            result = tokio::time::timeout(Duration::from_secs(2), store.state_reconciliation_rooms(account_id, &self.cursor)) => result,
+            result = tokio::time::timeout(Duration::from_secs(2), store.state_reconciliation_rooms(account_id, &self.cursor, include_space_links)) => result,
         };
         match result {
             Ok(Ok(page)) => {
@@ -132,8 +134,12 @@ impl RoomSweep {
                         .map_or(0.0, |start| start.elapsed().as_secs_f64());
                     tracing::debug!(%account_id, worker, source = "sdk_cache", rooms_visited = self.visited, elapsed_seconds, repeat_requested = self.repeat, "local SDK reconciliation sweep completed");
                 }
-                self.advance(&page);
-                Some(page.into_iter().filter_map(|id| id.parse().ok()).collect())
+                self.advance(page.last().map(|(room_id, _)| room_id.as_str()));
+                Some(
+                    page.into_iter()
+                        .filter_map(|(id, links)| id.parse().ok().map(|id| (id, links)))
+                        .collect(),
+                )
             }
             Ok(Err(error)) => {
                 tracing::warn!(%account_id, worker, source = "sdk_cache", reason = error.diagnostic_reason(), "local SDK reconciliation sweep page failed; will retry");
@@ -159,7 +165,7 @@ mod tests {
         let connection = store.pool().acquire().await.unwrap();
         let cancel = CancellationToken::new();
         let mut sweep = RoomSweep::new();
-        let page = sweep.page(&store, Uuid::new_v4(), &cancel, "state_redaction");
+        let page = sweep.page(&store, Uuid::new_v4(), &cancel, "state_redaction", true);
         tokio::pin!(page);
         assert!(tokio::time::timeout(Duration::from_millis(20), &mut page)
             .await
@@ -172,24 +178,24 @@ mod tests {
         drop(connection);
         // Cancellation is also distinct from an idle sweep's empty page.
         let mut sweep = RoomSweep::new();
-        sweep.advance(&[]);
+        sweep.advance(None);
         assert!(sweep
-            .page(&store, Uuid::new_v4(), &cancel, "member_counts")
+            .page(&store, Uuid::new_v4(), &cancel, "member_counts", false)
             .await
             .is_none());
     }
     #[tokio::test]
     async fn lag_wakes_idle_sweep_and_never_rewinds_active_traversal() {
         let mut sweep = RoomSweep::new();
-        sweep.advance(&["!a:localhost".into(), "!b:localhost".into()]);
+        sweep.advance(Some("!b:localhost"));
         sweep.wake();
         assert_eq!(sweep.cursor, "!b:localhost");
-        sweep.advance(&[]);
+        sweep.advance(None);
         assert!(sweep.cursor.is_empty());
         // A wake during traversal requests a fresh pass after the tail,
         // rather than being swallowed by the end-of-sweep idle transition.
         assert!(sweep.next <= tokio::time::Instant::now());
-        sweep.advance(&[]);
+        sweep.advance(None);
         assert!(sweep.next > tokio::time::Instant::now());
         sweep.wake();
         assert!(sweep.next <= tokio::time::Instant::now());

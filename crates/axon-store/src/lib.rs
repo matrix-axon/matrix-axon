@@ -100,8 +100,8 @@ pub use spaces::{
     SPACE_HIERARCHY_MAX_PAGE,
 };
 pub use state::{
-    AccountDataRow, AccountDataUpsert, RoomMetadataStateRow, RoomStateRedaction, RoomStateRow,
-    RoomStateUpsert, UnappliedStateRedaction, STATE_REDACTION_PAGE_SIZE,
+    AccountDataRow, AccountDataUpsert, RoomMetadataStateRow, RoomStateChanges, RoomStateRedaction,
+    RoomStateRow, RoomStateUpsert, UnappliedStateRedaction, STATE_REDACTION_PAGE_SIZE,
 };
 pub use timeline_gaps::{
     GapCheck, GapOrigin, GapPageLookup, GapTotals, HistoryGapCounts, LagMark, TimelineGap,

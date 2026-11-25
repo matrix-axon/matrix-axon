@@ -214,6 +214,7 @@ The account-wide read contacts no homeserver.
 
 After a `room_details.changed` frame with source `space_graph`, re-read the affected account's graph starting from the first page.
 Graph changes coalesce across the account.
+Route this source by `account_id` alone.
 The frame names one affected room, and the same batch can include changes in other rooms.
 If a frame arrives during pagination, schedule another walk.
 After reconnect, restart from the first page so removed links are dropped.

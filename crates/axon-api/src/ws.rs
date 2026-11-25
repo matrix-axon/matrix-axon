@@ -304,7 +304,8 @@ struct RoomDetailsFramePayload {
     /// `discovery` (`GET …/discovery` of this room, an unjoined room), and
     /// `identity_changes` (`GET …/info`), and `space_graph` (the account's
     /// `GET …/spaces/graph`), in that order.
-    /// Clients ignore values they do not know.
+    /// Clients ignore values they do not know. Route `space_graph` by the
+    /// envelope's account ID alone. Its room ID names one affected room.
     sources: Vec<&'static str>,
 }
 

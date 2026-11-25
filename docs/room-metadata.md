@@ -523,7 +523,8 @@ The primary sync hands state to Axon one event at a time with no end-of-room sig
 Under continuous changes it publishes no later than one second after the first pending change, and at once when 256 rooms are pending, so neither a busy account nor a large first sync can grow the queue without bound.
 A room whose changes straddle a flush receives two frames.
 For `space_graph`, each flush emits one invalidation for the account even when several rooms changed.
-Use the frame's `account_id` and start the graph read from the first page.
+Use only the frame's `account_id` to route this source and start the graph read from the first page.
+The frame's `room_id` identifies one affected room in the batch.
 The coalescer is canceled and joined with the account run, after the workers that feed it, and publishes what is pending when it stops.
 SDK event handlers keep their context after the run stops, so a change they record later is published at once rather than held.
 The bus is lossy like every other frame, so a lagged or reconnecting client re-reads.

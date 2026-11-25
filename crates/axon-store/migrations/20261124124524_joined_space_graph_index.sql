@@ -1,3 +1,6 @@
+-- Both indexes build transactionally before Axon starts sync.
+-- PostgreSQL blocks other room_state writers until this transaction commits.
+-- Allow the index builds time in the upgrade window before restarting sync.
 -- Page account-wide space relationships by the stable state-tuple key
 -- without scanning membership and other unrelated state.
 CREATE INDEX room_state_space_graph

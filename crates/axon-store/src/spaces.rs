@@ -248,20 +248,6 @@ pub struct SpaceHierarchyPage {
 }
 
 impl Store {
-    /// Use the same stored room creation state as the graph read.
-    pub async fn room_is_space(&self, account_id: Uuid, room_id: &str) -> Result<bool, StoreError> {
-        sqlx_core::query_scalar::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM room_state \
-             WHERE account_id = $1 AND room_id = $2 AND event_type = 'm.room.create' \
-               AND state_key = '' AND content->>'type' = 'm.space')",
-        )
-        .bind(account_id)
-        .bind(room_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(Into::into)
-    }
-
     /// List `room_id`'s space children (`m.space.child`), MSC1772-ordered:
     /// `order` string ascending (a child with no `order` sorts after every
     /// child that has one), then `origin_ts`, then child `room_id` as a

@@ -1680,7 +1680,9 @@ export interface paths {
          *     canonical-parent navigation. An unknown or inactive account yields an empty
          *     page. The server never contacts the homeserver for this read.
          *
-         *     Subscribe to `room_details.changed` with source `space_graph` and re-read
+         *     A `room_details.changed` frame with source `space_graph` invalidates the
+         *     whole graph for its `account_id`. Use the account ID alone to route this
+         *     source. The frame's `room_id` names one of the affected rooms. Re-read
          *     from the first page on invalidation and reconnect.
          */
         get: operations["space_graph"];
