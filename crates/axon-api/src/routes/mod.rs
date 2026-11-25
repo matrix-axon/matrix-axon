@@ -45,6 +45,7 @@ pub mod matrix_oauth_acquire;
 pub mod matrix_oauth_browser;
 pub mod matrix_oauth_grant;
 pub mod media;
+mod media_send;
 pub mod membership;
 pub mod messages;
 pub mod oauth;

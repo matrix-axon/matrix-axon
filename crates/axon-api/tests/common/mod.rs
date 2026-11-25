@@ -250,11 +250,14 @@ pub enum Outcome {
     Upstream(String),
     Timeout(String),
     PreviewsChanged,
+    /// Panic inside the send, as a bug in the SDK path would.
+    Panic,
 }
 
 impl Outcome {
     fn to_result(&self) -> Result<String, SendError> {
         match self {
+            Outcome::Panic => panic!("stub sender panicked on purpose"),
             Outcome::Ok(id) => Ok(id.clone()),
             Outcome::NotFound(m) => Err(SendError::NotFound(m.clone())),
             Outcome::Forbidden(m) => Err(SendError::Forbidden(m.clone())),
@@ -271,7 +274,10 @@ impl Outcome {
 pub struct StubSender {
     outcome: Outcome,
     calls: Mutex<Vec<Call>>,
+    /// Holds `send_with_previews` and `send_media` until released.
     preview_gate: Option<Arc<(tokio::sync::Notify, tokio::sync::Notify)>>,
+    /// The `txn_id` of each media send, in order.
+    txn_ids: Mutex<Vec<Option<String>>>,
 }
 
 /// One staged-upload call recorded by [`StubUploads`].
@@ -296,9 +302,30 @@ pub enum UploadOutcome {
     Internal(String),
 }
 
+/// What [`StubUploads::claim_send_thumbnail`] makes of a thumbnail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StubThumbnail {
+    Ready,
+    Skipped,
+    Invalid,
+}
+
+/// The thumbnail [`StubThumbnail::Ready`] returns.
+pub fn stub_thumbnail() -> axon_core::MediaThumbnail {
+    axon_core::MediaThumbnail {
+        bytes: b"thumb".to_vec(),
+        mimetype: "image/jpeg".into(),
+        width: 4,
+        height: 3,
+    }
+}
+
 /// In-memory staged-upload service for route tests.
 pub struct StubUploads {
     outcome: UploadOutcome,
+    /// The kind a claim reports for an id; `image` when absent.
+    kinds: Mutex<std::collections::HashMap<Uuid, axon_api::MediaUploadKindDto>>,
+    thumbnail: Mutex<StubThumbnail>,
     reject_claim: Mutex<Option<Uuid>>,
     calls: Mutex<Vec<UploadCall>>,
     deletes: Mutex<Vec<(Uuid, Uuid)>>,
@@ -311,6 +338,8 @@ impl StubUploads {
     pub fn ok() -> Self {
         Self {
             outcome: UploadOutcome::Ok,
+            kinds: Mutex::default(),
+            thumbnail: Mutex::new(StubThumbnail::Ready),
             calls: Mutex::new(Vec::new()),
             reject_claim: Mutex::new(None),
             deletes: Mutex::new(Vec::new()),
@@ -323,6 +352,8 @@ impl StubUploads {
     pub fn failing(outcome: UploadOutcome) -> Self {
         Self {
             outcome,
+            kinds: Mutex::default(),
+            thumbnail: Mutex::new(StubThumbnail::Ready),
             calls: Mutex::new(Vec::new()),
             reject_claim: Mutex::new(None),
             deletes: Mutex::new(Vec::new()),
@@ -334,6 +365,15 @@ impl StubUploads {
 
     pub fn reject_claim_for(&self, id: Uuid) {
         *self.reject_claim.lock().unwrap() = Some(id);
+    }
+
+    /// Make a claim of `id` report `kind`.
+    pub fn set_kind(&self, id: Uuid, kind: axon_api::MediaUploadKindDto) {
+        self.kinds.lock().unwrap().insert(id, kind);
+    }
+
+    pub fn set_thumbnail(&self, outcome: StubThumbnail) {
+        *self.thumbnail.lock().unwrap() = outcome;
     }
 
     pub fn calls(&self) -> Vec<UploadCall> {
@@ -364,6 +404,7 @@ impl StubSender {
             outcome: Outcome::Ok(event_id.to_owned()),
             calls: Mutex::new(Vec::new()),
             preview_gate: None,
+            txn_ids: Mutex::default(),
         }
     }
 
@@ -373,12 +414,18 @@ impl StubSender {
             outcome,
             calls: Mutex::new(Vec::new()),
             preview_gate: None,
+            txn_ids: Mutex::default(),
         }
     }
 
     /// The calls recorded so far, in order.
     pub fn calls(&self) -> Vec<Call> {
         self.calls.lock().unwrap().clone()
+    }
+
+    /// The `txn_id` each media send carried, in order.
+    pub fn txn_ids(&self) -> Vec<Option<String>> {
+        self.txn_ids.lock().unwrap().clone()
     }
     pub fn with_preview_gate(
         mut self,
@@ -2189,6 +2236,24 @@ impl MediaProxy for ConfiguredMediaProxy {
 
 #[async_trait]
 impl StagedUploadService for StubUploads {
+    async fn claim_send_thumbnail(
+        &self,
+        account_id: Uuid,
+        upload_id: Uuid,
+        _budget: std::time::Duration,
+    ) -> Result<axon_api::SendThumbnail, StageUploadError> {
+        self.claim_upload(account_id, upload_id).await?;
+        match *self.thumbnail.lock().unwrap() {
+            StubThumbnail::Ready => Ok(axon_api::SendThumbnail::Ready(stub_thumbnail())),
+            StubThumbnail::Skipped => Ok(axon_api::SendThumbnail::Skipped("decoder_busy")),
+            StubThumbnail::Invalid => {
+                // As the real service does: an invalid image is released.
+                self.releases.lock().unwrap().push((account_id, upload_id));
+                Err(StageUploadError::Invalid("not an image".into()))
+            }
+        }
+    }
+
     async fn claim_preview_upload(
         &self,
         account_id: Uuid,
@@ -2274,7 +2339,13 @@ impl StagedUploadService for StubUploads {
         match &self.outcome {
             UploadOutcome::Ok => Ok(axon_api::ClaimedUpload {
                 upload_id,
-                kind: axon_api::MediaUploadKindDto::Image,
+                kind: self
+                    .kinds
+                    .lock()
+                    .unwrap()
+                    .get(&upload_id)
+                    .copied()
+                    .unwrap_or(axon_api::MediaUploadKindDto::Image),
                 filename: "photo.png".to_owned(),
                 content_type: Some("image/png".to_owned()),
                 size_bytes: 3,
@@ -2332,7 +2403,11 @@ impl MessageSender for StubSender {
         room_id: &str,
         message: axon_core::link_preview::PreviewSend<'_>,
         attachment: Option<MediaAttachment>,
+        txn_id: Option<&str>,
     ) -> Result<String, SendError> {
+        if attachment.is_some() {
+            self.txn_ids.lock().unwrap().push(txn_id.map(str::to_owned));
+        }
         if let Some(gate) = &self.preview_gate {
             gate.0.notify_one();
             gate.1.notified().await;
@@ -2428,7 +2503,13 @@ impl MessageSender for StubSender {
         caption: Option<&str>,
         formatted: Option<Formatted<'_>>,
         relation: Relation<'_>,
+        txn_id: Option<&str>,
     ) -> Result<String, SendError> {
+        self.txn_ids.lock().unwrap().push(txn_id.map(str::to_owned));
+        if let Some(gate) = &self.preview_gate {
+            gate.0.notify_one();
+            gate.1.notified().await;
+        }
         self.calls.lock().unwrap().push(Call::SendMedia {
             account_id,
             room_id: room_id.to_owned(),

@@ -66,7 +66,7 @@ pub use backup::{BackupAction, BackupHealth, BackupSnapshot, BackupStateView, Re
 pub use devices::{DeviceInfo, DeviceList, DeviceListEngine, DeviceListError};
 pub use engine::SyncEngine;
 pub use error::{GatewayError, SyncError};
-pub use gateway::{LeaveOutcome as GatewayLeaveOutcome, SdkGateway};
+pub use gateway::{LeaveOutcome as GatewayLeaveOutcome, MediaSendBounds, SdkGateway};
 pub use homeserver_gate::{BreakerSnapshot, GateSnapshot, HomeserverGates, InteractiveCall};
 pub use lifecycle::{AccountLifecycle, LifecycleError};
 pub use linked_event::{LinkedEvent, LinkedEventError, LinkedEventReader};

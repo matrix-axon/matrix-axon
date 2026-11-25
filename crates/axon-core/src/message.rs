@@ -59,6 +59,11 @@ pub enum MediaSendKind {
 
 /// Claimed media bytes and metadata passed from the API upload substrate to the
 /// outbound message gateway.
+///
+/// `width`, `height` and `duration_ms` are what the event's `info` declares,
+/// already validated for `kind` (ADR 0142 section 4). `thumbnail`, when set,
+/// has been normalised to ADR 0142 section 2 and is published best-effort:
+/// a failed thumbnail upload sends the event without it (section 6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaAttachment {
     pub kind: MediaSendKind,
@@ -66,4 +71,20 @@ pub struct MediaAttachment {
     pub content_type: Option<String>,
     pub size_bytes: u64,
     pub bytes: Vec<u8>,
+    pub width: Option<u64>,
+    pub height: Option<u64>,
+    pub duration_ms: Option<u64>,
+    pub thumbnail: Option<MediaThumbnail>,
+}
+
+/// A thumbnail or poster ready to publish beside a media event (ADR 0142
+/// section 2): upright, fitted inside 800 × 600, JPEG or PNG, with no EXIF.
+/// `width`, `height` and `mimetype` describe `bytes` exactly, so they become
+/// the event's `thumbnail_info` as they are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaThumbnail {
+    pub bytes: Vec<u8>,
+    pub mimetype: String,
+    pub width: u32,
+    pub height: u32,
 }

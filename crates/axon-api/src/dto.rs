@@ -1255,6 +1255,62 @@ pub struct SendMediaRequest {
     /// not a reply.
     #[serde(default)]
     pub thread_root: Option<String>,
+    /// What the event's `info` declares besides the size and type (ADR 0142
+    /// section 4). Send it only to a server whose `GET /v1/capabilities` has
+    /// `send_media_thumbnails`; an older one ignores it.
+    #[serde(default)]
+    pub info: Option<SendMediaInfo>,
+    /// A second staged upload, staged with kind `image`, to send as this
+    /// media's thumbnail or poster: PNG, JPEG or WebP, at most 2 MiB and
+    /// 4,000,000 pixels, with a type matching its bytes. Accepted for
+    /// `image`, `video` and `file`, and refused for `audio`. The server
+    /// re-encodes it to fit inside 800 × 600, upright, as JPEG or (for real
+    /// transparency) PNG. It is consumed when the event is sent and released
+    /// when the send fails, whether or not it made it into the event: a
+    /// thumbnail is best-effort, and never fails a send that would succeed
+    /// without it. An invalid one is a `400`. Send it only when
+    /// `send_media_thumbnails` is advertised: an older server ignores it and
+    /// leaves it staged until it expires.
+    #[serde(default)]
+    pub thumbnail_upload_id: Option<Uuid>,
+    /// The client's id for this send, kept across its retries (ADR 0142
+    /// section 4). A retry with the same id in the same room joins the send
+    /// still in flight, or, within 10 minutes of its success, gets its event
+    /// id without sending again; the retry's own staged uploads are then
+    /// deleted. A retry whose caption, relation, `info`, thumbnail or
+    /// previews differ from the first send's is a `409`, and keeps its
+    /// uploads. The check cannot see which file is sent, so the id must be
+    /// unique to one file: another file sent with the same id and the same
+    /// caption within 10 minutes is taken for a retry, answered with the
+    /// first event, and never sent.
+    ///
+    /// A send that failed, a `504` included, is not remembered: Axon cannot
+    /// learn the outcome of a call it stopped waiting for. Its retry uploads
+    /// and sends again, under the same Matrix transaction id, so a homeserver
+    /// that completed the first send returns that event instead of posting
+    /// another. Deduplication holds only against a server that advertises
+    /// `send_media_thumbnails`.
+    #[serde(default)]
+    #[schema(min_length = 1, max_length = 64, pattern = "^[A-Za-z0-9._~-]+$")]
+    pub txn_id: Option<String>,
+}
+
+/// `info` of a [`SendMediaRequest`] (ADR 0142 section 4). Each field is
+/// optional, and each value must be at least 1 and at most 2^53 − 1.
+/// `width` and `height` come together, and are accepted for `image` and
+/// `video`; `duration_ms` is accepted for `video` and `audio`. Anything else
+/// is a `400`. The values are sent in the event's `info` as given.
+#[derive(Debug, Clone, Default, Deserialize, ToSchema)]
+pub struct SendMediaInfo {
+    #[serde(default)]
+    #[schema(minimum = 1, maximum = 9007199254740991_u64)]
+    pub width: Option<u64>,
+    #[serde(default)]
+    #[schema(minimum = 1, maximum = 9007199254740991_u64)]
+    pub height: Option<u64>,
+    #[serde(default)]
+    #[schema(minimum = 1, maximum = 9007199254740991_u64)]
+    pub duration_ms: Option<u64>,
 }
 
 /// Request body for editing a message (`PUT …/events/{event_id}`). Replaces the
@@ -1318,6 +1374,13 @@ pub struct CapabilitiesDto {
     /// server that predates it answers without it.
     #[schema(required = false)]
     pub media_upload_kinds: Vec<MediaUploadKindDto>,
+    /// `send-media` accepts and applies `info`, `thumbnail_upload_id` and
+    /// `txn_id` (ADR 0142 section 1). A server without this field ignores all
+    /// three, so a client sends a thumbnail only when this is true, and relies
+    /// on `txn_id` deduplication only then. The schema marks it optional
+    /// because a server that predates it answers without it.
+    #[schema(required = false)]
+    pub send_media_thumbnails: bool,
 }
 
 /// Request body for reacting to an event (`POST …/events/{event_id}/reactions`).
