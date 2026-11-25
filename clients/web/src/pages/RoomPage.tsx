@@ -79,7 +79,10 @@ import {
   type NewestSeen,
 } from '../timeline/newest-seen'
 import { hiddenByRedaction } from '../timeline/visibility'
-import { computeRoomReceipt } from '../timeline/room-receipt'
+import {
+  computeRoomReceipt,
+  withFoldedRedactions,
+} from '../timeline/room-receipt'
 import {
   roomListBackPresentation,
   useMobileSwipeBack,
@@ -1289,7 +1292,10 @@ export function RoomPage() {
       threadRoot: threadRootId(event),
     })
     return computeRoomReceipt({
-      displayed: displayed.map(candidate),
+      // A displayed event's folded redaction is a position too: without it a
+      // trailing redaction counted by a notify-all room rule is never
+      // acknowledged (#1273).
+      displayed: withFoldedRedactions(displayed.map(candidate)),
       loaded: timeline.events.value
         .filter(
           (event) => !hiddenByRedaction(event, hideRedacted, liveThreadRoots),

@@ -4,6 +4,7 @@ import type { ThreadSummaryDto } from '../stores/threads'
 import {
   computeRoomReceipt,
   summaryLooksUnread,
+  withFoldedRedactions,
   type ReceiptCandidate,
 } from './room-receipt'
 
@@ -185,5 +186,44 @@ describe('summaryLooksUnread', () => {
   it('compares against the read position when there is one', () => {
     expect(summaryLooksUnread(summary(ROOT_A, 10), 9, 'unread')).toBe(true)
     expect(summaryLooksUnread(summary(ROOT_A, 10), 10, 'unread')).toBe(false)
+  })
+})
+
+describe('withFoldedRedactions (#1273)', () => {
+  it('adds the redaction folded onto an event, in its own arrival position', () => {
+    const positions = withFoldedRedactions([
+      ev('$kept', 100),
+      {
+        ...ev('$gone', 101),
+        redaction_event_id: '$redaction',
+        redaction_arrival_order: 102,
+      },
+    ])
+    expect(positions).toEqual([
+      ev('$kept', 100),
+      expect.objectContaining({ event_id: '$gone', arrival_order: 101 }),
+      ev('$redaction', 102),
+    ])
+  })
+
+  it('lets the room target reach a trailing redaction', () => {
+    const displayed = withFoldedRedactions([
+      ev('$main', 100),
+      {
+        ...ev('$gone', 101),
+        redaction_event_id: '$redaction',
+        redaction_arrival_order: 102,
+      },
+    ])
+    const { target } = computeRoomReceipt(
+      caughtUp({ displayed, loaded: displayed, threads: [] }),
+    )
+    expect(target).toEqual(ev('$redaction', 102))
+  })
+
+  it('adds nothing without both redaction fields', () => {
+    // An event cached before the server reported the arrival order.
+    const cached = { ...ev('$gone', 101), redaction_event_id: '$redaction' }
+    expect(withFoldedRedactions([cached])).toEqual([cached])
   })
 })

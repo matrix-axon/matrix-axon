@@ -17,6 +17,49 @@ export interface ReceiptCandidate {
   threadRoot: string | null
 }
 
+/**
+ * A displayed event as the receipt picker reads it: its own position, and the
+ * position of the redaction folded onto it, if any.
+ */
+export interface FoldsRedaction extends ReceiptCandidate {
+  redaction_event_id?: string | null
+  redaction_arrival_order?: number | null
+}
+
+/**
+ * The receipt positions a set of displayed events stands for: each event, and
+ * after it the redaction folded onto it (#1273, ADR 0089 amendment).
+ *
+ * Timeline reads strip bare `m.room.redaction` events and report each one on
+ * the event it redacted, so a redaction is never an event of its own here. That
+ * is harmless until a room rule set to notify on every event counts the
+ * redaction: it is then the room's newest notification, and a receipt that
+ * stops at the redacted message leaves it counted forever. Everything a
+ * redaction did is visible on its target, so wherever the target may be named,
+ * the redaction may be too.
+ *
+ * Both fields must be present. An event cached before the server reported
+ * `redaction_arrival_order` contributes only itself, as it did before.
+ */
+export function withFoldedRedactions(
+  events: readonly FoldsRedaction[],
+): ReceiptCandidate[] {
+  const positions: ReceiptCandidate[] = []
+  for (const event of events) {
+    positions.push(event)
+    const redactionId = event.redaction_event_id
+    const redactionOrder = event.redaction_arrival_order
+    if (typeof redactionId === 'string' && typeof redactionOrder === 'number') {
+      positions.push({
+        event_id: redactionId,
+        arrival_order: redactionOrder,
+        threadRoot: event.threadRoot,
+      })
+    }
+  }
+  return positions
+}
+
 export interface RoomReceiptInput {
   /** Main-timeline events this view displayed and may claim. */
   displayed: readonly ReceiptCandidate[]
