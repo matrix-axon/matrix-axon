@@ -635,24 +635,35 @@ async fn relationship_changes_keep_a_capped_wait_and_refresh_clears_it() {
     app.sweep_spaces(retry - Duration::from_secs(1));
     assert!(app.spaces.children[&key("!work:srv")].inflight.is_none());
 
-    // The attempt the cap allowed was in flight. Aborting it waits a full
-    // interval; keeping the already elapsed deadline would start another walk.
+    // A child event during the capped attempt lets that attempt finish.
+    // It does not abort the worker or start the 240-second wait over.
     let state = app.spaces.children.get_mut(&key("!work:srv")).unwrap();
-    state.retry_at = Some(now - Duration::from_secs(1));
+    let deadline = now - Duration::from_secs(1);
+    state.retry_at = Some(deadline);
     state.inflight = Some(9);
     state.dirty = false;
-    let before = Instant::now();
     app.invalidate_space(&key("!work:srv"));
-    let after = Instant::now();
+    app.invalidate_space(&key("!work:srv"));
     let state = &app.spaces.children[&key("!work:srv")];
     assert_eq!(state.failures, 4);
-    assert!(state.inflight.is_none());
+    assert_eq!(state.inflight, Some(9));
+    assert!(!state.dirty);
+    assert_eq!(state.retry_at, Some(deadline));
+
+    // The attempt fails on its own. The child events do not add a second delay.
+    app.apply_space_outcome_at(
+        SpaceOutcome::Children {
+            key: key("!work:srv"),
+            request: 9,
+            result: Err(WalkFailure::Budget(BudgetKind::Pages)),
+        },
+        now,
+    );
+    let state = &app.spaces.children[&key("!work:srv")];
+    assert_eq!(state.failures, 4);
+    assert_eq!(state.retry_at, Some(now + Duration::from_secs(240)));
     assert!(state.dirty);
-    let rescheduled = state.retry_at.unwrap();
-    assert!(rescheduled >= before + Duration::from_secs(240));
-    assert!(rescheduled <= after + Duration::from_secs(240));
-    app.sweep_spaces(rescheduled - Duration::from_secs(1));
-    assert!(app.spaces.children[&key("!work:srv")].inflight.is_none());
+    assert!(state.inflight.is_none());
 
     app.refresh_spaces();
     app.spaces.order_read_again = false;
@@ -828,4 +839,62 @@ async fn explicit_refresh_resets_backoff_and_a_relationship_change_retries_below
         let second = stub.request().await;
         assert!(!second.contains("cursor="), "{second}");
     }
+}
+
+#[tokio::test]
+async fn a_capped_walk_that_succeeds_after_a_child_event_walks_once_more() {
+    let now = Instant::now();
+    let mut app = app();
+    app.spaces.order_read_again = false;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    app.spaces.tx = Some(tx);
+    fail_membership(
+        &mut app,
+        now,
+        1,
+        WalkFailure::Budget(BudgetKind::TotalBytes),
+    );
+    let state = app.spaces.children.get_mut(&key("!work:srv")).unwrap();
+    state.retry_at = Some(now - Duration::from_secs(1));
+    state.inflight = Some(9);
+    state.dirty = false;
+    app.invalidate_space(&key("!work:srv"));
+    app.invalidate_space(&key("!work:srv"));
+
+    app.apply_space_outcome_at(
+        SpaceOutcome::Children {
+            key: key("!work:srv"),
+            request: 9,
+            result: Ok(vec!["!c:srv".to_owned()]),
+        },
+        now,
+    );
+    let state = &app.spaces.children[&key("!work:srv")];
+    assert_eq!(state.failures, 0);
+    assert!(state.retry_at.is_none());
+    assert!(state.dirty);
+    assert!(state.inflight.is_none());
+    assert!(state.error.is_none());
+    assert_eq!(state.children.as_ref().unwrap(), &["!c:srv"]);
+
+    app.sweep_spaces(now);
+    let follow = app.spaces.children[&key("!work:srv")].inflight;
+    assert!(follow.is_some());
+    app.sweep_spaces(now);
+    assert_eq!(app.spaces.children[&key("!work:srv")].inflight, follow);
+
+    app.apply_space_outcome_at(
+        SpaceOutcome::Children {
+            key: key("!work:srv"),
+            request: follow.unwrap(),
+            result: Ok(vec!["!d:srv".to_owned()]),
+        },
+        now,
+    );
+    let state = &app.spaces.children[&key("!work:srv")];
+    assert_eq!(state.failures, 0);
+    assert!(!state.dirty);
+    assert!(state.inflight.is_none());
+    assert!(state.retry_at.is_none());
+    assert_eq!(state.children.as_ref().unwrap(), &["!d:srv"]);
 }

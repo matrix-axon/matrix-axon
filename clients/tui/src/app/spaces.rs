@@ -12,9 +12,8 @@ use tokio::task::AbortHandle;
 
 use super::{App, BootstrapStage, RoomFilter, RoomKey, Status};
 use crate::api::{
-    ApiError, EventDto, HierarchyLimit, HierarchyReadError, MemberDto, PreferenceDto,
-    PreferencesChangedDto, RoomDto, TimelinePage, HIERARCHY_BYTE_BUDGET_ERROR, HIERARCHY_PAGE_SIZE,
-    RESPONSE_SIZE_LIMIT_ERROR,
+    hierarchy_limit_message, ApiError, EventDto, HierarchyLimit, HierarchyReadError, MemberDto,
+    PreferenceDto, PreferencesChangedDto, RoomDto, TimelinePage, HIERARCHY_PAGE_SIZE,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -70,8 +69,12 @@ impl From<HierarchyReadError> for WalkFailure {
 impl fmt::Display for WalkFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Budget(BudgetKind::TotalBytes) => f.write_str(HIERARCHY_BYTE_BUDGET_ERROR),
-            Self::Budget(BudgetKind::PageBytes) => f.write_str(RESPONSE_SIZE_LIMIT_ERROR),
+            Self::Budget(BudgetKind::TotalBytes) => {
+                f.write_str(hierarchy_limit_message(HierarchyLimit::TotalBytes))
+            }
+            Self::Budget(BudgetKind::PageBytes) => {
+                f.write_str(hierarchy_limit_message(HierarchyLimit::PageBytes))
+            }
             Self::Budget(BudgetKind::Pages) => f.write_str(HIERARCHY_PAGE_LIMIT_ERROR),
             Self::Transient(err) => write!(f, "{err}"),
         }
@@ -210,12 +213,16 @@ pub(crate) struct ChildrenState {
     /// Consecutive failed walks since the last complete one.
     /// Cancellation and stale results leave it unchanged.
     failures: u32,
+    /// A relationship changed while a capped walk was already in flight.
+    /// That walk is left running. Success schedules one follow-up; failure does not.
+    follow_up: bool,
 }
 
 impl ChildrenState {
     fn invalidate(&mut self) {
         self.dirty = true;
         self.inflight = None;
+        self.follow_up = false;
         if let Some(abort) = self.abort.take() {
             abort.abort();
         }
@@ -1091,21 +1098,23 @@ impl App {
         let Some(state) = self.spaces.children.get_mut(key) else {
             return;
         };
-        // Below the cap, a relationship change walks on the next sweep and
-        // keeps its place on the ladder. At the cap, keep the wait so child
-        // churn cannot start another 16 MiB walk. Aborting the attempt the
-        // cap already allowed schedules that wait again; a past deadline
-        // would otherwise let the next sweep start immediately.
+        // Below the cap, walk on the next sweep and keep the ladder position.
         if state.failures < HIERARCHY_MAX_FAILURES {
             state.invalidate();
             state.retry_at = None;
             return;
         }
-        let restart_after_abort = state.inflight.is_some();
-        state.invalidate();
-        if restart_after_abort {
-            state.retry_at = Some(Instant::now() + hierarchy_retry_delay(state.failures));
+        // At the cap, do not abort the in-flight walk and do not push the
+        // deadline out. Aborting on every child event restarted the 240-second
+        // wait and could starve the space until `/refresh`. The attempt
+        // finishes. A success schedules one follow-up, and a failure keeps
+        // its own delay. A child event while nothing is in flight still marks
+        // the cache dirty and leaves the existing deadline alone.
+        if state.inflight.is_some() {
+            state.follow_up = true;
+            return;
         }
+        state.invalidate();
     }
 
     pub(crate) fn refresh_spaces(&mut self) {
@@ -1458,17 +1467,30 @@ impl App {
                 state.abort = None;
                 // A live invalidation during a GET requires another GET; the
                 // first response may predate a removal and cannot settle it.
+                // Drop a follow-up flag with that discarded attempt.
                 if state.dirty {
+                    state.follow_up = false;
                     return;
                 }
                 match result {
                     Ok(children) => {
+                        let follow_up = state.follow_up;
+                        state.follow_up = false;
                         state.children = Some(children);
                         state.error = None;
                         state.retry_at = None;
                         state.failures = 0;
+                        if follow_up {
+                            // The links changed during this walk. One more walk,
+                            // now that the count is clear. Further child events
+                            // use the below-cap path.
+                            state.dirty = true;
+                        }
                     }
                     Err(failure) => {
+                        // The next walk reads the current links. A child event
+                        // during this attempt does not add another delay.
+                        state.follow_up = false;
                         let budget = matches!(failure, WalkFailure::Budget(_));
                         let error = failure.to_string();
                         state.error = Some(error.clone());

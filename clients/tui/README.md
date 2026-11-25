@@ -199,6 +199,8 @@ A byte-total, per-page size, or page-count failure starts at 240 seconds, and th
 A complete walk clears that count.
 `/refresh` retries immediately and clears it.
 A relationship change retries immediately while the count is below the cap, and keeps the wait at the cap.
+At the cap, child-link changes do not abort the in-flight walk or extend its wait.
+A successful walk then schedules one follow-up.
 An older server without `space/hierarchy` shows the same incomplete marker; upgrade Axon to load space membership.
 Live `m.space.child` updates invalidate the affected group, and reconnect refreshes both membership and saved order.
 An account without joined spaces retains the flat room list.

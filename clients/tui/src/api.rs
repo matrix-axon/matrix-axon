@@ -73,11 +73,19 @@ pub(crate) enum HierarchyReadError {
     Other(ApiError),
 }
 
+/// User-facing text for a local hierarchy size limit.
+/// Walk failures use this too, so the two displays cannot drift.
+pub(crate) fn hierarchy_limit_message(limit: HierarchyLimit) -> &'static str {
+    match limit {
+        HierarchyLimit::TotalBytes => HIERARCHY_BYTE_BUDGET_ERROR,
+        HierarchyLimit::PageBytes => RESPONSE_SIZE_LIMIT_ERROR,
+    }
+}
+
 impl fmt::Display for HierarchyReadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Limit(HierarchyLimit::TotalBytes) => f.write_str(HIERARCHY_BYTE_BUDGET_ERROR),
-            Self::Limit(HierarchyLimit::PageBytes) => f.write_str(RESPONSE_SIZE_LIMIT_ERROR),
+            Self::Limit(limit) => f.write_str(hierarchy_limit_message(*limit)),
             Self::Other(err) => write!(f, "{err}"),
         }
     }

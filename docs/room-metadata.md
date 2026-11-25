@@ -563,6 +563,8 @@ The 60-second walk deadline stays on that ladder.
 A complete walk clears the count.
 `/refresh` retries immediately and clears the count.
 A relationship change retries immediately while the count is below the cap, and keeps the wait at the cap.
+At the cap, child-link changes do not abort the in-flight walk or extend its wait.
+A successful walk then schedules one follow-up.
 Reconnect keeps a failed walk's deadline and count.
 TUI discovery browsing, selected-child previews, enrichment, and joins remain for PR 3 of [issue 624](https://github.com/matrix-axon/matrix-axon/issues/624).
 
