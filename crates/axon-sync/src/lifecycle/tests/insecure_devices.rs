@@ -433,6 +433,7 @@ async fn insecure_devices_fresh_password_and_token_sessions_reset_policy() {
     })
     .await;
     let own = format!("@fresh-device-{}:localhost", Uuid::new_v4().simple());
+    let password = Uuid::new_v4().to_string();
     let session = json!({"user_id": own, "device_id": DEVICE, "access_token": "fixture"});
     let hs = Router::new()
         .route(
@@ -442,8 +443,18 @@ async fn insecure_devices_fresh_password_and_token_sessions_reset_policy() {
         .route(
             "/_matrix/client/v3/login",
             post({
-                let session = session.clone();
-                move || async move { Json(session) }
+                let expected = password.clone();
+                move |Json(request): Json<Value>| {
+                    let authorized = request["password"].as_str() == Some(expected.as_str());
+                    let session = session.clone();
+                    async move {
+                        if authorized {
+                            Ok(Json(session))
+                        } else {
+                            Err(StatusCode::FORBIDDEN)
+                        }
+                    }
+                }
             }),
         )
         .route(
@@ -474,9 +485,7 @@ async fn insecure_devices_fresh_password_and_token_sessions_reset_policy() {
             .unwrap();
         lc.logout(account_id).await.unwrap();
         let active_id = if password_login {
-            lc.login(Some(&homeserver), &own, "fixture-password")
-                .await
-                .unwrap()
+            lc.login(Some(&homeserver), &own, &password).await.unwrap()
         } else {
             // Even an import with the same upstream device ID replaces Axon's
             // crypto store, so it starts with the default policy.
