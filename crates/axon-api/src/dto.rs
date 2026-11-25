@@ -1279,7 +1279,10 @@ pub struct SendMediaRequest {
     /// id without sending again; the retry's own staged uploads are then
     /// deleted. A retry whose caption, relation, `info`, thumbnail or
     /// previews differ from the first send's is a `409`, and keeps its
-    /// uploads.
+    /// uploads. The check cannot see which file is sent, so the id must be
+    /// unique to one file: another file sent with the same id and the same
+    /// caption within 10 minutes is taken for a retry, answered with the
+    /// first event, and never sent.
     ///
     /// A send that failed, a `504` included, is not remembered: Axon cannot
     /// learn the outcome of a call it stopped waiting for. Its retry uploads

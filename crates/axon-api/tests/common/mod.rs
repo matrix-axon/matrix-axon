@@ -250,11 +250,14 @@ pub enum Outcome {
     Upstream(String),
     Timeout(String),
     PreviewsChanged,
+    /// Panic inside the send, as a bug in the SDK path would.
+    Panic,
 }
 
 impl Outcome {
     fn to_result(&self) -> Result<String, SendError> {
         match self {
+            Outcome::Panic => panic!("stub sender panicked on purpose"),
             Outcome::Ok(id) => Ok(id.clone()),
             Outcome::NotFound(m) => Err(SendError::NotFound(m.clone())),
             Outcome::Forbidden(m) => Err(SendError::Forbidden(m.clone())),

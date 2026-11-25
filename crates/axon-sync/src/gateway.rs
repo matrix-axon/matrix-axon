@@ -1071,7 +1071,8 @@ async fn send_with_previews_in_room(
             // too. If they exceed the reserve, reject the parent event and accept
             // that already-uploaded Matrix objects can remain orphaned; staged
             // originals are released for explicit correction/retry by the caller.
-            link_preview::check_content(&content).map_err(preview_validation_error)?;
+            // A thumbnail is the exception: it is dropped rather than fail the send.
+            check_preview_content(room.room_id(), &mut content)?;
             // Do not send plaintext thumbnail references after a concurrent room
             // encryption upgrade. The next explicit attempt will reupload them.
             if has_uploads && !encrypted && fresh_preview_encryption(room, account_id).await? {
@@ -1088,6 +1089,28 @@ async fn send_with_previews_in_room(
             Ok(response.response.event_id.to_string())
         })
         .await
+}
+
+/// [`link_preview::check_content`](axon_core::link_preview::check_content) for
+/// a preview-aware media event, with the thumbnail best-effort as everywhere
+/// else (ADR 0142 section 6): preflight reserves room for the media fields
+/// but not for a thumbnail's, so when the event is over the limit with its
+/// thumbnail, the thumbnail is dropped and the event checked again. An event
+/// that is over without it still fails.
+fn check_preview_content(room_id: &RoomId, content: &mut Value) -> Result<(), GatewayError> {
+    use axon_core::link_preview::check_content;
+    if check_content(content).is_err() {
+        if let Some(info) = content.get_mut("info").and_then(Value::as_object_mut) {
+            let dropped = ["thumbnail_url", "thumbnail_file", "thumbnail_info"]
+                .iter()
+                .filter(|key| info.remove(**key).is_some())
+                .count();
+            if dropped > 0 {
+                tracing::warn!(%room_id, error_kind = "too_large", "media thumbnail dropped: the event is too large with it");
+            }
+        }
+    }
+    check_content(content).map_err(preview_validation_error)
 }
 
 /// How long a media send may take.
@@ -3819,6 +3842,50 @@ mod tests {
                 .len()
                 <= 255
         );
+    }
+
+    /// The #1241 review, round 3: a thumbnail that alone takes a
+    /// preview-aware event over the content limit is dropped, not allowed to
+    /// fail the send; an event over the limit without it still fails, and one
+    /// within it keeps its thumbnail.
+    #[test]
+    fn a_thumbnail_is_dropped_when_it_alone_makes_the_event_too_large() {
+        let room = matrix_sdk::ruma::room_id!("!r:example.org");
+        let event = |body_len: usize| {
+            json!({
+                "msgtype": "m.image",
+                "body": "x".repeat(body_len),
+                "url": "mxc://example.org/original",
+                "info": {
+                    "mimetype": "image/png",
+                    "thumbnail_url": "mxc://example.org/thumb",
+                    "thumbnail_info": {"w": 800, "h": 600, "mimetype": "image/jpeg", "size": 1, "pad": "p".repeat(400)},
+                },
+            })
+        };
+        let size = |v: &serde_json::Value| serde_json::to_vec(v).unwrap().len();
+        let limit = axon_core::link_preview::MAX_CONTENT_BYTES;
+        let base = size(&event(0));
+
+        let mut fits = event(limit - base - 10);
+        super::check_preview_content(room, &mut fits).expect("within the limit");
+        assert!(
+            fits["info"].get("thumbnail_info").is_some(),
+            "a fitting event keeps its thumbnail"
+        );
+
+        let mut over_by_thumb = event(limit - base + 100);
+        super::check_preview_content(room, &mut over_by_thumb)
+            .expect("the thumbnail is dropped instead of failing the send");
+        assert!(over_by_thumb["info"].get("thumbnail_info").is_none());
+        assert!(over_by_thumb["info"].get("thumbnail_url").is_none());
+        assert_eq!(over_by_thumb["info"]["mimetype"], "image/png");
+
+        let mut over_anyway = event(limit + 100);
+        assert!(matches!(
+            super::check_preview_content(room, &mut over_anyway),
+            Err(GatewayError::EventTooLarge)
+        ));
     }
 
     /// How the thumbnail test's homeserver treats an upload of

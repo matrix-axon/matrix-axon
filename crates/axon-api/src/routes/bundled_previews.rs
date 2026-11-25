@@ -24,7 +24,7 @@ use crate::{
     uploads::StagedUploadService,
 };
 
-use super::media_send::{settle_claims, MediaFields, TxnGuard};
+use super::media_send::{Claims, MediaFields, TxnGuard};
 use super::messages::formatted;
 
 static SEND_SLOTS: LazyLock<crate::AccountSlots> = LazyLock::new(crate::AccountSlots::default);
@@ -148,12 +148,12 @@ pub(super) async fn send(
         let _permit = permit;
         let started = std::time::Instant::now();
         tracing::debug!(%account_id, %room_id, preview_count = request.previews.len(), "preview-aware send started");
-        let mut claimed = Vec::new();
+        let mut claims = Claims::new(uploads.clone(), account_id, &room_id);
         let result = async {
-            let previews = claim_previews(&*uploads, account_id, &request.previews, &mut claimed).await?;
+            let previews = claim_previews(&*uploads, account_id, &request.previews, &mut claims.ids).await?;
             let attachment = match &request.media {
                 Some(media) => Some(
-                    super::media_send::claim_attachment(&*uploads, account_id, media, &mut claimed)
+                    super::media_send::claim_attachment(&*uploads, account_id, media, &mut claims.ids)
                         .await?,
                 ),
                 None => None,
@@ -171,7 +171,7 @@ pub(super) async fn send(
                 .map_err(ApiError::from)
         }
         .await;
-        settle_claims(&*uploads, account_id, &room_id, claimed, result.is_ok()).await;
+        claims.settle(result.is_ok()).await;
         if let Some(txn) = txn {
             txn.settle(&result);
         }
@@ -250,10 +250,10 @@ pub(super) async fn edit(
     };
     tokio::spawn(async move {
         let _permit = permit;
-        let mut claimed = Vec::new();
+        let mut claims = Claims::new(uploads.clone(), account_id, &room_id);
         let result = async {
             let mut claimed_new =
-                claim_previews(&*uploads, account_id, &new, &mut claimed).await?.into_iter();
+                claim_previews(&*uploads, account_id, &new, &mut claims.ids).await?.into_iter();
             let previews = request.url_previews.as_ref().map(|list| {
                 list.iter()
                     .filter_map(|p| match p {
@@ -288,7 +288,7 @@ pub(super) async fn edit(
                 .map_err(ApiError::from)
         }
         .await;
-        settle_claims(&*uploads, account_id, &room_id, claimed, result.is_ok()).await;
+        claims.settle(result.is_ok()).await;
         if let Err(error) = &result {
             let (status, code) = error.diagnostics();
             tracing::debug!(%account_id, %room_id, status, code, "edit failed; upload cleanup attempted");

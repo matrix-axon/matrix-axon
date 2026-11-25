@@ -41,7 +41,8 @@ pub(super) struct MediaFields {
     pub txn_id: Option<String>,
     /// What the request asks to send, apart from upload ids, which change
     /// when a client stages the file again for a retry. A `txn_id` hit with a
-    /// different fingerprint is another message reusing the id.
+    /// different fingerprint is another message reusing the id. It does not
+    /// identify the file itself; issue 1257 adds that.
     pub fingerprint: u64,
 }
 
@@ -196,8 +197,64 @@ pub(super) async fn claim_attachment(
     Ok(attachment)
 }
 
+/// The uploads one send has claimed, owned by the task that sends.
+///
+/// [`settle`](Self::settle) consumes them after a success or releases them
+/// for a retry. Dropped unsettled, because the task panicked, it releases
+/// them from a task of its own, so they are not left `sending` until the
+/// next boot, where a retry could not claim them again.
+pub(super) struct Claims {
+    uploads: std::sync::Arc<dyn StagedUploadService>,
+    account_id: Uuid,
+    room_id: String,
+    /// Pushed to as each claim succeeds.
+    pub ids: Vec<Uuid>,
+}
+
+impl Claims {
+    pub fn new(
+        uploads: std::sync::Arc<dyn StagedUploadService>,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> Self {
+        Self {
+            uploads,
+            account_id,
+            room_id: room_id.to_owned(),
+            ids: Vec::new(),
+        }
+    }
+
+    pub async fn settle(mut self, sent: bool) {
+        let ids = std::mem::take(&mut self.ids);
+        settle_claims(&*self.uploads, self.account_id, &self.room_id, ids, sent).await;
+    }
+}
+
+impl Drop for Claims {
+    fn drop(&mut self) {
+        let ids = std::mem::take(&mut self.ids);
+        if ids.is_empty() {
+            return;
+        }
+        let (account_id, room_id) = (self.account_id, std::mem::take(&mut self.room_id));
+        tracing::warn!(%account_id, %room_id, count = ids.len(), "send ended without settling its uploads; releasing them");
+        let uploads = self.uploads.clone();
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    settle_claims(&*uploads, account_id, &room_id, ids, false).await;
+                });
+            }
+            Err(_) => {
+                tracing::warn!(%account_id, "no runtime to release uploads; boot reconciliation will");
+            }
+        }
+    }
+}
+
 /// Consume the claimed uploads after a success, or release them for a retry.
-pub(super) async fn settle_claims(
+async fn settle_claims(
     uploads: &dyn StagedUploadService,
     account_id: Uuid,
     room_id: &str,
@@ -250,14 +307,37 @@ impl TxnEntry {
 /// what keep it from posting twice.
 #[derive(Default)]
 struct MediaTxns {
-    accounts: Mutex<HashMap<Uuid, HashMap<TxnKey, TxnEntry>>>,
+    state: Mutex<TxnsState>,
+}
+
+#[derive(Default)]
+struct TxnsState {
+    accounts: HashMap<Uuid, HashMap<TxnKey, TxnEntry>>,
+    /// When every account's expired entries were last dropped.
+    swept_at: Option<Instant>,
+}
+
+/// How often a `begin` also expires other accounts' entries, so an account
+/// that stops sending media does not keep them, without scanning every
+/// account on every send.
+const SWEEP_EVERY: Duration = Duration::from_secs(60);
+
+impl MediaTxns {
+    /// The map, even after a panic while another thread held the lock: every
+    /// update leaves it consistent, and a poisoned lock that panicked in
+    /// [`TxnGuard`]'s `Drop` during unwinding would abort the process.
+    fn lock(&self) -> std::sync::MutexGuard<'_, TxnsState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 static MEDIA_TXNS: LazyLock<MediaTxns> = LazyLock::new(MediaTxns::default);
 
 enum Begin {
     /// No send holds this id: this request sends, and settles the id through
-    /// the guard. `None` when the account's map is full of sends in flight.
+    /// the guard. `None` when the account already remembers 256 live ids.
     Owner(Option<TxnGuard>),
     /// The send holding the id, and the uploads it named.
     Wait(watch::Receiver<Option<String>>, Vec<Uuid>),
@@ -274,15 +354,20 @@ impl MediaTxns {
         fingerprint: u64,
         uploads: Vec<Uuid>,
     ) -> Begin {
-        let mut accounts = self.accounts.lock().unwrap();
-        // Expire every account's old successes, not only this one's, so an
-        // account that stops sending media does not keep its entries.
+        let mut state = self.lock();
         let now = Instant::now();
-        accounts.retain(|_, txns| {
-            txns.retain(|_, entry| !entry.expired(now));
-            !txns.is_empty()
-        });
-        let txns = accounts.entry(account_id).or_default();
+        if state
+            .swept_at
+            .is_none_or(|at| now.duration_since(at) >= SWEEP_EVERY)
+        {
+            state.accounts.retain(|_, txns| {
+                txns.retain(|_, entry| !entry.expired(now));
+                !txns.is_empty()
+            });
+            state.swept_at = Some(now);
+        }
+        let txns = state.accounts.entry(account_id).or_default();
+        txns.retain(|_, entry| !entry.expired(now));
         if let Some(entry) = txns.get(&key) {
             if entry.fingerprint != fingerprint {
                 return Begin::Mismatch;
@@ -294,20 +379,12 @@ impl MediaTxns {
                 TxnState::InFlight(rx) => Begin::Wait(rx.clone(), entry.uploads.clone()),
             };
         }
+        // Full of ids still inside their window: send without remembering
+        // this one rather than evict a live one, so every remembered id keeps
+        // its 10 minutes. The homeserver's transaction id still deduplicates
+        // a retry of the unremembered send.
         if txns.len() >= TXNS_PER_ACCOUNT {
-            let oldest = txns
-                .iter()
-                .filter_map(|(key, entry)| match entry.state {
-                    TxnState::Sent { at, .. } => Some((at, key.clone())),
-                    TxnState::InFlight(_) => None,
-                })
-                .min();
-            match oldest {
-                Some((_, key)) => {
-                    txns.remove(&key);
-                }
-                None => return Begin::Owner(None),
-            }
+            return Begin::Owner(None);
         }
         let (tx, rx) = watch::channel(None);
         txns.insert(
@@ -344,7 +421,8 @@ impl TxnGuard {
     /// runs as a new send.
     pub fn settle<T>(mut self, result: &Result<String, T>) {
         self.settled = true;
-        let mut accounts = self.txns.accounts.lock().unwrap();
+        let mut state = self.txns.lock();
+        let accounts = &mut state.accounts;
         let Some(txns) = accounts.get_mut(&self.account_id) else {
             return;
         };
@@ -373,7 +451,8 @@ impl Drop for TxnGuard {
         if self.settled {
             return;
         }
-        let mut accounts = self.txns.accounts.lock().unwrap();
+        let mut state = self.txns.lock();
+        let accounts = &mut state.accounts;
         if let Some(txns) = accounts.get_mut(&self.account_id) {
             txns.remove(&self.key);
             if txns.is_empty() {
@@ -596,11 +675,29 @@ mod tests {
             };
             guard.settle::<()>(&Ok(format!("$e{i}")));
         }
-        let Begin::Owner(Some(_new)) = begin(account, key(9999)) else {
-            panic!("a full map evicts the oldest success");
+        // Full of live ids: the new send goes unremembered rather than evict
+        // one still inside its 10 minutes.
+        assert!(matches!(begin(account, key(9999)), Begin::Owner(None)));
+        assert!(matches!(begin(account, key(0)), Begin::Sent(..)));
+        assert!(matches!(begin(account, key(255)), Begin::Sent(..)));
+    }
+
+    /// A panic while the lock is held must not make every later send, and
+    /// [`TxnGuard`]'s `Drop`, panic too.
+    #[test]
+    fn a_poisoned_lock_is_still_usable() {
+        let txns: &'static MediaTxns = Box::leak(Box::default());
+        let poison = std::thread::spawn(move || {
+            let _held = txns.state.lock().unwrap();
+            panic!("poison the lock on purpose");
+        });
+        assert!(poison.join().is_err());
+        assert!(txns.state.is_poisoned());
+        let key = ("!room:x".to_owned(), "poison".to_owned());
+        let Begin::Owner(Some(guard)) = txns.begin(Uuid::new_v4(), key, 0, Vec::new()) else {
+            panic!("begin works after the poisoning");
         };
-        assert!(matches!(begin(account, key(0)), Begin::Owner(Some(_))));
-        assert!(matches!(begin(account, key(5)), Begin::Sent(..)));
+        drop(guard);
     }
 
     /// A hit with another fingerprint is another message reusing the id; a
@@ -633,11 +730,18 @@ mod tests {
 
         // Age the success past the window, then touch another account.
         {
-            let mut accounts = MEDIA_TXNS.accounts.lock().unwrap();
-            let entry = accounts.get_mut(&account).unwrap().get_mut(&key).unwrap();
+            let mut state = MEDIA_TXNS.lock();
+            let entry = state
+                .accounts
+                .get_mut(&account)
+                .unwrap()
+                .get_mut(&key)
+                .unwrap();
             if let TxnState::Sent { at, .. } = &mut entry.state {
                 *at -= TXN_REMEMBERED_FOR;
             }
+            // As if the last sweep were a minute ago.
+            state.swept_at = None;
         }
         let other = Uuid::new_v4();
         let Begin::Owner(Some(guard)) = begin(other, key.clone()) else {
@@ -645,7 +749,7 @@ mod tests {
         };
         guard.settle::<()>(&Err(()));
         assert!(
-            !MEDIA_TXNS.accounts.lock().unwrap().contains_key(&account),
+            !MEDIA_TXNS.lock().accounts.contains_key(&account),
             "an idle account's expired entries were dropped"
         );
     }

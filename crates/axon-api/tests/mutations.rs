@@ -1502,3 +1502,33 @@ async fn send_media_txn_id_reuse_is_409_and_a_retry_keeps_the_senders_uploads() 
     assert!(uploads.deletes().is_empty(), "{:?}", uploads.deletes());
     assert_eq!(sender.calls().len(), 1);
 }
+
+/// The #1241 review, round 3: a send task that panics still releases what it
+/// claimed, so a retry can claim the uploads again instead of finding them
+/// stuck `sending` until the next boot.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn send_media_panic_still_releases_the_claims() {
+    let sender = Arc::new(StubSender::failing(Outcome::Panic));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store().await, sender, uploads.clone());
+    let (account_id, upload_id, thumb_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (status, _) = send(
+        &app,
+        "POST",
+        &media_uri(account_id, "!r:localhost"),
+        Some(json!({"upload_id": upload_id, "thumbnail_upload_id": thumb_id, "txn_id": "p"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    // Released from a task of its own once the panicking task unwinds.
+    let expected = vec![(account_id, upload_id), (account_id, thumb_id)];
+    for _ in 0..100 {
+        if uploads.releases() == expected {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(uploads.releases(), expected);
+    assert!(uploads.completes().is_empty());
+}

@@ -231,10 +231,10 @@ pub async fn send_media(
         // section 4). The request only waits for it.
         tokio::spawn(async move {
             let started_at = std::time::Instant::now();
-            let mut claimed = Vec::new();
+            let mut claims = media_send::Claims::new(uploads.clone(), account_id, &room_id);
             let result = async {
                 let attachment =
-                    media_send::claim_attachment(&*uploads, account_id, &fields, &mut claimed)
+                    media_send::claim_attachment(&*uploads, account_id, &fields, &mut claims.ids)
                         .await?;
                 tracing::debug!(
                     %account_id,
@@ -267,7 +267,7 @@ pub async fn send_media(
             }
             .await;
             let sent = result.is_ok();
-            media_send::settle_claims(&*uploads, account_id, &room_id, claimed, sent).await;
+            claims.settle(sent).await;
             if let Some(txn) = txn {
                 txn.settle(&result);
             }

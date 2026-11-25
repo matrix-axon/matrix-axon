@@ -133,6 +133,19 @@ pub struct FilesystemStagedUploads {
 }
 
 impl FilesystemStagedUploads {
+    /// Undo [`StagedUploadService::claim_send_thumbnail`]'s claim before it
+    /// returns `Err`, which promises the caller nothing is left claimed.
+    async fn release_claimed_thumbnail(&self, account_id: Uuid, upload_id: Uuid) {
+        if self
+            .store
+            .release_sending_media_upload(account_id, upload_id)
+            .await
+            .is_err()
+        {
+            tracing::warn!(%account_id, %upload_id, "failed to release a send thumbnail; boot reconciliation will");
+        }
+    }
+
     /// A cap is checked against both DB metadata and bytes actually read.
     /// The owning API task is not cancelled on HTTP disconnect; failures here
     /// release only the claim this invocation acquired.
@@ -663,8 +676,13 @@ impl StagedUploadService for FilesystemStagedUploads {
         else {
             return Ok(SendThumbnail::Skipped("decoder_busy"));
         };
-        let permit = permit
-            .map_err(|_| StageUploadError::Internal("thumbnail decoder capacity closed".into()))?;
+        let Ok(permit) = permit else {
+            // Closed only at shutdown. `Err` promises nothing is left claimed.
+            self.release_claimed_thumbnail(account_id, upload_id).await;
+            return Err(StageUploadError::Internal(
+                "thumbnail decoder capacity closed".into(),
+            ));
+        };
         // The work keeps its permit until it finishes, even once the budget
         // has run out and nobody waits for it: a timed-out thumbnail still
         // occupies one staging slot (of `media.max_concurrent_uploads`) until
@@ -685,14 +703,7 @@ impl StagedUploadService for FilesystemStagedUploads {
         match result {
             Ok(thumbnail) => Ok(SendThumbnail::Ready(thumbnail)),
             Err(error) => {
-                if self
-                    .store
-                    .release_sending_media_upload(account_id, upload_id)
-                    .await
-                    .is_err()
-                {
-                    tracing::warn!(%account_id, %upload_id, "failed to release invalid send thumbnail");
-                }
+                self.release_claimed_thumbnail(account_id, upload_id).await;
                 Err(error)
             }
         }
@@ -1231,6 +1242,15 @@ mod tests {
         assert!(matches!(
             service.claim_send_thumbnail(other, id, budget).await,
             Err(StageUploadError::NotFound(_))
+        ));
+        assert_eq!(state(id).await, MediaUploadState::Staged);
+
+        // A closed decoder pool (shutdown) is an `Err`, so the claim it had
+        // already made is released, not left `sending` for nobody to settle.
+        service.concurrent_uploads.close();
+        assert!(matches!(
+            service.claim_send_thumbnail(owner, id, budget).await,
+            Err(StageUploadError::Internal(_))
         ));
         assert_eq!(state(id).await, MediaUploadState::Staged);
         store.delete_account_row(owner).await.unwrap();
