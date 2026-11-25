@@ -288,15 +288,14 @@ pub(crate) async fn login_new_device(
     let backup = config.data_dir.join(format!("{}.prev", account.account_id));
 
     with_staged_store_dir(&data_dir, &backup, || async {
-        let client = client_builder(
-            &account.homeserver_url,
-            false,
-            account.exclude_insecure_devices,
-        )
-        .sqlite_store_with_config_and_cache_path(sqlite_config(&data_dir, store_key), None::<&Path>)
-        .build()
-        .await
-        .map_err(sdk_err)?;
+        let client = client_builder(&account.homeserver_url, false, false)
+            .sqlite_store_with_config_and_cache_path(
+                sqlite_config(&data_dir, store_key),
+                None::<&Path>,
+            )
+            .build()
+            .await
+            .map_err(sdk_err)?;
 
         let response = client
             .matrix_auth()
@@ -388,15 +387,14 @@ pub(crate) async fn import_token_new_device(
     let backup = config.data_dir.join(format!("{}.prev", account.account_id));
 
     with_staged_store_dir(&data_dir, &backup, || async {
-        let client = client_builder(
-            &account.homeserver_url,
-            false,
-            account.exclude_insecure_devices,
-        )
-        .sqlite_store_with_config_and_cache_path(sqlite_config(&data_dir, store_key), None::<&Path>)
-        .build()
-        .await
-        .map_err(sdk_err)?;
+        let client = client_builder(&account.homeserver_url, false, false)
+            .sqlite_store_with_config_and_cache_path(
+                sqlite_config(&data_dir, store_key),
+                None::<&Path>,
+            )
+            .build()
+            .await
+            .map_err(sdk_err)?;
 
         // `restore` reads the device id off the `Account` it's given (not the
         // DB row, which has none yet for a fresh identity) — supply it via a
@@ -539,7 +537,6 @@ pub(crate) async fn build_matrix_oauth_acquire_client(
     config: &SyncConfig,
     staging_dir_name: &str,
     server_name_or_url: &str,
-    exclude_insecure_devices: bool,
 ) -> Result<Client, MatrixOAuthAcquireClientError> {
     let store_key = config
         .store_key
@@ -557,7 +554,7 @@ pub(crate) async fn build_matrix_oauth_acquire_client(
     configure_client_builder(
         Client::builder().server_name_or_homeserver_url(server_name_or_url),
         true,
-        exclude_insecure_devices,
+        false,
     )
     .request_config(RequestConfig::new().timeout(timeout))
     .sqlite_store_with_config_and_cache_path(sqlite_config(&staging, store_key), None::<&Path>)

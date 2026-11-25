@@ -516,7 +516,8 @@ impl Store {
         Ok(())
     }
 
-    /// Persist a legacy Matrix login session and clear any prior OAuth state.
+    /// Persist a fresh Matrix device session and clear the previous device's
+    /// policy opt-in and any prior OAuth state in the same write.
     /// The plaintext token is bound as a parameter and never logged.
     pub async fn set_account_matrix_session(
         &self,
@@ -529,6 +530,7 @@ impl Store {
             "UPDATE accounts \
              SET device_id = $2, \
                  auth_kind = 'matrix', \
+                 exclude_insecure_devices = false, \
                  access_token_encrypted = pgp_sym_encrypt($3, $4), \
                  oauth_refresh_token_encrypted = NULL, \
                  oauth_client_id = NULL \

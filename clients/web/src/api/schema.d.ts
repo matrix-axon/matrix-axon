@@ -522,7 +522,9 @@ export interface paths {
         /**
          * Read the impact of insecure device exclusion
          * @description Lists joined encrypted rooms and the members with affected devices known to
-         *     Axon. Devices that have not uploaded identity keys are absent from the list.
+         *     Axon. This uses cached device lists, so users whose lists have never been
+         *     fetched and devices missing from stale lists can be absent.
+         *     Devices that have not uploaded identity keys are also absent.
          *     The server confirms rooms whose cache says they are unencrypted and may
          *     sync lazy rosters before this read succeeds.
          */

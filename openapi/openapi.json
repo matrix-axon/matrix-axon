@@ -1745,7 +1745,7 @@
           "accounts"
         ],
         "summary": "Read the impact of insecure device exclusion",
-        "description": "Lists joined encrypted rooms and the members with affected devices known to\nAxon. Devices that have not uploaded identity keys are absent from the list.\nThe server confirms rooms whose cache says they are unencrypted and may\nsync lazy rosters before this read succeeds.",
+        "description": "Lists joined encrypted rooms and the members with affected devices known to\nAxon. This uses cached device lists, so users whose lists have never been\nfetched and devices missing from stale lists can be absent.\nDevices that have not uploaded identity keys are also absent.\nThe server confirms rooms whose cache says they are unencrypted and may\nsync lazy rosters before this read succeeds.",
         "operationId": "insecure_devices_impact",
         "parameters": [
           {

@@ -421,3 +421,187 @@ async fn insecure_devices_requires_current_impact_and_preserves_decrypted_histor
     delete_account(&lc.store, account_id).await;
     server.abort();
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn insecure_devices_fresh_password_and_token_sessions_reset_policy() {
+    let fixture = tempfile::tempdir().unwrap();
+    let lc = lifecycle_with(SyncConfig {
+        data_dir: fixture.path().to_owned(),
+        store_key: Some("test-key".to_owned()),
+        ..SyncConfig::default()
+    })
+    .await;
+    let own = format!("@fresh-device-{}:localhost", Uuid::new_v4().simple());
+    let session = json!({"user_id": own, "device_id": DEVICE, "access_token": "fixture"});
+    let hs = Router::new()
+        .route(
+            "/_matrix/client/versions",
+            get(|| async { Json(json!({"versions": ["v1.11"], "unstable_features": {}})) }),
+        )
+        .route(
+            "/_matrix/client/v3/login",
+            post({
+                let session = session.clone();
+                move || async move { Json(session) }
+            }),
+        )
+        .route(
+            "/_matrix/client/v3/account/whoami",
+            get({
+                let own = own.clone();
+                move || async move { Json(json!({"user_id": own, "device_id": DEVICE})) }
+            }),
+        )
+        .route(
+            "/_matrix/client/v3/logout",
+            post(|| async { Json(json!({})) }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let homeserver = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, hs).await.unwrap() });
+    let account_id = lc
+        .store
+        .upsert_account(&own, &homeserver)
+        .await
+        .unwrap()
+        .account_id;
+
+    for password_login in [true, false] {
+        lc.store
+            .set_exclude_insecure_devices(account_id, true)
+            .await
+            .unwrap();
+        lc.logout(account_id).await.unwrap();
+        let active_id = if password_login {
+            lc.login(Some(&homeserver), &own, "fixture-password")
+                .await
+                .unwrap()
+        } else {
+            // Even an import with the same upstream device ID replaces Axon's
+            // crypto store, so it starts with the default policy.
+            lc.import_token(&homeserver, &own, "fixture", DEVICE)
+                .await
+                .unwrap()
+        };
+        assert_eq!(active_id, account_id);
+        let active = lc.store.get_account(active_id).await.unwrap().unwrap();
+        assert_eq!(active.state, AccountState::Active);
+        assert!(!active.exclude_insecure_devices);
+        let client = lc.manager.get_or_connect(active_id).await.unwrap();
+        assert_eq!(client.device_id().unwrap(), DEVICE);
+        assert!(matches!(
+            client.decryption_settings().sender_device_trust_requirement,
+            TrustRequirement::Untrusted
+        ));
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            client.encryption().wait_for_e2ee_initialization_tasks(),
+        )
+        .await
+        .unwrap();
+    }
+    lc.logout(account_id).await.unwrap();
+    delete_account(&lc.store, account_id).await;
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Postgres"]
+async fn insecure_devices_failed_drain_recovers_sync_when_the_old_task_exits() {
+    use crate::engine::AccountTask;
+
+    for logout_while_draining in [false, true] {
+        let lc = lifecycle().await;
+        let own = format!("@failed-drain-{}:localhost", Uuid::new_v4().simple());
+        let account_id = lc
+            .store
+            .upsert_account(&own, "http://127.0.0.1:9")
+            .await
+            .unwrap()
+            .account_id;
+        lc.store
+            .set_exclude_insecure_devices(account_id, true)
+            .await
+            .unwrap();
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let old = AccountTask::spawn(&lc.tracker, CancellationToken::new(), async move {
+            started_tx.send(()).unwrap();
+            // No await point until released, so abort cannot stop this run.
+            blocked.recv_timeout(Duration::from_secs(10)).unwrap();
+        });
+        let old_id = old.handle.id();
+        lc.tasks.lock().unwrap().insert(account_id, old);
+        started_rx.await.unwrap();
+
+        assert!(matches!(
+            lc.set_exclude_insecure_devices(account_id, false, None).await,
+            Err(InsecureDevicesError::Lifecycle(LifecycleError::Draining(id))) if id == account_id
+        ));
+        assert_eq!(lc.tasks.lock().unwrap()[&account_id].handle.id(), old_id);
+        assert!(
+            lc.store
+                .get_account(account_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .exclude_insecure_devices
+        );
+
+        if logout_while_draining {
+            assert!(
+                matches!(lc.logout(account_id).await, Err(LifecycleError::Draining(id)) if id == account_id)
+            );
+        }
+        release.send(()).unwrap();
+
+        if logout_while_draining {
+            lc.tracker.close();
+            tokio::time::timeout(Duration::from_secs(5), lc.tracker.wait())
+                .await
+                .unwrap();
+            assert_eq!(lc.tasks.lock().unwrap()[&account_id].handle.id(), old_id);
+            assert_eq!(
+                lc.store
+                    .get_account(account_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                AccountState::Deactivated
+            );
+        } else {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if lc
+                        .tasks
+                        .lock()
+                        .unwrap()
+                        .get(&account_id)
+                        .is_some_and(|task| {
+                            task.handle.id() != old_id && !task.cancel.is_cancelled()
+                        })
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("a fresh supervisor should take over after the old run exits");
+            assert!(
+                lc.store
+                    .get_account(account_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .exclude_insecure_devices
+            );
+        }
+
+        lc.logout(account_id).await.unwrap();
+        delete_account(&lc.store, account_id).await;
+    }
+}

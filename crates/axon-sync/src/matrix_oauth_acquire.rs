@@ -1258,15 +1258,9 @@ impl MatrixOAuthAcquireEngine {
         flow: &Flow,
         endpoint: &str,
     ) -> Result<Client, DriverFailure> {
-        let retained = self.retained_account(flow).await?;
-        build_matrix_oauth_acquire_client(
-            &self.inner.config,
-            &flow.staging_dir_name,
-            endpoint,
-            retained.is_some_and(|account| account.exclude_insecure_devices),
-        )
-        .await
-        .map_err(classify_client_build_error)
+        build_matrix_oauth_acquire_client(&self.inner.config, &flow.staging_dir_name, endpoint)
+            .await
+            .map_err(classify_client_build_error)
     }
 
     /// Browser sign-in: the device authorization grant, driven directly
@@ -1282,9 +1276,6 @@ impl MatrixOAuthAcquireEngine {
         // password login: one reached only through an explicit URL would
         // otherwise be unreachable here, or have its URL replaced at commit.
         let retained = self.retained_account(&flow).await?;
-        let exclude_insecure_devices = retained
-            .as_ref()
-            .is_some_and(|account| account.exclude_insecure_devices);
         let homeserver = match retained {
             Some(account) => account.homeserver_url,
             // The same resolution password login uses: the server name's
@@ -1317,7 +1308,6 @@ impl MatrixOAuthAcquireEngine {
             &self.inner.config,
             &flow.staging_dir_name,
             &homeserver,
-            exclude_insecure_devices,
         )
         .await
         .map_err(classify_client_build_error)?;

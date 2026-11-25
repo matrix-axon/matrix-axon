@@ -226,6 +226,7 @@ impl Store {
         let updated = sqlx_core::query::query(
             "UPDATE accounts \
              SET homeserver_url = $8, device_id = $2, auth_kind = 'oauth', verified = false, \
+                 exclude_insecure_devices = false, \
                  access_token_encrypted = pgp_sym_encrypt($3, $7), \
                  oauth_refresh_token_encrypted = pgp_sym_encrypt($4, $7), \
                  oauth_client_id = $5 \
@@ -525,6 +526,10 @@ mod tests {
             .await
             .unwrap();
         retain_with_identity_warning(&store, account.account_id).await;
+        store
+            .set_exclude_insecure_devices(account.account_id, true)
+            .await
+            .unwrap();
         let flow_id = Uuid::new_v4();
         assert!(
             store
@@ -558,6 +563,7 @@ mod tests {
         assert_eq!(committed.account_id, account.account_id);
         assert_eq!(committed.homeserver_url, "https://new.example.org/");
         assert!(committed.own_identity_changed);
+        assert!(!committed.exclude_insecure_devices);
 
         assert_eq!(
             store

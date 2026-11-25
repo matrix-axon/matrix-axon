@@ -41,7 +41,7 @@ use crate::backup::{
     log_post_create_version, plan_backup, BackupAction, BackupPlan, BackupProbe, BackupVerb,
     ENABLE_EXPORT_TIMEOUT, UPLOAD_WAIT_TIMEOUT,
 };
-use crate::engine::{spawn_supervised, AccountTask, TaskRegistry};
+use crate::engine::{spawn_supervised, TaskRegistry};
 use crate::error::{GatewayError, SyncError};
 use crate::homeserver_gate::Caller;
 use crate::insecure_devices::{
@@ -945,7 +945,10 @@ impl AccountLifecycle {
         let old = account.exclude_insecure_devices;
         let active = account.state == AccountState::Active;
         if active {
-            self.reap_task(account_id).await?;
+            if let Err(error) = self.reap_task(account_id).await {
+                self.resume_sync_after_failed_drain(&account);
+                return Err(error.into());
+            }
             // The supervisor normally drains SAS drivers itself. Cover a run
             // aborted during cleanup, or a driver started before sync came up.
             cancel_account_flows(&self.verifications, account_id).await;
@@ -966,6 +969,66 @@ impl AccountLifecycle {
 
         tracing::info!(%account_id, old, new = enabled, affected_rooms, "changed MSC4153 setting");
         Ok(())
+    }
+
+    /// Leave an unabortable task in the registry for logout/delete to find.
+    /// Recover the current account only when that same task has stopped and
+    /// no other lifecycle verb has superseded it.
+    fn resume_sync_after_failed_drain(&self, account: &Account) {
+        let account_id = account.account_id;
+        let pending = self
+            .tasks
+            .lock()
+            .expect("task registry poisoned")
+            .get_mut(&account_id)
+            .and_then(|task| Some((task.take_stop_signal()?, task.handle.abort_handle())));
+        let Some((stopped, old_task)) = pending else {
+            return;
+        };
+        let identity = self.lock_for(&account.user_id, &account.homeserver_url);
+        let lifecycle = self.clone();
+        self.tracker.spawn(async move {
+            tokio::select! {
+                () = lifecycle.cancel.cancelled() => return,
+                () = stopped.cancelled() => {}
+            }
+            loop {
+                {
+                    let _guard = tokio::select! {
+                        () = lifecycle.cancel.cancelled() => return,
+                        guard = identity.lock() => guard,
+                    };
+                    let still_registered = lifecycle
+                        .tasks
+                        .lock()
+                        .expect("task registry poisoned")
+                        .get(&account_id)
+                        .is_some_and(|task| task.handle.id() == old_task.id());
+                    if !still_registered {
+                        return;
+                    }
+                    match lifecycle.store.get_account(account_id).await {
+                        Ok(Some(active)) if active.state == AccountState::Active => {
+                            // Join as well as observing the stop signal so the
+                            // cancelled future and all its locals are gone.
+                            if lifecycle.reap_task(account_id).await.is_ok() {
+                                lifecycle.supervise(active);
+                                tracing::info!(%account_id, "resumed sync after MSC4153 drain failure");
+                                return;
+                            }
+                        }
+                        Ok(_) => return,
+                        Err(error) => {
+                            tracing::warn!(%account_id, %error, "could not read account while recovering sync after MSC4153 drain failure");
+                        }
+                    }
+                }
+                tokio::select! {
+                    () = lifecycle.cancel.cancelled() => return,
+                    () = tokio::time::sleep(Duration::from_secs(5)) => {}
+                }
+            }
+        });
     }
 
     /// Log a Matrix account in at runtime as a fresh device, returning its Axon
@@ -1952,12 +2015,12 @@ impl AccountLifecycle {
             .lock()
             .expect("task registry poisoned")
             .remove(&account_id);
-        let Some(AccountTask { cancel, mut handle }) = task else {
+        let Some(mut task) = task else {
             return Ok(());
         };
 
-        cancel.cancel();
-        match tokio::time::timeout(DRAIN_TIMEOUT, &mut handle).await {
+        task.cancel.cancel();
+        match tokio::time::timeout(DRAIN_TIMEOUT, &mut task.handle).await {
             Ok(Ok(())) => return Ok(()),
             Ok(Err(err)) => {
                 tracing::warn!(
@@ -1974,8 +2037,8 @@ impl AccountLifecycle {
             ),
         }
 
-        handle.abort();
-        match tokio::time::timeout(ABORT_TIMEOUT, &mut handle).await {
+        task.handle.abort();
+        match tokio::time::timeout(ABORT_TIMEOUT, &mut task.handle).await {
             // Finished or cancelled — terminated either way.
             Ok(_) => Ok(()),
             Err(_) => {
@@ -1988,7 +2051,7 @@ impl AccountLifecycle {
                 self.tasks
                     .lock()
                     .expect("task registry poisoned")
-                    .insert(account_id, AccountTask { cancel, handle });
+                    .insert(account_id, task);
                 Err(LifecycleError::Draining(account_id))
             }
         }
@@ -2748,7 +2811,7 @@ pub(crate) mod tests {
 
         let drained = Arc::new(AtomicBool::new(false));
         let cancel = CancellationToken::new();
-        let handle = tokio::spawn({
+        let task = AccountTask::spawn(&lc.tracker, cancel.clone(), {
             let cancel = cancel.clone();
             let drained = Arc::clone(&drained);
             async move {
@@ -2757,10 +2820,7 @@ pub(crate) mod tests {
                 drained.store(true, Ordering::SeqCst);
             }
         });
-        lc.tasks
-            .lock()
-            .unwrap()
-            .insert(acct.account_id, AccountTask { cancel, handle });
+        lc.tasks.lock().unwrap().insert(acct.account_id, task);
 
         lc.logout(acct.account_id).await.expect("logout succeeds");
 
@@ -2842,13 +2902,10 @@ pub(crate) mod tests {
         // Ignores its token entirely; the sleep is an await point, so the abort
         // lands there.
         let cancel = CancellationToken::new();
-        let handle = tokio::spawn(async {
+        let task = AccountTask::spawn(&lc.tracker, cancel.clone(), async {
             tokio::time::sleep(Duration::from_secs(3600)).await;
         });
-        lc.tasks
-            .lock()
-            .unwrap()
-            .insert(acct.account_id, AccountTask { cancel, handle });
+        lc.tasks.lock().unwrap().insert(acct.account_id, task);
 
         lc.logout(acct.account_id)
             .await
@@ -2891,7 +2948,7 @@ pub(crate) mod tests {
         // until `unwedge` is set.
         let unwedge = Arc::new(AtomicBool::new(false));
         let cancel = CancellationToken::new();
-        let handle = tokio::spawn({
+        let task = AccountTask::spawn(&lc.tracker, cancel.clone(), {
             let unwedge = Arc::clone(&unwedge);
             async move {
                 while !unwedge.load(Ordering::SeqCst) {
@@ -2899,10 +2956,7 @@ pub(crate) mod tests {
                 }
             }
         });
-        lc.tasks
-            .lock()
-            .unwrap()
-            .insert(acct.account_id, AccountTask { cancel, handle });
+        lc.tasks.lock().unwrap().insert(acct.account_id, task);
 
         let err = lc.logout(acct.account_id).await.unwrap_err();
         assert!(matches!(err, LifecycleError::Draining(id) if id == acct.account_id));
@@ -2962,7 +3016,7 @@ pub(crate) mod tests {
         // sever wedges and logout returns `Draining`.
         let unwedge = Arc::new(AtomicBool::new(false));
         let cancel = CancellationToken::new();
-        let handle = tokio::spawn({
+        let task = AccountTask::spawn(&lc.tracker, cancel.clone(), {
             let unwedge = Arc::clone(&unwedge);
             async move {
                 while !unwedge.load(Ordering::SeqCst) {
@@ -2970,10 +3024,7 @@ pub(crate) mod tests {
                 }
             }
         });
-        lc.tasks
-            .lock()
-            .unwrap()
-            .insert(acct.account_id, AccountTask { cancel, handle });
+        lc.tasks.lock().unwrap().insert(acct.account_id, task);
 
         let err = lc.logout(acct.account_id).await.unwrap_err();
         assert!(matches!(err, LifecycleError::Draining(id) if id == acct.account_id));
@@ -3127,7 +3178,7 @@ pub(crate) mod tests {
 
         let drained = Arc::new(AtomicBool::new(false));
         let cancel = CancellationToken::new();
-        let handle = tokio::spawn({
+        let task = AccountTask::spawn(&lc.tracker, cancel.clone(), {
             let cancel = cancel.clone();
             let drained = Arc::clone(&drained);
             async move {
@@ -3136,10 +3187,7 @@ pub(crate) mod tests {
                 drained.store(true, Ordering::SeqCst);
             }
         });
-        lc.tasks
-            .lock()
-            .unwrap()
-            .insert(acct.account_id, AccountTask { cancel, handle });
+        lc.tasks.lock().unwrap().insert(acct.account_id, task);
 
         lc.delete(acct.account_id).await.expect("delete succeeds");
 
@@ -3178,7 +3226,7 @@ pub(crate) mod tests {
         // No await points: survives both cancel and abort until `unwedge` is set.
         let unwedge = Arc::new(AtomicBool::new(false));
         let cancel = CancellationToken::new();
-        let handle = tokio::spawn({
+        let task = AccountTask::spawn(&lc.tracker, cancel.clone(), {
             let unwedge = Arc::clone(&unwedge);
             async move {
                 while !unwedge.load(Ordering::SeqCst) {
@@ -3186,10 +3234,7 @@ pub(crate) mod tests {
                 }
             }
         });
-        lc.tasks
-            .lock()
-            .unwrap()
-            .insert(acct.account_id, AccountTask { cancel, handle });
+        lc.tasks.lock().unwrap().insert(acct.account_id, task);
 
         let err = lc.delete(acct.account_id).await.unwrap_err();
         assert!(matches!(err, LifecycleError::Draining(id) if id == acct.account_id));
@@ -3276,17 +3321,14 @@ pub(crate) mod tests {
             .await;
 
         let cancel = CancellationToken::new();
-        let handle = tokio::spawn({
+        let task = AccountTask::spawn(&lc.tracker, cancel.clone(), {
             let cancel = cancel.clone();
             async move {
                 cancel.cancelled().await;
             }
         });
         cancel.cancel();
-        lc.tasks
-            .lock()
-            .unwrap()
-            .insert(acct.account_id, AccountTask { cancel, handle });
+        lc.tasks.lock().unwrap().insert(acct.account_id, task);
 
         let summary = lc
             .redecrypt_utds(acct.account_id)
@@ -3320,16 +3362,13 @@ pub(crate) mod tests {
             .await;
 
         let cancel = CancellationToken::new();
-        let handle = tokio::spawn({
+        let task = AccountTask::spawn(&lc.tracker, cancel.clone(), {
             let cancel = cancel.clone();
             async move {
                 cancel.cancelled().await;
             }
         });
-        lc.tasks
-            .lock()
-            .unwrap()
-            .insert(acct.account_id, AccountTask { cancel, handle });
+        lc.tasks.lock().unwrap().insert(acct.account_id, task);
 
         let lock = lc.lock_for(&user, hs);
         let guard = lock.lock().await;

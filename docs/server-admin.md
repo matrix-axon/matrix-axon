@@ -144,6 +144,7 @@ Encrypted bridges and bots can lose access to new messages, and bridged messages
 
 Read `GET /v1/accounts/{account_id}/exclude_insecure_devices/impact` to see joined encrypted rooms and members with affected devices known to Axon.
 This reads device data from the local crypto store.
+Users whose device lists have never been fetched and devices missing from stale lists can be absent from the report.
 Axon checks rooms cached as unencrypted with the homeserver and may sync a lazy room roster before returning the impact.
 The impact read returns 503 if the room encryption state or roster is unavailable.
 Axon's own device must be cross-signed and the SDK must verify its own cross-signing identity locally before you can enable the setting.
@@ -152,6 +153,9 @@ If the acknowledgement is missing or stale, the server returns 409 with code `im
 To disable, send `enabled: false`.
 Both routes accept an Axon bearer token.
 A change restarts sync for the active account using the same Matrix session.
+Enabling pauses requests that need that account's SDK client while Axon rechecks the impact, for up to 30 seconds for the impact read plus time to drain requests and restart sync.
+If Axon keeps reporting that the previous Matrix client is still closing, restart Axon to release the old SDK handles.
+Signing in with a fresh device resets the setting to off, including when Axon reuses the account's archived history.
 Read `exclude_insecure_devices` on the account to check the persisted setting.
 
 ## Managing the server from a client
