@@ -228,6 +228,9 @@ When an `image` send arrives without a thumbnail, the server derives what it can
   It never copies the file: the `image` crate's `JpegDecoder::new` copies its whole input into a new `Vec` before it parses the headers, so the probe gives it only the first 1 MiB.
   The headers and EXIF sit before the first scan, and that is the only part a header parse reads.
   A JPEG whose headers end past 1 MiB gets a second, 4 MiB probe inside the decode permit and budget below.
+  A WebP probe can make at most 4,096 seeks through the RIFF header.
+  If it reaches that limit, it keeps the canvas dimensions from the leading VP8X header and skips the thumbnail.
+  The first-frame check and WebP decoder construction share a separate 4,096-seek limit when generating a thumbnail.
   Staged originals are read from their existing files during inspection, so the original upload can retain ownership of its buffer.
   The probe also covers images too large to thumbnail, sends where the pool is busy, and `media.send_thumbnails = false`.
 - **A thumbnail, when section 2 says one helps.** For PNG, JPEG, WebP and GIF; this adds the `image` crate's `gif` feature.

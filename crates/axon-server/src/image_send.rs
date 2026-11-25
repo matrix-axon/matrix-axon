@@ -1,5 +1,6 @@
 //! Best-effort image inspection for staged sends (ADR 0142, section 5).
 
+use std::cell::Cell;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -21,6 +22,8 @@ const DECODE_PERMITS: usize = 1;
 const MIB: u64 = 1024 * 1024;
 const HEADER_BYTES: u64 = MIB;
 const JPEG_LONG_HEADER_BYTES: u64 = 4 * MIB;
+const WEBP_HEADER_SEEKS: usize = 4096;
+const WEBP_HEADER_LIMIT: &str = "webp_header_limit";
 const MAX_JPEG_BYTES: u64 = 50 * MIB;
 const MAX_DECODE_COST: u64 = 192 * MIB;
 const MAX_ALLOC: u64 = 256 * MIB;
@@ -114,7 +117,7 @@ impl ImageSendService {
             }
         };
         metadata.dimensions = Some(header.dimensions());
-        if generate && header.needs_thumbnail(format, size) {
+        if generate && header.needs_thumbnail(format, size)? {
             metadata.thumbnail = blocking_before(&self.decodes, deadline, move || {
                 generate_thumbnail(open_original(&path, size)?, format, header, size, deadline)
             })
@@ -166,6 +169,7 @@ struct Header {
     height: u32,
     orientation: Orientation,
     progressive: bool,
+    thumbnail_skip: Option<&'static str>,
 }
 
 impl Header {
@@ -177,11 +181,14 @@ impl Header {
         }
     }
 
-    fn needs_thumbnail(self, format: ImageFormat, size: u64) -> bool {
+    fn needs_thumbnail(self, format: ImageFormat, size: u64) -> Inspection<bool> {
+        if let Some(reason) = self.thumbnail_skip {
+            return Err(reason);
+        }
         // WebP gets a compatibility thumbnail even if small.
         let (width, height) = self.dimensions();
-        format == ImageFormat::WebP
-            || (size > SMALL_ORIGINAL_BYTES && (width > MAX_WIDTH || height > MAX_HEIGHT))
+        Ok(format == ImageFormat::WebP
+            || (size > SMALL_ORIGINAL_BYTES && (width > MAX_WIDTH || height > MAX_HEIGHT)))
     }
 
     fn pixels(self) -> u64 {
@@ -213,25 +220,7 @@ fn probe(mut file: BufReader<File>) -> Inspection<(ImageFormat, Option<Header>)>
                 .map_err(|_| "invalid_image_header")?;
             Some(decoder_header(&mut decoder, false))
         }
-        ImageFormat::WebP => {
-            let mut decoder =
-                image_webp::WebPDecoder::new(file).map_err(|_| "invalid_image_header")?;
-            decoder.set_memory_limit(HEADER_BYTES as usize);
-            let (width, height) = decoder.dimensions();
-            let orientation = decoder
-                .exif_metadata()
-                .ok()
-                .flatten()
-                .as_deref()
-                .and_then(Orientation::from_exif_chunk)
-                .unwrap_or(Orientation::NoTransforms);
-            Some(Header {
-                width,
-                height,
-                orientation,
-                progressive: false,
-            })
-        }
+        ImageFormat::WebP => Some(probe_webp(&mut file)?),
         _ => return Err("unsupported_image"),
     };
     if header.is_some_and(|header| header.width == 0 || header.height == 0) {
@@ -258,6 +247,7 @@ fn decoder_header(decoder: &mut impl ImageDecoder, progressive: bool) -> Header 
         height,
         orientation,
         progressive,
+        thumbnail_skip: None,
     }
 }
 
@@ -417,13 +407,131 @@ fn check_cost(decoded: u64, scratch: u64) -> Inspection<()> {
     Ok(())
 }
 
+// The codec seeks past each RIFF chunk during construction. Bound that work
+// while leaving large picture payloads available to the pixel decoder.
+struct WebpHeaderReader<'a> {
+    file: &'a mut BufReader<File>,
+    seeks: &'a Cell<Option<usize>>,
+}
+
+impl Read for WebpHeaderReader<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.file.read(bytes)
+    }
+}
+
+impl BufRead for WebpHeaderReader<'_> {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        self.file.fill_buf()
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.file.consume(amount);
+    }
+}
+
+impl WebpHeaderReader<'_> {
+    fn charge_seek(&self) -> std::io::Result<()> {
+        match self.seeks.get() {
+            Some(0) => return Err(std::io::Error::other(WEBP_HEADER_LIMIT)),
+            Some(remaining) => self.seeks.set(Some(remaining - 1)),
+            None => {}
+        }
+        Ok(())
+    }
+}
+
+impl Seek for WebpHeaderReader<'_> {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.charge_seek()?;
+        self.file.seek(position)
+    }
+
+    fn seek_relative(&mut self, offset: i64) -> std::io::Result<()> {
+        self.charge_seek()?;
+        self.file.seek_relative(offset)
+    }
+
+    fn stream_position(&mut self) -> std::io::Result<u64> {
+        self.file.stream_position()
+    }
+}
+
+fn webp_header_error(seeks: &Cell<Option<usize>>, fallback: &'static str) -> &'static str {
+    if seeks.get() == Some(0) {
+        WEBP_HEADER_LIMIT
+    } else {
+        fallback
+    }
+}
+
+fn probe_webp(file: &mut BufReader<File>) -> Inspection<Header> {
+    let seeks = Cell::new(Some(WEBP_HEADER_SEEKS));
+    let decoder = image_webp::WebPDecoder::new(WebpHeaderReader {
+        file,
+        seeks: &seeks,
+    });
+    match decoder {
+        Ok(mut decoder) => {
+            decoder.set_memory_limit(HEADER_BYTES as usize);
+            let (width, height) = decoder.dimensions();
+            let orientation = decoder
+                .exif_metadata()
+                .ok()
+                .flatten()
+                .as_deref()
+                .and_then(Orientation::from_exif_chunk)
+                .unwrap_or(Orientation::NoTransforms);
+            Ok(Header {
+                width,
+                height,
+                orientation,
+                progressive: false,
+                thumbnail_skip: None,
+            })
+        }
+        Err(_) if seeks.get() == Some(0) => {
+            // Only extended WebP walks subsequent chunks. The leading VP8X
+            // header already gives dimensions even when EXIF was out of reach.
+            file.rewind().map_err(|_| "header_read")?;
+            let mut leading = [0; 30];
+            file.read_exact(&mut leading).map_err(|_| "header_read")?;
+            if &leading[12..20] != b"VP8X\x0a\0\0\0" {
+                return Err("invalid_image_header");
+            }
+            let dimension = |offset| {
+                u32::from_le_bytes([leading[offset], leading[offset + 1], leading[offset + 2], 0])
+                    + 1
+            };
+            Ok(Header {
+                width: dimension(24),
+                height: dimension(27),
+                orientation: Orientation::NoTransforms,
+                progressive: false,
+                thumbnail_skip: Some(WEBP_HEADER_LIMIT),
+            })
+        }
+        Err(_) => Err("invalid_image_header"),
+    }
+}
+
 fn decode_webp(mut file: BufReader<File>, header: Header, size: u64) -> Inspection<DynamicImage> {
+    let seeks = Cell::new(Some(WEBP_HEADER_SEEKS));
+    let mut input = WebpHeaderReader {
+        file: &mut file,
+        seeks: &seeks,
+    };
     // Extended WebP has a canvas and an embedded picture. Check the first
-    // picture's dimensions before handing it to the codec, which otherwise
-    // checks VP8 dimensions after allocating the planes.
-    check_webp_picture(&mut file, header, size).map_err(|_| "invalid_image_header")?;
-    file.rewind().map_err(|_| "header_read")?;
-    let mut decoder = image_webp::WebPDecoder::new(file).map_err(|_| "decode")?;
+    // picture before the codec allocates VP8 planes. Both walkers share the
+    // limit, including when the first frame precedes a long chunk list.
+    check_webp_picture(&mut input, header, size)
+        .map_err(|_| webp_header_error(&seeks, "invalid_image_header"))?;
+    input
+        .rewind()
+        .map_err(|_| webp_header_error(&seeks, "header_read"))?;
+    let mut decoder =
+        image_webp::WebPDecoder::new(input).map_err(|_| webp_header_error(&seeks, "decode"))?;
+    seeks.set(None);
     decoder.set_memory_limit(MAX_ALLOC as usize);
     let alpha = decoder.has_alpha();
     let pixels = header.pixels();
@@ -456,7 +564,7 @@ fn decode_webp(mut file: BufReader<File>, header: Header, size: u64) -> Inspecti
 /// Read the canvas's first picture header, descending into its first ANMF
 /// when animated. Check both the chunk bounds and the VP8/VP8L dimensions.
 fn check_webp_picture(
-    file: &mut BufReader<File>,
+    file: &mut (impl Read + Seek),
     header: Header,
     size: u64,
 ) -> std::io::Result<()> {
@@ -551,7 +659,7 @@ mod tests {
         assert_eq!(detected, format);
         let header = header.unwrap();
         let size = bytes.len() as u64;
-        if !header.needs_thumbnail(format, size) {
+        if !header.needs_thumbnail(format, size)? {
             return Ok(None);
         }
         generate_thumbnail(
@@ -678,6 +786,45 @@ mod tests {
             .unwrap();
         assert_eq!(thumb.mimetype, "image/png");
         assert_eq!((thumb.width, thumb.height), (80, 60));
+    }
+
+    #[test]
+    fn extended_webp_preserves_dimensions_when_chunk_walks_reach_the_seek_limit() {
+        let mut simple = Cursor::new(Vec::new());
+        DynamicImage::new_rgb8(80, 60)
+            .write_to(&mut simple, ImageFormat::WebP)
+            .unwrap();
+
+        for junk_first in [true, false] {
+            let mut bytes = b"RIFF\0\0\0\0WEBPVP8X\x0a\0\0\0".to_vec();
+            bytes.extend_from_slice(&[0, 0, 0, 0, 79, 0, 0, 59, 0, 0]);
+            let picture = &simple.get_ref()[12..];
+            if !junk_first {
+                bytes.extend_from_slice(picture);
+            }
+            for _ in 0..=WEBP_HEADER_SEEKS {
+                bytes.extend_from_slice(b"JUNK\0\0\0\0");
+            }
+            if junk_first {
+                bytes.extend_from_slice(picture);
+            }
+            let size = bytes.len();
+            bytes[4..8].copy_from_slice(&((size - 8) as u32).to_le_bytes());
+
+            let (format, header) = probe(fixture(&bytes)).unwrap();
+            let header = header.unwrap();
+            assert_eq!(format, ImageFormat::WebP);
+            assert_eq!(header.dimensions(), (80, 60));
+            assert_eq!(
+                header.needs_thumbnail(format, size as u64),
+                Err(WEBP_HEADER_LIMIT)
+            );
+            // Independently exercise the two walks on the decoding path.
+            assert!(matches!(
+                decode_webp(fixture(&bytes), header, size as u64),
+                Err(WEBP_HEADER_LIMIT)
+            ));
+        }
     }
 
     #[test]
