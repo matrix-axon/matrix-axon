@@ -251,7 +251,9 @@ FIXED: dict[Step, Pinned] = {
 
 EXEMPT: dict[Step, str] = {
     Step(LINT, LINT_JOB, "Install pre-commit"): "installs the runner the pre-commit steps use",
-    Step(LINT, LINT_JOB, "Use persistent self-hosted Cargo target"): "sets the runner's Cargo artifact directory",
+    Step(LINT, LINT_JOB, "Use persistent self-hosted Cargo target"): (
+        "sets the runner's Cargo artifact directory"
+    ),
     Step(LINT, LINT_JOB, "test changed-by-hook"): "unit test of the path filter, not a hook entry",
     Step(LINT, LINT_JOB, "rust-changed"): "decides whether the rust steps run; not a hook entry",
     Step(LINT, LINT_JOB, "test runner scripts"): (

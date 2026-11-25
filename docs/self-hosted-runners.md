@@ -198,6 +198,7 @@ In any job that ran on the runner, the **Set up runner** step shows the hook's l
 
 The lint-and-test job keeps its Cargo build artifacts in `_work/axon-lint-target`, outside the checkout, and reuses the runner account's Cargo registry and Git downloads.
 It also reuses the runner account's pip and pre-commit caches without uploading them to GitHub.
+For those caches to speed up later jobs, the runner account and its home cache directories must persist between jobs; an ephemeral home or a different account causes them to be rebuilt.
 The workflow sets `CARGO_TARGET_DIR` automatically; no runner configuration is needed.
 This directory can grow over time and may be removed while the runner is idle to reclaim disk space; the next job rebuilds it.
 

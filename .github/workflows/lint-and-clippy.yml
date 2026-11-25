@@ -80,6 +80,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cache/pre-commit
+          # Environments depend on the machine's libraries (ADR 0141, decision 6).
           # Keep hosted environments separate from older self-hosted caches.
           key: pre-commit-${{ runner.environment }}-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
 
@@ -178,7 +179,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+          # System libraries differ across runners (ADR 0141, decision 6).
           # Keep hosted artifacts separate from any older self-hosted cache.
+          # Update this list when another Cargo workspace adds a lockfile.
           key: cargo-${{ runner.environment }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'clients/web/src-tauri/Cargo.lock') }}
           restore-keys: cargo-${{ runner.environment }}-${{ runner.os }}-
 
