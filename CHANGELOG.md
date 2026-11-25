@@ -3,6 +3,30 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](https://github.com/matrix-axon/matrix-axon/releases) page.
 
+## v0.2.1 - 2026-11-25
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Security
+* minor version bump on cookie to mitigate CVE 2026-0594 by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1240
+#### Features
+* feat(server): send-media takes info, a client thumbnail and txn_id by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1241
+* feat(tui): back off repeated sidebar hierarchy walk failures by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1253
+* feat(api): announce re-decrypted timeline events over WebSocket by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1250
+#### Bug Fixes
+* fix(web): restore Page Up and Page Down in the room timeline by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1242
+* fix(web): paste clipboard images in the Linux desktop shell by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1245
+* fix(ios): pin the app's minimum iOS to 26.0, and move CI to Xcode 27 by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1234
+* fix: recover Linux desktop startup from incompatible WebKitGTK by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1244
+#### Documentation
+* docs: design streamed staged media uploads by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1249
+#### Build and CI
+* ci: reuse caches on self-hosted lint runner by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1252
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.2.0...v0.2.1
+
 ## v0.2.0 - 2026-11-23
 
 <!-- Release notes generated using configuration in .github/release.yml at v0.2.0 -->
