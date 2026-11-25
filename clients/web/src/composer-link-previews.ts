@@ -330,6 +330,8 @@ export function createComposerLinkPreviews(
   let text = ''
   let restored = new Set<string>()
   let pasted = new Set<string>()
+  // A ready preview keeps its link complete while the link stays in the draft.
+  let previewed = new Set<string>()
   let discarded = new Set<string>()
   /** Editing a message: its cards by identity, and the links its text had,
    *  which never get new cards (§ 8). */
@@ -344,6 +346,8 @@ export function createComposerLinkPreviews(
 
   const deviceOn = () => deviceSourceOn(sources)
   const homeserverOn = () => homeserverSourceOn(sources)
+  const isComplete = (link: Link) =>
+    link.complete || previewed.has(link.identity)
 
   function drop(identity: string) {
     entries.get(identity)?.abort?.abort()
@@ -358,9 +362,7 @@ export function createComposerLinkPreviews(
    *  A restored or discarded link keeps its slot and shows no card, so a
    *  later link never moves up into it (§ 1). */
   function slotted(): Link[] {
-    return scan(text, pasted)
-      .filter((link) => link.complete)
-      .slice(0, MAX_COMPOSER_PREVIEWS)
+    return scan(text, pasted).filter(isComplete).slice(0, MAX_COMPOSER_PREVIEWS)
   }
 
   function wanted(): Link[] {
@@ -386,7 +388,7 @@ export function createComposerLinkPreviews(
       ? links
           .filter(
             (l) =>
-              l.complete &&
+              isComplete(l) &&
               !original.has(l.identity) &&
               !existing.has(l.identity),
           )
@@ -402,6 +404,7 @@ export function createComposerLinkPreviews(
     if (disposed || entries.get(identity) !== entry) return
     entry.state = state
     entry.abort = null
+    if (state.status === 'ready') previewed.add(identity)
     publish()
   }
 
@@ -456,6 +459,7 @@ export function createComposerLinkPreviews(
     }
     const cached = cache.get(identity)
     if (cached !== undefined) {
+      previewed.add(identity)
       entries.set(identity, {
         matchedUrl: link.matchedUrl,
         state: { status: 'ready', result: cached },
@@ -579,12 +583,13 @@ export function createComposerLinkPreviews(
   function reset(
     next: string,
     edit?: EditPreviewSeed,
-    carried: ReadonlySet<string> = new Set(),
+    carriedPastes: ReadonlySet<string> = new Set(),
   ) {
     dropAll()
+    previewed.clear()
     const present = identities(next)
     text = next
-    pasted = new Set([...carried].filter((id) => present.has(id)))
+    pasted = new Set([...carriedPastes].filter((id) => present.has(id)))
     editing = edit !== undefined
     addNew = edit?.addNew ?? true
     existing = new Map(edit?.cards.map((card) => [card.url, card]) ?? [])
@@ -613,6 +618,7 @@ export function createComposerLinkPreviews(
           if (!before.has(identity)) pasted.add(identity)
       restored = new Set([...restored].filter((id) => after.has(id)))
       pasted = new Set([...pasted].filter((id) => after.has(id)))
+      previewed = new Set([...previewed].filter((id) => after.has(id)))
       text = next
       reconcile()
     },
