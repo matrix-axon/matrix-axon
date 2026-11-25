@@ -31,8 +31,8 @@ pub use config::{
 };
 pub use error::{ConfigError, Error, Result};
 pub use live::{
-    AccountDataFrame, DeviceStateFrame, EphemeralFrame, InviteAddedFrame, InviteRemovedFrame,
-    LiveEvent, LiveFrame, OwnIdentityFrame, PreferencesFrame, RoomDetailsFrame,
+    AccountDataFrame, DeviceStateFrame, EphemeralFrame, EventDecryptedFrame, InviteAddedFrame,
+    InviteRemovedFrame, LiveEvent, LiveFrame, OwnIdentityFrame, PreferencesFrame, RoomDetailsFrame,
     RoomDisplayNameFrame, SenderTrustFrame, SyncStateFrame, UnreadCountsFrame, VerificationFrame,
     VerificationFrameKind,
 };

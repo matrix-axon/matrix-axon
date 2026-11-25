@@ -85,7 +85,8 @@ The message is eligible when all of these hold:
 - `event_type` is `m.room.message`.
 - `content` is present.
   A still-undecryptable event does not wake anyone.
-  Re-decryption does not re-emit a live frame, so a later back-fill does not send the push the UTD skipped.
+  Re-decryption announces a back-fill over WebSocket (ADR 0020).
+  The push router currently handles only new arrivals.
   That drop is the normal case for an encrypted room whose key arrives after the event.
   #666 tracks the follow-up: an `activity` alert with no body, or a wake when re-decryption fills one.
   v1 does not do either.

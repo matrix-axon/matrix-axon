@@ -1217,18 +1217,12 @@ async fn persist_event_core<S: TimelineWrite>(
     .await;
 
     let emit_live = matches!(utd, UtdCheck::Recheck(_));
-    let utd_reason = match (pending_utd, utd) {
-        (Some(row), UtdCheck::Recheck(recheck)) => {
-            match recheck.recheck(&row).await {
-                redecrypt::Attempt::StillUtd(reason) => Some(reason),
-                // Back-filled: the frame below still describes the UTD that
-                // arrived, as it did before reasons were kept; a timeline read
-                // returns the content (ADR 0014).
-                redecrypt::Attempt::Decrypted
-                | redecrypt::Attempt::Failed
-                | redecrypt::Attempt::WriteFailed => None,
-            }
-        }
+    let (utd_reason, decrypted_arrival_order) = match (pending_utd, utd) {
+        (Some(row), UtdCheck::Recheck(recheck)) => match recheck.recheck(&row).await {
+            redecrypt::Attempt::StillUtd(reason) => (Some(reason), None),
+            redecrypt::Attempt::Decrypted(arrival_order) => (None, arrival_order),
+            redecrypt::Attempt::Failed | redecrypt::Attempt::WriteFailed => (None, None),
+        },
         // Every stored UTD, session id or not: the SDK already classified it.
         (Some(row), UtdCheck::Known(Some(reason))) => {
             return Ok(Persisted {
@@ -1236,7 +1230,7 @@ async fn persist_event_core<S: TimelineWrite>(
                 utd: Some((row, reason)),
             })
         }
-        _ => None,
+        _ => (None, None),
     };
 
     // Fan the event out to any live `/v1/ws` subscribers. Skip the work entirely
@@ -1264,6 +1258,17 @@ async fn persist_event_core<S: TimelineWrite>(
             sender_trust: stored_trust,
             utd_reason,
         }));
+    }
+    // This recheck runs before the first live frame so it can supply a failure
+    // reason. When it succeeds, publish the update after that frame.
+    if let Some(arrival_order) = decrypted_arrival_order {
+        redecrypt::publish_decrypted(
+            ingest.live_tx,
+            ingest.account_id,
+            &room_id,
+            &event_id,
+            arrival_order,
+        );
     }
     Ok(Persisted { created, utd: None })
 }
@@ -2420,6 +2425,7 @@ async fn run_account(
         account.account_id,
         redecrypt_cancel.clone(),
         index.cloned(),
+        live_tx.clone(),
         withheld_rx,
     ));
     // One sweep now that the service is up and `recover()` (if any) has imported
@@ -2453,17 +2459,22 @@ async fn run_account(
         let store = store.clone();
         let account_id = account.account_id;
         let index = index.cloned();
+        let live_tx = live_tx.clone();
         let gate = Arc::clone(&gate);
         let cancel = redecrypt_cancel.clone();
         async move {
+            let redecrypt_ctx = redecrypt::RedecryptContext {
+                store: &store,
+                account_id,
+                index: index.as_ref(),
+                live_tx: &live_tx,
+            };
             tokio::select! {
                 _ = cancel.cancelled() => {}
                 summary = redecrypt::sweep_pending_utds(
                     &client,
-                    &store,
-                    account_id,
+                    &redecrypt_ctx,
                     scope,
-                    index.as_ref(),
                     &cancel,
                     redecrypt::BackupSource {
                         gate: &gate,
@@ -5498,6 +5509,7 @@ mod persisted_utd_recheck_tests {
     struct Observed {
         log: Log,
         frame: Option<axon_core::LiveEvent>,
+        update: Option<axon_core::EventDecryptedFrame>,
         failed: bool,
     }
 
@@ -5537,8 +5549,19 @@ mod persisted_utd_recheck_tests {
         let frame = match rx.try_recv() {
             Ok(LiveFrame::Timeline(event)) => Some(event),
             Ok(other) => panic!("unexpected live frame: {other:?}"),
-            Err(_) => None,
+            Err(broadcast::error::TryRecvError::Empty) => None,
+            Err(err) => panic!("receive live frame: {err}"),
         };
+        let update = match rx.try_recv() {
+            Ok(LiveFrame::EventDecrypted(update)) => Some(update),
+            Ok(other) => panic!("unexpected live frame: {other:?}"),
+            Err(broadcast::error::TryRecvError::Empty) => None,
+            Err(err) => panic!("receive update: {err}"),
+        };
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
         let log = log.lock().expect("log");
         Observed {
             log: Log {
@@ -5548,6 +5571,7 @@ mod persisted_utd_recheck_tests {
                 crypto_trust: log.crypto_trust.clone(),
             },
             frame,
+            update,
             failed: result.is_err(),
         }
     }
@@ -5577,6 +5601,37 @@ mod persisted_utd_recheck_tests {
             frame.utd_reason,
             Some(UtdReason::new(UtdReasonKind::MissingKey))
         );
+        assert!(observed.update.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_successful_live_recheck_announces_the_update_after_the_original() {
+        let arrival_order = 7;
+        let observed = observe(
+            encrypted("$utd:example.org"),
+            Attempt::Decrypted(Some(arrival_order)),
+            plain(false),
+        )
+        .await;
+        let original = observed.frame.expect("original timeline frame");
+        let update = observed.update.expect("re-decryption update");
+        assert!(original.content.is_none());
+        assert_eq!(update.account_id, original.account_id);
+        assert_eq!(update.room_id, original.room_id);
+        assert_eq!(update.event_id, original.event_id);
+        assert_eq!(update.arrival_order, original.arrival_order);
+    }
+
+    #[tokio::test]
+    async fn a_live_recheck_that_did_not_write_emits_only_the_original() {
+        let observed = observe(
+            encrypted("$utd:example.org"),
+            Attempt::Decrypted(None),
+            plain(false),
+        )
+        .await;
+        assert!(observed.frame.is_some());
+        assert!(observed.update.is_none());
     }
 
     #[tokio::test]
@@ -5618,7 +5673,7 @@ mod persisted_utd_recheck_tests {
     async fn a_decrypted_frame_carries_the_stored_trust() {
         let observed = observe(
             message("$msg:example.org"),
-            Attempt::Decrypted,
+            Attempt::Decrypted(Some(7)),
             Drive {
                 fail_row: false,
                 fail_crypto: false,
@@ -5644,7 +5699,7 @@ mod persisted_utd_recheck_tests {
     async fn a_failed_crypto_sibling_still_emits_the_frame() {
         let observed = observe(
             message("$msg:example.org"),
-            Attempt::Decrypted,
+            Attempt::Decrypted(Some(7)),
             Drive {
                 fail_row: false,
                 fail_crypto: true,
