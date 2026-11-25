@@ -67,6 +67,23 @@ sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
 Only needed if you actually touch this crate; nothing else in the repo links
 against them.
 
+## Linux Debian package
+
+The Linux release job runs `bundle/finalize-deb.sh` on Tauri's `.deb` to install the launcher and regenerate the package checksums.
+To produce the same `.deb` locally, run `pnpm tauri build --bundles deb` from `clients/web`, then run the finalizer from the repository root:
+
+```sh
+mkdir -p dist-desktop
+for deb in clients/web/src-tauri/target/release/bundle/deb/*.deb; do
+  clients/web/src-tauri/bundle/finalize-deb.sh "$deb" "dist-desktop/${deb##*/}"
+done
+```
+
+The launcher checks the executable's library resolution before entering Tauri.
+On a WebKitGTK or JavaScriptCore loader error, it checks again with the distro library directory first and uses that path for the app and its child processes when both libraries resolve there.
+On an installed system, `ldd -r /usr/lib/axon/axon` shows the native executable's original library resolution.
+From the repository root, `sh clients/web/src-tauri/bundle/test-deb.sh` exercises normal startup, recovery from a shadowed library, and the startup diagnostics using the real dynamic loader.
+
 ## The dev server port is pinned
 
 `beforeDevCommand` is `pnpm dev --strictPort`, so it fails if 5173 is taken
@@ -76,8 +93,8 @@ load whatever _else_ is on 5173 — a different app, with no error anywhere.
 
 ## Linux desktop entry
 
-`bundle/axon.desktop` overrides Tauri's built-in template, and exists for one
-character: the `%u` on `Exec`.
+`bundle/axon.desktop` overrides Tauri's built-in template to forward the callback URL with `%u` on `Exec`.
+The Debian finalizer adds `AXON_DESKTOP_LAUNCH=1` to the desktop entry so the launcher can show loader errors in a dialog when started from the menu.
 
 `%u` is the freedesktop field code that passes a URL to the program. Without
 it the launcher starts the app with _no argument_, so an

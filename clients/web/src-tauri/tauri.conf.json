@@ -41,8 +41,9 @@
     },
     "linux": {
       "deb": {
+        "depends": ["libwebkit2gtk-4.1-0 (>= 2.42)"],
         "desktopTemplate": "bundle/axon.desktop",
-        "recommends": ["hunspell-dictionary"],
+        "recommends": ["hunspell-dictionary", "zenity"],
         "conflicts": ["axon-desktop"],
         "replaces": ["axon-desktop"]
       }
