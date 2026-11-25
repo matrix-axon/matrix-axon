@@ -1,6 +1,6 @@
 //! Exercise the HTTP adapters using the same loopback fixture as room tests.
 use super::support::*;
-use crate::api::{ApiError, AxonClient};
+use crate::api::{ApiError, AxonClient, HierarchyLimit, HierarchyReadError};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -34,7 +34,11 @@ async fn space_hierarchy_respects_remaining_walk_bytes_before_decoding() {
         .space_hierarchy(Uuid::nil(), "!space:srv", None, 1024)
         .await
         .unwrap_err();
-    assert!(matches!(error, ApiError::Request(message) if message.contains("size limit")));
+    assert!(matches!(
+        error,
+        HierarchyReadError::Limit(HierarchyLimit::PageBytes)
+    ));
+    assert!(error.to_string().contains("size limit"));
 }
 
 #[tokio::test]
@@ -45,9 +49,11 @@ async fn exhausted_hierarchy_budget_does_not_send_a_request() {
         .space_hierarchy(Uuid::nil(), "!space:srv", Some("next"), 0)
         .await
         .unwrap_err();
-    assert!(
-        matches!(error, ApiError::Request(message) if message.contains("byte budget exhausted"))
-    );
+    assert!(matches!(
+        error,
+        HierarchyReadError::Limit(HierarchyLimit::TotalBytes)
+    ));
+    assert!(error.to_string().contains("byte budget exhausted"));
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
             .await

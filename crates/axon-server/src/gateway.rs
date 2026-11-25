@@ -22,7 +22,7 @@ use axon_core::{
     CreateRoomRequest, MatrixProfile, PowerLevelChanges, PublicRoomsPage, PublicRoomsQuery,
     ResolvedPowerLevels,
 };
-use axon_sync::{GatewayError, GatewayLeaveOutcome, InteractiveCall, SdkGateway};
+use axon_sync::{GatewayError, GatewayLeaveOutcome, InteractiveCall, MediaSendBounds, SdkGateway};
 use uuid::Uuid;
 
 /// Wraps the sync engine's gateway so it satisfies the API's `MessageSender`
@@ -84,7 +84,7 @@ impl GatewayAdapter {
     ) -> impl Future<Output = Result<T, SendError>> + 'a {
         run_bounded(
             self.gateway.interactive_call(account_id),
-            timeout,
+            Some(timeout),
             verb,
             fut,
         )
@@ -117,16 +117,50 @@ impl GatewayAdapter {
             self.gateway
                 .interactive_call(account_id)
                 .ignoring_timeouts(),
-            self.upstream_upload_timeout,
+            Some(self.upstream_upload_timeout),
             verb,
             fut,
         )
+    }
+
+    /// [`with_upload_timeout`](Self::with_upload_timeout) for a send the
+    /// gateway bounds itself under [`media_bounds`](Self::media_bounds). No
+    /// outer timeout: one here would also run while the thumbnail uploads,
+    /// and could cancel the send during the step that must never fail it
+    /// (ADR 0142 section 6). The gateway's clock covers the whole call,
+    /// resolving the room included, so nothing here waits unbounded.
+    fn with_media_bounds<'a, T: 'a>(
+        &self,
+        account_id: Uuid,
+        verb: &'a str,
+        fut: impl Future<Output = Result<T, GatewayError>> + 'a,
+    ) -> impl Future<Output = Result<T, SendError>> + 'a {
+        run_bounded(
+            self.gateway
+                .interactive_call(account_id)
+                .ignoring_timeouts(),
+            None,
+            verb,
+            fut,
+        )
+    }
+
+    /// A media send's budget: the upload timeout for the whole send, as it
+    /// was before ADR 0142, and the thumbnail upload's own 10 s outside it
+    /// (see [`MediaSendBounds`]).
+    fn media_bounds(&self) -> MediaSendBounds {
+        MediaSendBounds {
+            send: self.upstream_upload_timeout,
+            thumbnail: MediaSendBounds::THUMBNAIL_UPLOAD,
+        }
     }
 }
 
 /// Runs `fut` under `timeout`, finishes `call` with the result, reports a
 /// timeout via [`timed_out`] and maps a gateway error via [`map_err`], so no
-/// outbound call can report a timeout any other way.
+/// outbound call can report a timeout any other way. `None` is for a call the
+/// gateway bounds itself, which reports running out as
+/// [`GatewayError::Timeout`].
 ///
 /// The SDK's own request timeout (30 s by default) can fire first. That is
 /// reported in the same `<verb> timed out after Ns` form, with how long Axon
@@ -134,15 +168,21 @@ impl GatewayAdapter {
 /// join/knock hint) sees one shape. The SDK logs the failed request itself.
 async fn run_bounded<T>(
     call: InteractiveCall,
-    timeout: Duration,
+    timeout: Option<Duration>,
     verb: &str,
     fut: impl Future<Output = Result<T, GatewayError>>,
 ) -> Result<T, SendError> {
     let started = tokio::time::Instant::now();
-    let result = tokio::time::timeout(timeout, fut).await;
+    let result = match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, fut).await,
+        None => Ok(fut.await),
+    };
     call.finish(&result);
     match result {
-        Err(_) => Err(timed_out(verb, timeout)),
+        Err(_) => Err(timed_out(
+            verb,
+            timeout.unwrap_or_else(|| started.elapsed()),
+        )),
         Ok(Err(GatewayError::Timeout(_))) => Err(timed_out(verb, started.elapsed())),
         Ok(result) => result.map_err(map_err),
     }
@@ -194,12 +234,19 @@ impl MessageSender for GatewayAdapter {
         room_id: &str,
         message: axon_core::link_preview::PreviewSend<'_>,
         attachment: Option<MediaAttachment>,
+        txn_id: Option<&str>,
     ) -> Result<String, SendError> {
-        self.with_upload_timeout(
+        self.with_media_bounds(
             account_id,
             "preview send",
-            self.gateway
-                .send_with_previews(account_id, room_id, message, attachment),
+            self.gateway.send_with_previews(
+                account_id,
+                room_id,
+                message,
+                attachment,
+                txn_id,
+                self.media_bounds(),
+            ),
         )
         .await
     }
@@ -244,12 +291,20 @@ impl MessageSender for GatewayAdapter {
         caption: Option<&str>,
         formatted: Option<Formatted<'_>>,
         relation: Relation<'_>,
+        txn_id: Option<&str>,
     ) -> Result<String, SendError> {
-        self.with_upload_timeout(
+        self.with_media_bounds(
             account_id,
             "media send",
             self.gateway.send_media(
-                account_id, room_id, attachment, caption, formatted, relation,
+                account_id,
+                room_id,
+                attachment,
+                caption,
+                formatted,
+                relation,
+                txn_id,
+                self.media_bounds(),
             ),
         )
         .await
@@ -746,7 +801,7 @@ mod tests {
     async fn a_call_the_homeserver_never_answers_is_a_504_naming_the_verb() {
         let result: Result<(), SendError> = run_bounded(
             InteractiveCall::default(),
-            Duration::from_secs(30),
+            Some(Duration::from_secs(30)),
             "leave",
             std::future::pending(),
         )
@@ -764,7 +819,7 @@ mod tests {
     async fn an_sdk_timeout_inside_the_deadline_is_a_504_too() {
         let result: Result<(), SendError> = run_bounded(
             InteractiveCall::default(),
-            Duration::from_secs(45),
+            Some(Duration::from_secs(45)),
             "leave",
             async {
                 tokio::time::sleep(Duration::from_secs(30)).await;
@@ -782,7 +837,7 @@ mod tests {
     async fn a_homeserver_error_inside_the_timeout_stays_a_502() {
         let result: Result<(), SendError> = run_bounded(
             InteractiveCall::default(),
-            Duration::from_secs(30),
+            Some(Duration::from_secs(30)),
             "leave",
             async { Err(GatewayError::Upstream("M_UNKNOWN".to_owned())) },
         )
@@ -803,7 +858,7 @@ mod tests {
         let gates = HomeserverGates::default();
         let result: Result<(), SendError> = run_bounded(
             gates.interactive_call(&homeserver),
-            Duration::from_secs(30),
+            Some(Duration::from_secs(30)),
             "leave",
             std::future::pending(),
         )
@@ -814,7 +869,7 @@ mod tests {
         let gates = HomeserverGates::default();
         let result: Result<(), SendError> = run_bounded(
             gates.interactive_call(&homeserver),
-            Duration::from_secs(30),
+            Some(Duration::from_secs(30)),
             "leave",
             async { Err(GatewayError::Overloaded("503".to_owned())) },
         )
@@ -829,7 +884,7 @@ mod tests {
         let gates = HomeserverGates::default();
         let result: Result<(), SendError> = run_bounded(
             gates.interactive_call(&homeserver),
-            Duration::from_secs(30),
+            Some(Duration::from_secs(30)),
             "leave",
             async { Err(GatewayError::Upstream("M_UNKNOWN".to_owned())) },
         )

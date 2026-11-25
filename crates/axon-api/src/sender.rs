@@ -55,12 +55,14 @@ pub enum SendError {
 pub trait MessageSender: Send + Sync {
     /// Preview-aware send; implementations must explicitly opt in rather than
     /// silently drop metadata. An attachment changes body into its caption.
+    /// `txn_id` is as for [`send_media`](Self::send_media).
     async fn send_with_previews(
         &self,
         _account_id: Uuid,
         _room_id: &str,
         _message: axon_core::link_preview::PreviewSend<'_>,
         _attachment: Option<MediaAttachment>,
+        _txn_id: Option<&str>,
     ) -> Result<String, SendError> {
         Err(SendError::Unavailable(
             "bundled preview sends unavailable".into(),
@@ -91,12 +93,17 @@ pub trait MessageSender: Send + Sync {
         relation: Relation<'_>,
     ) -> Result<String, SendError>;
 
-    /// Send a staged media attachment as an `m.image` or `m.file`. The
-    /// attachment bytes are already claimed from the staging service; the sender
-    /// owns only the Matrix SDK upload/send operation. `caption`, when present,
-    /// becomes the media event body, otherwise the filename is the body.
-    /// `formatted`, when present, is the caption's rich-text rendering
-    /// (validated at the handler, which also requires a `caption` with it).
+    /// Send a staged media attachment as the event its kind names (ADR 0142
+    /// section 1), with the dimensions, duration and normalised thumbnail it
+    /// carries (section 4). The attachment bytes are already claimed from the
+    /// staging service; the sender owns only the Matrix upload/send
+    /// operation, and uploads the thumbnail best-effort (section 6).
+    /// `caption`, when present, becomes the media event body, otherwise the
+    /// filename is the body. `formatted`, when present, is the caption's
+    /// rich-text rendering (validated at the handler, which also requires a
+    /// `caption` with it). `txn_id`, when present, is the client's validated
+    /// id for this send, which the sender makes the Matrix transaction id.
+    #[allow(clippy::too_many_arguments)]
     async fn send_media(
         &self,
         account_id: Uuid,
@@ -105,6 +112,7 @@ pub trait MessageSender: Send + Sync {
         caption: Option<&str>,
         formatted: Option<Formatted<'_>>,
         relation: Relation<'_>,
+        txn_id: Option<&str>,
     ) -> Result<String, SendError>;
 
     /// Edit an existing message (`m.replace`); returns the replacement event id.

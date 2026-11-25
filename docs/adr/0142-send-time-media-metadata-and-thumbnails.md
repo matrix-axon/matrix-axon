@@ -390,6 +390,12 @@ Every piece of thumbnail work is inside a bound, the client's in step 1 and the 
 The only untimed work is what today's send also does untimed: reading the staged original from local disk at the claim.
 A retry that joins an in-flight send (section 4) waits only for what is left of the first send, so it adds nothing to the ceiling.
 Today steps 2 and 4 share one 60 s bound, so the ceiling rises by about 45 s.
+
+**Amended 2026-11-23, in the review of delivery step 3.**
+The shipped web client gives up on `send-media` after 65 s and sends no `txn_id`, so a send that succeeded past that would be retried and posted twice.
+Until clients wait for the sum above, step 3 keeps one `media.upstream_upload_timeout_secs` budget for everything but the thumbnail's upload, as today: resolving the room, the original's upload, the reply lookup and the event.
+The budget is paused while the thumbnail uploads under its own 10 s, so a slow thumbnail still never fails the send.
+The per-step bounds above arrive in the same release as delivery step 5 ([issue 1243](https://github.com/matrix-axon/matrix-axon/issues/1243)).
 Each step reaches its bound only when the homeserver is slow or failing; on a healthy one, the thumbnail adds well under a second, and generation adds nothing once the original takes longer than the decode.
 
 A client that bounds `send-media` must allow for the new ceiling.

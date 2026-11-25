@@ -312,6 +312,7 @@ fn unauthorized_response() -> RefOr<Response> {
         crate::dto::PreviewThumbnailStatus,
         crate::dto::PreviewThumbnailBytes,
         crate::dto::SendMediaRequest,
+        crate::dto::SendMediaInfo,
         crate::dto::SendStickerRequest,
         crate::dto::StickerInfoDto,
         crate::dto::EditRequest,
