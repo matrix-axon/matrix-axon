@@ -173,7 +173,13 @@
   Deduplicate room IDs and replace membership only after the final page; a failed or incomplete walk retains the last complete grouping and marks the root incomplete.
   Each walk allows 200 pages, 2 MiB per page, 16 MiB in total, and 60 seconds overall, alongside each read's 30-second timeout.
   Reject malformed, oversized, or repeated cursors and unexpected page/parent IDs.
-  Failed walks retry from the first page after 30 seconds; explicit refresh and relationship changes retry immediately.
+  Failed walks retry from the first page after 30, 60, 120, then 240 seconds.
+  The 60-second walk deadline uses that ladder.
+  A byte-total, per-page size, or page-count failure starts at 240 seconds.
+  A complete walk clears that count, and a cancelled walk or a stale result does not change it.
+  `/refresh` retries immediately and clears the count.
+  A relationship change retries immediately while the count is below the cap, and keeps the wait at the cap.
+  Reconnect keeps the deadline and the count.
   Reconnect and `/refresh` invalidate membership and re-read instance order.
 - `space_order` is instance-scoped, including `preferences.changed` envelopes with a nil account UUID.
   Preserve hidden/absent keys on reorder, suppress own-device echoes, serialize GET/PUT work, and retain unsaved edits across failures and older reads.

@@ -3,6 +3,7 @@
 //! neither key handling nor the renderer waits for network work.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -11,8 +12,9 @@ use tokio::task::AbortHandle;
 
 use super::{App, BootstrapStage, RoomFilter, RoomKey, Status};
 use crate::api::{
-    ApiError, EventDto, MemberDto, PreferenceDto, PreferencesChangedDto, RoomDto, TimelinePage,
-    HIERARCHY_PAGE_SIZE,
+    ApiError, EventDto, HierarchyLimit, HierarchyReadError, MemberDto, PreferenceDto,
+    PreferencesChangedDto, RoomDto, TimelinePage, HIERARCHY_BYTE_BUDGET_ERROR, HIERARCHY_PAGE_SIZE,
+    RESPONSE_SIZE_LIMIT_ERROR,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -24,13 +26,64 @@ const HIERARCHY_MAX_PAGES: usize = 200;
 const HIERARCHY_MAX_BYTES: usize = 16 * 1024 * 1024;
 const HIERARCHY_TIMEOUT: Duration = Duration::from_secs(60);
 const HIERARCHY_CURSOR_BYTES: usize = 4096;
+const HIERARCHY_PAGE_LIMIT_ERROR: &str = "space hierarchy exceeds 200 pages";
+const HIERARCHY_DEADLINE_ERROR: &str = "space hierarchy exceeded 60-second walk deadline";
+/// Transient walk failures, including the 60-second walk deadline, wait 30s,
+/// then 60s, 120s, and 240s, matching room-info reads.
+/// A byte-total, per-page size, or page-count failure starts at that cap:
+/// another full walk cannot succeed until the space shrinks, and each attempt
+/// can transfer 16 MiB and hold one of the four workers for 60s.
+const HIERARCHY_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+const HIERARCHY_MAX_FAILURES: u32 = 4;
+
+/// A local limit the same space will hit again until it shrinks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BudgetKind {
+    TotalBytes,
+    PageBytes,
+    Pages,
+}
+
+/// Why a hierarchy walk stopped before a complete grouping.
+#[derive(Debug)]
+pub(crate) enum WalkFailure {
+    Budget(BudgetKind),
+    /// A timeout, transport error, invalid page, or the 60-second deadline.
+    /// A slow link can clear on the next attempt, so these stay on the ladder.
+    Transient(ApiError),
+}
+
+impl From<HierarchyReadError> for WalkFailure {
+    fn from(err: HierarchyReadError) -> Self {
+        match err {
+            HierarchyReadError::Limit(HierarchyLimit::TotalBytes) => {
+                Self::Budget(BudgetKind::TotalBytes)
+            }
+            HierarchyReadError::Limit(HierarchyLimit::PageBytes) => {
+                Self::Budget(BudgetKind::PageBytes)
+            }
+            HierarchyReadError::Other(err) => Self::Transient(err),
+        }
+    }
+}
+
+impl fmt::Display for WalkFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Budget(BudgetKind::TotalBytes) => f.write_str(HIERARCHY_BYTE_BUDGET_ERROR),
+            Self::Budget(BudgetKind::PageBytes) => f.write_str(RESPONSE_SIZE_LIMIT_ERROR),
+            Self::Budget(BudgetKind::Pages) => f.write_str(HIERARCHY_PAGE_LIMIT_ERROR),
+            Self::Transient(err) => write!(f, "{err}"),
+        }
+    }
+}
 
 /// Publish membership atomically only after the last page. An interrupted walk
 /// cannot prove absence, so it must never prune the last complete grouping.
 async fn walk_space_children(
     client: &crate::api::AxonClient,
     key: &RoomKey,
-) -> Result<Vec<String>, ApiError> {
+) -> Result<Vec<String>, WalkFailure> {
     tokio::time::timeout(HIERARCHY_TIMEOUT, async {
         let mut children = Vec::new();
         let mut seen = HashSet::new();
@@ -48,7 +101,9 @@ async fn walk_space_children(
                 .await?;
             remaining_bytes -= bytes;
             if page.room_id != key.room_id || page.children.len() > HIERARCHY_PAGE_SIZE {
-                return Err(ApiError::Request("invalid space hierarchy page".to_owned()));
+                return Err(WalkFailure::Transient(ApiError::Request(
+                    "invalid space hierarchy page".to_owned(),
+                )));
             }
             for child in page.children {
                 if child.parent_room_id != key.room_id
@@ -56,9 +111,9 @@ async fn walk_space_children(
                     || child.via.is_empty()
                     || child.via.iter().any(String::is_empty)
                 {
-                    return Err(ApiError::Request(
+                    return Err(WalkFailure::Transient(ApiError::Request(
                         "invalid space hierarchy child".to_owned(),
-                    ));
+                    )));
                 }
                 if seen.insert(child.room_id.clone()) {
                     children.push(child.room_id);
@@ -68,9 +123,9 @@ async fn walk_space_children(
                 // A moving hierarchy can grow during pagination. Do not claim
                 // completeness when the last snapshot still names more links.
                 if (children.len() as u64) < page.total_children {
-                    return Err(ApiError::Request(
+                    return Err(WalkFailure::Transient(ApiError::Request(
                         "space hierarchy ended before its total".to_owned(),
-                    ));
+                    )));
                 }
                 return Ok(children);
             };
@@ -79,18 +134,21 @@ async fn walk_space_children(
                 || next.chars().any(|c| c.is_whitespace() || c.is_control())
                 || !cursors.insert(next.clone())
             {
-                return Err(ApiError::Request(
+                return Err(WalkFailure::Transient(ApiError::Request(
                     "invalid or repeated space hierarchy cursor".to_owned(),
-                ));
+                )));
             }
             cursor = Some(next);
         }
-        Err(ApiError::Request(
-            "space hierarchy exceeds 200 pages".to_owned(),
-        ))
+        Err(WalkFailure::Budget(BudgetKind::Pages))
     })
     .await
-    .map_err(|_| ApiError::Request("space hierarchy exceeded 60-second walk deadline".to_owned()))?
+    .map_err(|_| WalkFailure::Transient(ApiError::Request(HIERARCHY_DEADLINE_ERROR.to_owned())))?
+}
+
+fn hierarchy_retry_delay(failures: u32) -> Duration {
+    let steps = failures.saturating_sub(1).min(HIERARCHY_MAX_FAILURES - 1);
+    HIERARCHY_RETRY_INTERVAL * (1_u32 << steps)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +207,9 @@ pub(crate) struct ChildrenState {
     inflight: Option<u64>,
     abort: Option<AbortHandle>,
     retry_at: Option<Instant>,
+    /// Consecutive failed walks since the last complete one.
+    /// Cancellation and stale results leave it unchanged.
+    failures: u32,
 }
 
 impl ChildrenState {
@@ -250,7 +311,7 @@ pub(crate) enum SpaceOutcome {
     Children {
         key: RoomKey,
         request: u64,
-        result: Result<Vec<String>, ApiError>,
+        result: Result<Vec<String>, WalkFailure>,
     },
     OrderRead {
         revision: u64,
@@ -1027,9 +1088,23 @@ impl App {
     }
 
     pub(crate) fn invalidate_space(&mut self, key: &RoomKey) {
-        if let Some(state) = self.spaces.children.get_mut(key) {
+        let Some(state) = self.spaces.children.get_mut(key) else {
+            return;
+        };
+        // Below the cap, a relationship change walks on the next sweep and
+        // keeps its place on the ladder. At the cap, keep the wait so child
+        // churn cannot start another 16 MiB walk. Aborting the attempt the
+        // cap already allowed schedules that wait again; a past deadline
+        // would otherwise let the next sweep start immediately.
+        if state.failures < HIERARCHY_MAX_FAILURES {
             state.invalidate();
             state.retry_at = None;
+            return;
+        }
+        let restart_after_abort = state.inflight.is_some();
+        state.invalidate();
+        if restart_after_abort {
+            state.retry_at = Some(Instant::now() + hierarchy_retry_delay(state.failures));
         }
     }
 
@@ -1037,6 +1112,9 @@ impl App {
         for state in self.spaces.children.values_mut() {
             state.invalidate();
             state.retry_at = None;
+            // An explicit refresh starts the ladder over. The next failure
+            // waits 30 seconds, including one that follows a budget cap.
+            state.failures = 0;
         }
         self.spaces.order_read_again = true;
         self.spaces.order_retry_at = None;
@@ -1303,6 +1381,10 @@ impl App {
     }
 
     pub(crate) fn apply_space_outcome(&mut self, outcome: SpaceOutcome) {
+        self.apply_space_outcome_at(outcome, Instant::now());
+    }
+
+    pub(crate) fn apply_space_outcome_at(&mut self, outcome: SpaceOutcome, now: Instant) {
         match outcome {
             SpaceOutcome::Timeline(outcome) => {
                 if self.spaces.timeline.as_ref().map(|pending| pending.request)
@@ -1384,18 +1466,28 @@ impl App {
                         state.children = Some(children);
                         state.error = None;
                         state.retry_at = None;
+                        state.failures = 0;
                     }
-                    Err(err) => {
-                        let error = err.to_string();
+                    Err(failure) => {
+                        let budget = matches!(failure, WalkFailure::Budget(_));
+                        let error = failure.to_string();
                         state.error = Some(error.clone());
+                        state.failures = if budget {
+                            HIERARCHY_MAX_FAILURES
+                        } else {
+                            state.failures.saturating_add(1).min(HIERARCHY_MAX_FAILURES)
+                        };
+                        let delay = hierarchy_retry_delay(state.failures);
+                        state.dirty = true;
+                        state.retry_at = Some(now + delay);
                         if report_debug {
                             self.status = Status::Debug(format!(
-                                "space membership incomplete: account_id={} room_id={}: {error}",
-                                key.account_id, key.room_id
+                                "space membership incomplete: account_id={} room_id={}: {error}; retry in {}s",
+                                key.account_id,
+                                key.room_id,
+                                delay.as_secs()
                             ));
                         }
-                        state.dirty = true;
-                        state.retry_at = Some(Instant::now() + Duration::from_secs(30));
                     }
                 }
             }

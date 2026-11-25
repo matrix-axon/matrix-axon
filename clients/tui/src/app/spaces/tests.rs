@@ -1431,11 +1431,9 @@ fn flapping_reconnects_coalesce_refresh_and_preserve_failed_read_backoff() {
     let mut app = app();
     let now = Instant::now();
     let retry = now + Duration::from_secs(30);
-    app.spaces
-        .children
-        .get_mut(&key("!work:srv"))
-        .unwrap()
-        .retry_at = Some(retry);
+    let state = app.spaces.children.get_mut(&key("!work:srv")).unwrap();
+    state.retry_at = Some(retry);
+    state.failures = 3;
     app.spaces.order_retry_at = Some(retry);
     app.spaces.order_read_again = false;
     app.request_space_reconnect_refresh(now);
@@ -1447,6 +1445,7 @@ fn flapping_reconnects_coalesce_refresh_and_preserve_failed_read_backoff() {
     assert!(app.rooms_fetch_inflight);
     assert!(app.spaces.children[&key("!work:srv")].dirty);
     assert_eq!(app.spaces.children[&key("!work:srv")].retry_at, Some(retry));
+    assert_eq!(app.spaces.children[&key("!work:srv")].failures, 3);
     assert_eq!(app.spaces.order_retry_at, Some(retry));
     assert!(app.spaces.order_read_again);
     app.sweep_space_reconnect_refresh(now + Duration::from_secs(2));

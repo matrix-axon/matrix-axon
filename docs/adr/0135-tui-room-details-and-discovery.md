@@ -92,11 +92,15 @@ A last page reporting more links than the walk collected is incomplete, includin
 
 Only a complete walk replaces cached membership, including confirmed empty membership.
 Any failure or limit keeps the last complete grouping and marks the root `(incomplete; retrying)`; on first failure, rooms remain in provisional Ungrouped.
-Retries start from the first page after 30 seconds.
-A space that permanently exceeds a budget can repeatedly transfer up to 16 MiB per attempt under that fixed cooldown.
-[Issue 1090](https://github.com/matrix-axon/matrix-axon/issues/1090) tracks bounded retry backoff separately from discovery browsing.
-Explicit refresh and relationship changes bypass that delay.
-Reconnect waits one second for connection stability and preserves failed-read deadlines while invalidating membership and re-reading root order.
+A failed walk retries from the first page.
+Transient failures, including the 60-second walk deadline, wait 30 seconds, then 60, 120, and 240, and stay at 240 seconds.
+A walk that exhausts its byte total, its per-page size limit, or its 200-page cap starts at that 240-second cap, because another attempt can transfer up to 16 MiB and hold a worker for 60 seconds.
+A complete walk clears the failure count.
+Cancelling a walk, or applying a stale result, does not.
+`/refresh` retries immediately and clears the failure count, so the next failure starts again at 30 seconds.
+A relationship change retries immediately while the count is below that cap, and keeps the count.
+At the cap it keeps the wait, and aborting the in-flight walk starts that wait over, so child-link churn cannot start another full transfer.
+Reconnect waits one second for connection stability and preserves failed-read deadlines and failure counts while invalidating membership and re-reading root order.
 Invalidation and root removal abort the walk immediately, and request IDs reject queued old outcomes even after a rejoin of the same account and room.
 Account-filter changes can retain a result only under its originating account's cache key and cannot fulfill another account's navigation.
 Older servers without the paged route show the same incomplete state rather than falling back to the silently capped endpoint.
@@ -116,5 +120,6 @@ The TUI unit suite exercises all five HTTP reads, scoped notifications, source c
 Formatting tests cover known absence, unknown encryption, homeserver scope and status labels, stale values beside refresh failure, and denial replacing old data.
 HTTP tests reject oversized bodies before decoding and keep old-server endpoint failures explicit.
 Sidebar HTTP tests cover more than 1,000 children, duplicate links, failed later pages, retry from the beginning, malformed/repeated cursors, byte/page/time budgets, cancellation, invalidation and rejoin races, and account isolation.
+Failure-backoff tests cover the transient ladder, the walk deadline, the budget cap, success reset, explicit refresh clearing the count, relationship changes below and at the cap, reconnect, and account or root removal.
 Run formatting, TUI tests, strict clippy, and both TUI smoke profiles before publication.
 The recorded demo still does not open `/whereami`; `docs/demo-coverage.md` records that gap.

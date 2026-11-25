@@ -52,6 +52,44 @@ pub(crate) const ROOM_MEMBERS_LIMIT: usize = 2 * 1024 * 1024;
 const INVITE_LIST_LIMIT: usize = 1024 * 1024;
 pub(crate) const HIERARCHY_PAGE_SIZE: usize = 100;
 pub(crate) const HIERARCHY_PAGE_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const HIERARCHY_BYTE_BUDGET_ERROR: &str = "space hierarchy byte budget exhausted";
+pub(crate) const RESPONSE_SIZE_LIMIT_ERROR: &str = "API response exceeds size limit";
+
+/// A hierarchy read was refused by a local size limit.
+/// The walk records these as budget exhaustion. Other callers of the shared
+/// body reader still see an ordinary request error with the same text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HierarchyLimit {
+    /// The walk has already spent its total byte budget. No request is sent.
+    TotalBytes,
+    /// This page exceeded the per-response cap.
+    PageBytes,
+}
+
+/// `space_hierarchy` either hit [`HierarchyLimit`] or failed for another reason.
+#[derive(Debug)]
+pub(crate) enum HierarchyReadError {
+    Limit(HierarchyLimit),
+    Other(ApiError),
+}
+
+impl fmt::Display for HierarchyReadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Limit(HierarchyLimit::TotalBytes) => f.write_str(HIERARCHY_BYTE_BUDGET_ERROR),
+            Self::Limit(HierarchyLimit::PageBytes) => f.write_str(RESPONSE_SIZE_LIMIT_ERROR),
+            Self::Other(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+/// The shared body reader distinguishes a local size cap from every other
+/// failure. Hierarchy walks map the cap to [`HierarchyLimit`]; other callers
+/// keep the existing request-error text.
+enum BoundedBodyError {
+    TooLarge,
+    Other(ApiError),
+}
 
 #[derive(Debug, Clone)]
 pub struct AxonClient {
@@ -141,11 +179,9 @@ impl AxonClient {
         room_id: &str,
         cursor: Option<&str>,
         remaining_bytes: usize,
-    ) -> Result<(SpaceHierarchyPage, usize), ApiError> {
+    ) -> Result<(SpaceHierarchyPage, usize), HierarchyReadError> {
         if remaining_bytes == 0 {
-            return Err(ApiError::Request(
-                "space hierarchy byte budget exhausted".to_owned(),
-            ));
+            return Err(HierarchyReadError::Limit(HierarchyLimit::TotalBytes));
         }
         let mut request = self
             .http
@@ -162,11 +198,19 @@ impl AxonClient {
         if let Some(cursor) = cursor {
             request = request.query(&[("cursor", cursor)]);
         }
-        self.send_bounded_counted(
-            read_request(request),
-            remaining_bytes.min(HIERARCHY_PAGE_BYTES),
-        )
-        .await
+        match self
+            .send_bounded_counted(
+                read_request(request),
+                remaining_bytes.min(HIERARCHY_PAGE_BYTES),
+            )
+            .await
+        {
+            Ok(page) => Ok(page),
+            Err(BoundedBodyError::TooLarge) => {
+                Err(HierarchyReadError::Limit(HierarchyLimit::PageBytes))
+            }
+            Err(BoundedBodyError::Other(err)) => Err(HierarchyReadError::Other(err)),
+        }
     }
 
     pub async fn space_order(&self) -> Result<PreferenceDto, ApiError> {
@@ -1051,31 +1095,37 @@ impl AxonClient {
         request: reqwest::RequestBuilder,
         limit: usize,
     ) -> Result<T, ApiError> {
-        self.send_bounded_counted(request, limit)
-            .await
-            .map(|(data, _)| data)
+        match self.send_bounded_counted(request, limit).await {
+            Ok((data, _)) => Ok(data),
+            Err(BoundedBodyError::TooLarge) => {
+                Err(ApiError::Request(RESPONSE_SIZE_LIMIT_ERROR.to_owned()))
+            }
+            Err(BoundedBodyError::Other(err)) => Err(err),
+        }
     }
 
     async fn send_bounded_counted<T: DeserializeOwned>(
         &self,
         request: reqwest::RequestBuilder,
         limit: usize,
-    ) -> Result<(T, usize), ApiError> {
-        let response = request.send().await?;
+    ) -> Result<(T, usize), BoundedBodyError> {
+        let response = request
+            .send()
+            .await
+            .map_err(|err| BoundedBodyError::Other(err.into()))?;
         let status = response.status();
         let mut stream = response.bytes_stream();
         let mut bytes = Vec::new();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+            let chunk = chunk.map_err(|err| BoundedBodyError::Other(err.into()))?;
             if chunk.len() > limit.saturating_sub(bytes.len()) {
-                return Err(ApiError::Request(
-                    "API response exceeds size limit".to_owned(),
-                ));
+                return Err(BoundedBodyError::TooLarge);
             }
             bytes.extend_from_slice(&chunk);
         }
         Self::decode_response(status, &bytes, || "invalid API error response".to_owned())
             .map(|data| (data, bytes.len()))
+            .map_err(BoundedBodyError::Other)
     }
 
     fn decode_response<T: DeserializeOwned>(
