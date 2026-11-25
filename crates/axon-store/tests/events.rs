@@ -64,7 +64,7 @@ async fn pending_utd_is_found_then_back_filled_idempotently() {
         "sender": "@alice:localhost",
         "content": { "algorithm": "m.megolm.v1.aes-sha2", "session_id": session_id }
     });
-    store
+    let arrival_order = store
         .upsert_event(&NewEvent {
             event_id: &event_id,
             room_id: &room_id,
@@ -133,10 +133,11 @@ async fn pending_utd_is_found_then_back_filled_idempotently() {
         "manual/recovery retries must ignore the startup marker"
     );
 
-    // Back-fill the decrypted payload.
+    // Two retries may have selected the same pending row. Only the one that
+    // commits the back-fill can report its arrival order to live subscribers.
     let content = json!({ "msgtype": "m.text", "body": "decrypted!" });
-    store
-        .update_decrypted_event(
+    let retry = || {
+        store.update_decrypted_event(
             account_id,
             &event_id,
             &content,
@@ -144,8 +145,13 @@ async fn pending_utd_is_found_then_back_filled_idempotently() {
             Some("decrypted!"),
             None,
         )
-        .await
-        .expect("back-fill");
+    };
+    let (first, second) = tokio::join!(retry(), retry());
+    let transitions: Vec<_> = [first.expect("first retry"), second.expect("second retry")]
+        .into_iter()
+        .flatten()
+        .collect();
+    assert_eq!(transitions, [arrival_order]);
 
     // Row is no longer pending, and content/type were written.
     assert!(store
@@ -159,7 +165,7 @@ async fn pending_utd_is_found_then_back_filled_idempotently() {
 
     // Guard/idempotency: a second update can't clobber the decrypted row
     // (the `content IS NULL` guard no longer matches).
-    store
+    let unchanged = store
         .update_decrypted_event(
             account_id,
             &event_id,
@@ -170,6 +176,7 @@ async fn pending_utd_is_found_then_back_filled_idempotently() {
         )
         .await
         .expect("guarded update");
+    assert_eq!(unchanged, None);
     let (after_content, after_type) = read_event(&pool, account_id, &event_id).await;
     assert_eq!(after_content, Some(content));
     assert_eq!(after_type, "m.room.message");

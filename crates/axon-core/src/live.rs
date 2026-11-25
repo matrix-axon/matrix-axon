@@ -29,6 +29,8 @@ use crate::room_details::RoomDetailSource;
 pub enum LiveFrame {
     /// A freshly persisted timeline event.
     Timeline(LiveEvent),
+    /// A stored timeline event gained decrypted content.
+    EventDecrypted(EventDecryptedFrame),
     /// A state change in an interactive (SAS) device-verification flow.
     Verification(VerificationFrame),
     /// The account's own cross-signing master key was replaced or its
@@ -76,6 +78,16 @@ pub enum LiveFrame {
     /// frames whose `device_id` is their own (echo suppression, same rule as
     /// [`DeviceStateFrame`]).
     PreferencesChanged(PreferencesFrame),
+}
+
+/// Identifies an event whose stored content changed after re-decryption.
+#[derive(Debug, Clone)]
+pub struct EventDecryptedFrame {
+    pub account_id: Uuid,
+    pub room_id: String,
+    pub event_id: String,
+    /// The event's original database sequence, shared with timeline reads.
+    pub arrival_order: i64,
 }
 
 impl From<LiveEvent> for LiveFrame {
@@ -441,9 +453,8 @@ pub struct LiveEvent {
     pub relates_to: Option<Value>,
     /// The sender-trust verdict snapshot (M7c): `verified`, `unverified`,
     /// `unknown`, `verification_violation`, or `mismatched_sender`. `None` for
-    /// unencrypted events and for UTDs (whose verdict is only known once
-    /// re-decryption back-fills it — re-decryption does not re-emit a live
-    /// frame, so clients re-read the timeline for the back-filled value).
+    /// unencrypted events and for UTDs. A re-decryption update identifies
+    /// the event to reread for the back-filled verdict.
     pub sender_trust: Option<String>,
     /// Why the event could not be decrypted (ADR 0136 decision 2), when it is a
     /// UTD and the ingest path's local decryption retry recorded a reason.

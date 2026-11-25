@@ -68,6 +68,36 @@ the protocol without colliding. A freshly synced event is never
 already-redacted (a redaction arrives as its own later event), so live frames
 always carry `redacted: false`.
 
+### Re-decrypted events (#948)
+
+When re-decryption fills a stored UTD, the server publishes an update after the write commits.
+If retries overlap, only the retry that changes the row publishes the update.
+
+```json
+{
+  "type": "timeline.event_decrypted",
+  "account_id": "<uuid>",
+  "payload": {
+    "room_id": "!room:example.org",
+    "event_id": "$event",
+    "arrival_order": 42
+  }
+}
+```
+
+Read the current event from `GET /v1/accounts/{account_id}/events/{event_id}`.
+The read applies normal redaction masking.
+Use `(account_id, event_id)` to reconcile a cached event in place, keeping its original `arrival_order`.
+Apply the returned event type and relations as on a timeline reread.
+The update can arrive before a concurrent live-sync delivery, so reconcile with the current read if the original UTD frame comes later.
+A historical event may have no earlier frame.
+Keep the existing arrival cursor and unread count when applying the update.
+Clients that do not recognize this additive tag ignore it.
+Refresh displayed UTDs after reconnecting or detecting a gap in live delivery.
+Each update keeps the row's original arrival order, so a query for later arrivals alone cannot recover a missed update.
+The server logs broadcast lag and keeps the socket open, which means the client may receive no signal that updates were dropped.
+Issue #1048 tracks a server-side way to trigger resync after lag.
+
 ### Live tail, not replay
 
 `/v1/ws` delivers events that arrive *after* a client connects. It is not a
@@ -92,12 +122,7 @@ is documented in the `ws` module and here instead.
   must reconcile via the read API). No auth yet: bearer-token validation on the
   upgrade lands with the rest of auth in **M8** (`Sec-WebSocket-Protocol` or
   initial-envelope token, per the implementation spec).
-- **Scope:** only the live-sync persistence path (`persist_timeline_event`)
-  publishes. A UTD that the re-decryption queue back-fills later (ADR 0014) is
-  **not** re-emitted over `/v1/ws` — a client sees the UTD frame (content
-  `null`) when it first arrives and learns the decrypted form on its next
-  timeline read. Re-emitting updates would need an update-vs-insert frame
-  semantic; deferred until a client needs it.
+- **Scope:** live-sync persistence publishes timeline arrivals.
+  Successful re-decryption back-fills (ADR 0014) publish the update described above.
 - **Revisit** if clients need a resumable/replaying stream (a cursor on the WS,
-  or server-sent backfill on connect), or if re-decryption updates should push.
-```
+  or server-sent backfill on connect).

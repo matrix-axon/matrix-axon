@@ -47,7 +47,7 @@ use crate::homeserver_gate::Caller;
 use crate::manager::ClientManager;
 use crate::matrix_oauth_grant::MatrixOAuthGrantRegistry;
 use crate::own_identity;
-use crate::redecrypt::{BackupSource, RedecryptSummary, SweepScope};
+use crate::redecrypt::{BackupSource, RedecryptContext, RedecryptSummary, SweepScope};
 use crate::sync_health::SyncHealth;
 use crate::verification::{FlowRegistry, VerificationRooms};
 
@@ -488,12 +488,16 @@ impl AccountLifecycle {
         // A user is waiting on recover and manual re-decryption, so their
         // backup downloads never wait for the homeserver gate (ADR 0122).
         let gate = self.manager.homeserver_gate(client);
+        let redecrypt_ctx = RedecryptContext {
+            store: &self.store,
+            account_id,
+            index: self.index.as_ref(),
+            live_tx: &self.live_tx,
+        };
         let mut sweep = std::pin::pin!(crate::redecrypt::sweep_pending_utds(
             client,
-            &self.store,
-            account_id,
+            &redecrypt_ctx,
             SweepScope::AllPending,
-            self.index.as_ref(),
             &cancel,
             BackupSource {
                 gate: &gate,

@@ -82,7 +82,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::engine::{persist_backfilled_event, EventWriteFailed, PersistContext};
 use crate::homeserver_gate::{is_fast, GateError, HomeserverGate, Outcome, TIMEOUT_HOLD};
-use crate::redecrypt::{paged_utd_session_id, recheck_backfilled_sessions, KeyArrivalWatch};
+use crate::redecrypt::{
+    paged_utd_session_id, recheck_backfilled_sessions, KeyArrivalWatch, RedecryptContext,
+};
 
 pub(crate) mod gaps;
 mod verify;
@@ -905,11 +907,14 @@ async fn write_page(
     if !utd_sessions.is_empty() {
         recheck_backfilled_sessions(
             room,
-            &ctx.store,
-            account_id,
+            &RedecryptContext {
+                store: &ctx.store,
+                account_id,
+                index: ctx.index.as_ref(),
+                live_tx: &ctx.live_tx,
+            },
             &utd_sessions,
             key_arrivals,
-            ctx.index.as_ref(),
             cancel,
         )
         .await;
