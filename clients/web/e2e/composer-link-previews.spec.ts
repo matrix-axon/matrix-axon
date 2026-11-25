@@ -77,7 +77,7 @@ async function routePreviews(page: Page) {
   return { generated, sent, external }
 }
 
-test('a browser card asks the homeserver on request, and sends its thumbnail', async ({
+test('a browser card asks the homeserver on request and survives a link label edit', async ({
   page,
 }) => {
   const seen = await routePreviews(page)
@@ -123,9 +123,17 @@ test('a browser card asks the homeserver on request, and sends its thumbnail', a
   const thumbnail = (await image.boundingBox())!
   expect(thumbnail.height).toBeLessThanOrEqual(box.height)
 
+  // Label the same URL and leave the closing parenthesis at the end of the draft.
+  const labeledLink = `[A story](${LINK})`
+  await field.fill(labeledLink)
+  await expect(card).toContainText('Example News')
+  await expect(image).toBeVisible()
+
   // At phone width Enter is a new line; Send sends.
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   await expect.poll(() => seen.sent.length).toBe(1)
+  expect(seen.sent[0].body).toBe(labeledLink)
+  expect(seen.generated).toEqual([{ url: LINK }])
   const [preview] = seen.sent[0].url_previews as Record<string, unknown>[]
   expect(preview).toEqual({
     matched_url: LINK,

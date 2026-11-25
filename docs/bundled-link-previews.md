@@ -315,6 +315,7 @@ The shell builds cards on the device with its restricted fetcher; a browser cann
 The composer calls generation only from a card's **Try homeserver** button, once per link, never automatically.
 A plain `http://` link gets no card, since only HTTPS links do ([ADR 0132 section 1](adr/0132-composer-link-previews.md#1-the-composer-authors-bundled-previews-up-to-three-per-message)); while previews are on, a complete one the user added gets a short note saying so instead, wherever an `https://` link would have got a card.
 It reads a generated thumbnail at once through the [recovery endpoint](#durable-thumbnail-recovery), keeps the bytes, and forgets the handle, which then expires; a failed read costs the card its image, never its text.
+A ready card stays attached to the same URL when you add a Markdown label or remove trailing whitespace from the draft.
 
 What a send carries is decided against the formatted body being sent:
 

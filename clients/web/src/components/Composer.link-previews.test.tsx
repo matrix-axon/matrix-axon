@@ -46,29 +46,33 @@ function setup({
   markerFits = vi.fn(async () => true),
   attachments,
   onCommand,
+  edit,
 }: {
   sources: PreviewSources
   initialValue?: string
   markerFits?: ComposerLinkPreviewOptions['markerFits']
   attachments?: Parameters<typeof Composer>[0]['attachments']
   onCommand?: Parameters<typeof Composer>[0]['onCommand']
+  edit?: ComposerLinkPreviewOptions['edit']
 }) {
   const onSubmit = vi.fn(async () => true)
   const linkPreviews: ComposerLinkPreviewOptions = {
     sources,
     cache: createLinkPreviewCache(),
     markerFits,
+    edit,
   }
-  const utils = render(
+  const view = (value: string) => (
     <Composer
       placeholder="Message"
-      initialValue={initialValue}
+      initialValue={value}
       onSubmit={onSubmit}
       linkPreviews={linkPreviews}
       attachments={attachments}
       onCommand={onCommand}
-    />,
+    />
   )
+  const utils = render(view(initialValue))
   const textarea = utils.getByRole('textbox') as HTMLTextAreaElement
   const type = (value: string) =>
     fireEvent.input(textarea, { target: { value } })
@@ -78,7 +82,17 @@ function setup({
       inputType: 'insertFromPaste',
     })
   const send = () => fireEvent.submit(textarea.closest('form')!)
-  return { ...utils, onSubmit, textarea, type, paste, send, markerFits }
+  const syncDraft = (value: string) => utils.rerender(view(value))
+  return {
+    ...utils,
+    onSubmit,
+    textarea,
+    type,
+    paste,
+    send,
+    markerFits,
+    syncDraft,
+  }
 }
 
 const cards = () =>
@@ -181,6 +195,27 @@ describe('Composer link previews', () => {
     expect(device).toHaveBeenCalledTimes(1)
   })
 
+  it('forgets that a ready link is complete once it leaves the draft', async () => {
+    const { device, pending } = deferredDevice()
+    const { type } = setup({ sources: { setting: 'device', device } })
+    type(`${A} `)
+    await waitFor(() => expect(device).toHaveBeenCalledTimes(1))
+    pending[0].resolve({ url: A, title: 'An article', imageUnavailable: false })
+    await screen.findByText('An article')
+
+    type(`[An article](${A})`)
+    expect(screen.getByText('An article')).toBeTruthy()
+    type(`[An article](${B})`)
+    expect(cards()).toBeNull()
+    type(`[An article](${A})`)
+    expect(cards()).toBeNull()
+    type(`[An article](${A}) `)
+    expect(screen.getByText('An article')).toBeTruthy()
+    type(`[An article](${A})`)
+    expect(screen.getByText('An article')).toBeTruthy()
+    expect(device).toHaveBeenCalledTimes(1)
+  })
+
   it('discards a card with its X and sends the discard record', async () => {
     const { device, pending } = deferredDevice()
     const { paste, send, onSubmit } = setup({
@@ -222,6 +257,30 @@ describe('Composer link previews', () => {
     })
     expect(device).not.toHaveBeenCalled()
     expect(cards()).toBeNull()
+  })
+
+  it('clears a ready card when it restores a replacement draft with the same link', async () => {
+    const { device, pending } = deferredDevice()
+    const { type, textarea, syncDraft } = setup({
+      sources: { setting: 'device', device },
+    })
+    type(`${A} `)
+    await waitFor(() => expect(device).toHaveBeenCalledTimes(1))
+    pending[0].resolve({ url: A, title: 'An article', imageUnavailable: false })
+    await screen.findByText('An article')
+
+    const labeled = `[An article](${A})`
+    type(labeled)
+    syncDraft(labeled)
+    expect(screen.getByText('An article')).toBeTruthy()
+
+    const restored = `Read ${labeled}`
+    syncDraft(restored)
+    expect(textarea.value).toBe(restored)
+    expect(cards()).toBeNull()
+    type(`${restored} later `)
+    expect(cards()).toBeNull()
+    expect(device).toHaveBeenCalledTimes(1)
   })
 
   it('shows no cards while a file is staged', () => {
@@ -469,6 +528,69 @@ describe('Composer link previews', () => {
     )
     expect(screen.getByText('Restored article')).toBeTruthy()
     expect(device).not.toHaveBeenCalled()
+  })
+
+  it('submits both the original and newly ready cards after labeling links in edit mode', async () => {
+    const { device, pending } = deferredDevice()
+    const { type, send, onSubmit } = setup({
+      sources: { setting: 'device', device },
+      initialValue: A,
+      edit: {
+        accountId: 'acct',
+        hasField: true,
+        seed: {
+          originalText: A,
+          cards: messageCards(
+            {
+              'm.url_previews': [
+                { 'matrix:matched_url': A, 'og:title': 'Original article' },
+              ],
+            },
+            A,
+          ),
+          addNew: true,
+        },
+      },
+    })
+    const originalLink = `[Original](${A})`
+    type(originalLink)
+    expect(screen.getByText('Original article')).toBeTruthy()
+    expect(device).not.toHaveBeenCalled()
+
+    type(`${originalLink} ${B} `)
+    await waitFor(() => expect(device).toHaveBeenCalledTimes(1))
+    expect(pending[0].url).toBe(B)
+    pending[0].resolve({
+      url: B,
+      title: 'New article',
+      imageUnavailable: false,
+    })
+    await screen.findByText('New article')
+
+    const labeled = `${originalLink} [New](${B})`
+    type(labeled)
+    expect(screen.getByText('New article')).toBeTruthy()
+    send()
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith(labeled, undefined, {
+        draft: {
+          cards: [
+            {
+              matchedUrl: B,
+              title: 'New article',
+              description: null,
+              siteName: null,
+              image: null,
+            },
+          ],
+          kept: [A],
+          opened: new Set([A]),
+          discarded: new Set(),
+        },
+        allowUnmarked: false,
+      }),
+    )
+    expect(device).toHaveBeenCalledTimes(1)
   })
 
   it('makes no cards when previews are off', () => {

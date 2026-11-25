@@ -162,6 +162,7 @@ The settings page explains that a device lookup shows the site your address when
 - A typed link's lookup starts about 400 ms after the link is complete, that is, followed by whitespace, not while the cursor is still inside it.
   A pasted link's lookup starts at once, as in Signal, so the site sees the user's address before the card can be discarded.
   Deferring the pasted case is tracked in [issue 1031](https://github.com/matrix-axon/matrix-axon/issues/1031).
+- Once a preview is ready, its link counts as complete while the same destination stays in the draft, including after removing trailing whitespace or adding a Markdown label.
 - Removing a link from the text cancels its lookup and removes its card.
 - Each card shows the site's host name prominently, with the title, description and image, and an X that discards it.
   A discarded link is remembered, by link identity, for the rest of that draft: it is not looked up again and gets no new card, even if the user deletes it and types it again.
