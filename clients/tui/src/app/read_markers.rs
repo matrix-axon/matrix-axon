@@ -143,30 +143,42 @@ pub(crate) fn read_targets_for(
 ) -> Option<ReadTargets> {
     // One pass yields both positions. `>=` keeps the *last* of equal
     // `arrival_order` values, matching the `max_by_key` this replaced.
-    let mut found: Option<(&crate::api::EventDto, &crate::api::EventDto)> = None;
+    let mut display_last: Option<&crate::api::EventDto> = None;
+    let mut arrival_max: Option<(&str, i64)> = None;
     for event in displayed_events(events, display, promoted) {
-        found = Some(match found {
-            None => (event, event),
-            Some((_, arrival_max)) => (
-                event,
-                if event.arrival_order >= arrival_max.arrival_order {
-                    event
-                } else {
-                    arrival_max
-                },
-            ),
-        });
+        display_last = Some(event);
+        for (event_id, arrival_order) in receipt_positions(event) {
+            if arrival_max.is_none_or(|(_, best)| arrival_order >= best) {
+                arrival_max = Some((event_id, arrival_order));
+            }
+        }
     }
-    found.map(|(display_last, arrival_max)| ReadTargets {
+    let (display_last, (receipt_id, receipt_order)) = display_last.zip(arrival_max)?;
+    Some(ReadTargets {
         marker: ReadMarker {
             event_id: display_last.event_id.clone(),
             origin_ts: display_last.origin_ts,
         },
         receipt: ReceiptTarget {
-            event_id: arrival_max.event_id.clone(),
-            arrival_order: arrival_max.arrival_order,
+            event_id: receipt_id.to_owned(),
+            arrival_order: receipt_order,
         },
     })
+}
+
+/// The receipt positions a displayed event stands for: the event, then the
+/// redaction folded onto it, if the server reported where it arrived.
+///
+/// The collapsed timeline strips bare redactions, so without the second
+/// position a trailing redaction counted by a notify-all room rule is never
+/// acknowledged (#1273, ADR 0089 amendment). Everything the redaction did is
+/// visible on the displayed row, so it claims nothing unseen.
+pub(crate) fn receipt_positions(event: &crate::api::EventDto) -> impl Iterator<Item = (&str, i64)> {
+    let folded = event
+        .redaction_event_id
+        .as_deref()
+        .zip(event.redaction_arrival_order);
+    std::iter::once((event.event_id.as_str(), event.arrival_order)).chain(folded)
 }
 
 /// The events in `events` the main timeline actually displays, in page order:
@@ -1046,6 +1058,7 @@ mod tests {
                 .map(|root| serde_json::json!({ "rel_type": "m.thread", "event_id": root })),
             redacted: false,
             redaction_event_id: None,
+            redaction_arrival_order: None,
             reactions: None,
             utd_reason: None,
             sender_trust: None,
@@ -1096,6 +1109,46 @@ mod tests {
     /// outside its thread panel.
     fn nothing_promoted() -> std::collections::HashSet<String> {
         std::collections::HashSet::new()
+    }
+
+    /// #1273: the server folds a redaction onto the message it redacted, and
+    /// that redaction can be the room's newest counted notification. It is a
+    /// receipt position of the displayed message, so it is named.
+    #[test]
+    fn receipt_target_reaches_a_redaction_folded_onto_a_displayed_event() {
+        let display = display_with_state_events(false);
+        let mut deleted = arrival_event("$deleted", 200, 21);
+        deleted.redacted = true;
+        deleted.redaction_event_id = Some("$redaction".to_owned());
+        deleted.redaction_arrival_order = Some(22);
+        let page = vec![arrival_event("$read", 100, 20), deleted];
+
+        let targets = read_targets_for(&page, &display, &nothing_promoted()).unwrap();
+        assert_eq!(
+            targets.receipt,
+            ReceiptTarget {
+                event_id: "$redaction".to_owned(),
+                arrival_order: 22,
+            }
+        );
+        // The marker is a display position, and the redaction has none.
+        assert_eq!(targets.marker.event_id, "$deleted");
+    }
+
+    /// A redaction folded onto an event the main timeline does not show is
+    /// not the room view's to claim: here, an unpromoted thread reply.
+    #[test]
+    fn receipt_target_skips_a_redaction_folded_onto_a_hidden_event() {
+        let display = display_with_state_events(false);
+        let mut reply = timeline_event("$reply", 200, Some("$root"));
+        reply.arrival_order = 21;
+        reply.redacted = true;
+        reply.redaction_event_id = Some("$reply-redaction".to_owned());
+        reply.redaction_arrival_order = Some(22);
+        let page = vec![arrival_event("$read", 100, 20), reply];
+
+        let targets = read_targets_for(&page, &display, &nothing_promoted()).unwrap();
+        assert_eq!(targets.receipt.event_id, "$read");
     }
 
     #[test]
