@@ -861,6 +861,7 @@ async fn a_stale_generation_is_fenced() {
             &axon_store::CrawlStep::Page {
                 entries: Vec::new(),
                 unidentified: 0,
+                over_limit: false,
                 next_batch: None,
             },
         )
@@ -1015,7 +1016,9 @@ async fn nested_browse_resolves_a_joined_room_via_an_unjoined_space() {
         page(json!([child(LEAF, "Remote name")]), None),
     );
     fx.run(RoomDetailJob::BrowseHierarchy, true).await;
-    let browse = || fx.store.space_browse_links(fx.account_id, SPACE, None, 10);
+    let store = fx.store.clone();
+    let account_id = fx.account_id;
+    let browse = || store.space_browse_links(account_id, SPACE, None, 10);
     assert_eq!(browse().await.unwrap().len(), 1);
     let (room, job) = fx.worker.queue.next().await;
     assert_eq!(job, RoomDetailJob::BrowseHierarchy);
@@ -1045,8 +1048,6 @@ async fn nested_browse_resolves_a_joined_room_via_an_unjoined_space() {
             .unwrap()["name"],
         "Browsable branch"
     );
-    let store = fx.store.clone();
-    let account_id = fx.account_id;
     let memberships = || store.discovered_space_memberships(account_id, None, 10);
     let rows = memberships().await.unwrap();
     assert_eq!(
@@ -1055,6 +1056,55 @@ async fn nested_browse_resolves_a_joined_room_via_an_unjoined_space() {
     );
     assert_eq!(rows.len(), 1);
     assert!(fx.snapshot().await.crawl.is_none());
+
+    // A profile event advances the same epoch used to fence in-flight work.
+    let epoch = fx
+        .store
+        .joined_epoch(fx.account_id, SPACE)
+        .await
+        .unwrap()
+        .unwrap();
+    state_in(
+        &fx.store,
+        fx.account_id,
+        &fx.user,
+        SPACE,
+        "m.room.member",
+        &fx.user,
+        json!({"membership":"join", "displayname":"New name", "avatar_url":"mxc://localhost/new"}),
+    )
+    .await;
+    assert_ne!(
+        fx.store.joined_epoch(fx.account_id, SPACE).await.unwrap(),
+        Some(epoch)
+    );
+    assert_eq!(memberships().await.unwrap().len(), 1);
+    assert_eq!(browse().await.unwrap().len(), 2);
+    let crawl = fx
+        .store
+        .hierarchy_crawl_snapshot(fx.account_id, SPACE, axon_store::HierarchyDepth::Nested)
+        .await
+        .unwrap()
+        .crawl
+        .unwrap();
+    assert_eq!(crawl.outcome, "complete");
+    assert_eq!(crawl.pages, 2);
+
+    // Paging uses the same edge key in the returned order and continuation.
+    let after = Some((
+        links[0].parent_room_id.as_str(),
+        links[0].child_room_id.as_str(),
+    ));
+    let next = fx
+        .store
+        .space_browse_links(fx.account_id, SPACE, after, 1)
+        .await
+        .unwrap();
+    assert_eq!(next.len(), 1);
+    assert_eq!(
+        (&next[0].parent_room_id, &next[0].child_room_id),
+        (&links[1].parent_room_id, &links[1].child_room_id)
+    );
 
     fx.unlink(BRANCH).await;
     assert!(memberships().await.unwrap().is_empty());
@@ -1071,6 +1121,15 @@ async fn nested_browse_resolves_a_joined_room_via_an_unjoined_space() {
     .await
     .unwrap();
     assert!(memberships().await.unwrap().is_empty());
+    assert!(fx.store.prune_expired_space_browse().await.unwrap() >= 1);
+    let (retained,): (i64,) = sqlx_core::query_as::query_as(
+        "SELECT count(*) FROM space_browse_rooms WHERE account_id = $1",
+    )
+    .bind(fx.account_id)
+    .fetch_one(fx.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(retained, 0);
     fx.script.reply(
         nested_path(""),
         page(json!([child(LEAF, "Unreachable")]), None),
@@ -1083,5 +1142,72 @@ async fn nested_browse_resolves_a_joined_room_via_an_unjoined_space() {
         .await
         .unwrap()
         .is_empty());
+    fx.store.delete_account_row(fx.account_id).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn nested_browse_keeps_the_bounded_prefix_of_an_over_limit_reply() {
+    let mut fx = fixture().await;
+    state(
+        &fx.store,
+        fx.account_id,
+        &fx.user,
+        "m.room.create",
+        "",
+        json!({"type":"m.space"}),
+    )
+    .await;
+    let linked = "!linked:localhost";
+    fx.link(linked).await;
+    let path =
+        |limit| format!("rooms/{SPACE}/hierarchy?max_depth=3&suggested_only=false&limit={limit}");
+    fx.script.reply(path(50), Reply::TooLarge);
+    let mut rooms = vec![child(SPACE, "Root"), child(linked, "Linked room")];
+    rooms.extend((0..24).map(|i| child(&format!("!room-{i}:localhost"), "Extra")));
+    fx.script
+        .reply(path(25), page(json!(rooms), Some("unused")));
+
+    fx.run(RoomDetailJob::BrowseHierarchy, false).await;
+    let (room, job) = fx.worker.queue.next().await;
+    assert_eq!(job, RoomDetailJob::BrowseHierarchy);
+    fx.worker.step(&room, job).await;
+    assert!(!fx.page_queued());
+    let crawl = fx
+        .store
+        .hierarchy_crawl_snapshot(fx.account_id, SPACE, axon_store::HierarchyDepth::Nested)
+        .await
+        .unwrap()
+        .crawl
+        .unwrap();
+    assert_eq!(crawl.outcome, "truncated");
+    assert_eq!(crawl.pages, 1);
+    assert_eq!(crawl.rooms_cached, 24);
+    let links = fx
+        .store
+        .space_browse_links(fx.account_id, SPACE, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].child_room_id, linked);
+
+    // Leaving still drops committed results through the same member-event path.
+    state_in(
+        &fx.store,
+        fx.account_id,
+        &fx.user,
+        SPACE,
+        "m.room.member",
+        &fx.user,
+        json!({"membership":"leave"}),
+    )
+    .await;
+    let snapshot = fx
+        .store
+        .hierarchy_crawl_snapshot(fx.account_id, SPACE, axon_store::HierarchyDepth::Nested)
+        .await
+        .unwrap();
+    assert!(snapshot.crawl.is_none());
+    assert!(!snapshot.eligible);
     fx.store.delete_account_row(fx.account_id).await.unwrap();
 }

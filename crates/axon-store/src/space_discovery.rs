@@ -178,8 +178,10 @@ pub enum CrawlStep {
     /// A parsed page.
     Page {
         entries: Vec<DiscoveredEntry>,
-        /// Entries skipped whole: no valid room id, or not an object.
+        /// Entries skipped whole, including any excess over the nested page limit.
         unidentified: i32,
+        /// This nested page exceeded the requested room limit.
+        over_limit: bool,
         next_batch: Option<String>,
     },
     /// The body exceeded the byte limit. The crawl's page limit halves and
@@ -246,6 +248,7 @@ struct CrawlRoot<'a> {
 struct ParsedPage<'a> {
     entries: &'a [DiscoveredEntry],
     unidentified: i32,
+    over_limit: bool,
     next_batch: Option<&'a str>,
 }
 
@@ -525,6 +528,7 @@ impl Store {
             CrawlStep::Page {
                 entries,
                 unidentified,
+                over_limit,
                 next_batch,
             } => {
                 Self::record_page(
@@ -536,6 +540,7 @@ impl Store {
                     ParsedPage {
                         entries,
                         unidentified: *unidentified,
+                        over_limit: *over_limit,
                         next_batch: next_batch.as_deref(),
                     },
                     &mut write,
@@ -693,7 +698,7 @@ impl Store {
     ) -> Result<bool, StoreError> {
         let root = match depth {
             HierarchyDepth::Direct => String::new(),
-            HierarchyDepth::Nested => format!(" AND {}", crate::space_browse::BROWSE_ROOT),
+            HierarchyDepth::Nested => format!(" AND {}", crate::space_browse::browse_root()),
         };
         let current: Option<(i64,)> =
             sqlx_core::query_as::query_as(&format!("{JOINED_EPOCH}{root} FOR SHARE OF s"))
@@ -837,6 +842,7 @@ impl Store {
         let ParsedPage {
             entries,
             unidentified,
+            over_limit,
             next_batch,
         } = page;
         let table = depth.table();
@@ -874,6 +880,11 @@ impl Store {
         .bind(from)
         .execute(&mut **tx)
         .await?;
+
+        if over_limit {
+            Self::end_crawl(tx, root, now, "truncated", None, limits, write).await?;
+            return Ok(());
+        }
 
         match next_batch {
             None => {

@@ -521,8 +521,9 @@ A `room_details.changed` WebSocket frame tells a client which room or account re
 
 An acquisition job also publishes its source when it ends if a read reported it as `queued` or `running`, so a panel showing a refresh in progress learns it finished even when nothing changed.
 A job dropped from a full queue publishes its source only if a read had seen it.
+The panel's next read asks again for metadata, homeserver details, single-room discovery, or direct hierarchy enrichment as applicable.
 Nested browsing resumes on the next explicit POST.
-A crawl's later pages carry the first page's observation, so a client showing a crawl hears when a later page is dropped too, and its next `enrich` read resumes the crawl from its cursor.
+A crawl's later pages carry the first page's observation, so a client showing a crawl hears when a later page is dropped and can resume from its saved cursor.
 A page that only re-observes identical summaries publishes nothing until the crawl ends.
 `sources` is never empty and lists sources in the order above; clients must ignore values they do not know.
 The frame is a signal, not a payload: a client never applies a diff from it.

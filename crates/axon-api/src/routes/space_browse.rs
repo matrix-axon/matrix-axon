@@ -11,7 +11,7 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::cursor::{decode_space_browse, encode_space_browse};
-use crate::extract::{Path, Query};
+use crate::extract::{valid_space_browse_room_id, Path, Query};
 use crate::response::{ApiError, ApiResponse};
 use crate::space_discovery::{DiscoveredRoomDto, SpaceDiscoveryDto};
 
@@ -93,10 +93,7 @@ pub struct DiscoveredSpaceMembershipPageDto {
 }
 
 fn check_space_id(room_id: &str) -> Result<(), ApiError> {
-    if room_id.len() > 255
-        || !room_id.starts_with('!')
-        || room_id.bytes().any(|b| b.is_ascii_control())
-    {
+    if !valid_space_browse_room_id(room_id) {
         return Err(ApiError::bad_request("invalid room id"));
     }
     Ok(())

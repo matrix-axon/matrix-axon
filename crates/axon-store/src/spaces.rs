@@ -41,6 +41,16 @@ pub(crate) const SPACE_LINK_IS_CURRENT: &str = r#"redacted IS DISTINCT FROM true
             AND content->'via'<>'[]'::jsonb
             AND NOT jsonb_path_exists(content->'via', '$[*] ? (@.type() != "string" || @ == "")')"#;
 
+/// Current synced creation state identifies a space. `$1` is the account.
+pub(crate) fn synced_space(room_id: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM room_state creation
+            WHERE creation.account_id = $1 AND creation.room_id = {room_id}
+              AND creation.event_type = 'm.room.create' AND creation.state_key = ''
+              AND creation.content->>'type' = 'm.space')"
+    )
+}
+
 /// Compute the sender and required power for an unreciprocated parent claim.
 pub(crate) const SPACE_PARENT_POWER: &str = r#"CROSS JOIN LATERAL (
                 SELECT COALESCE(levels.content#>ARRAY['users',member.state_key],

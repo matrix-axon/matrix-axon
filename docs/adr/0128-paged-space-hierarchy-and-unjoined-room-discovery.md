@@ -264,7 +264,8 @@ A client explicitly starts or resumes nested discovery with `POST /v1/accounts/{
 Direct-child Room Information enrichment still uses depth one and keeps its own cursor and status.
 
 Nested discovery uses the same account worker, homeserver gate, page-size retries, token-loop detection, and backoff.
-The fixed upstream depth is three, and a generation can commit at most 12 pages, with at most 50 returned entries and 2 MiB per reply.
+The fixed upstream depth is three, and a generation can commit at most 12 pages, with at most 50 retained entries and 2 MiB per reply.
+If a reply exceeds the current requested room count, Axon commits the entries within that limit and ends the crawl as `truncated`.
 An expired cursor can restart the walk once.
 A transient failure can resume after backoff on another explicit request.
 
@@ -279,7 +280,9 @@ A fresh generation can expose reachable paths as pages commit.
 Its cache expires six hours from the first page request.
 A restarted walk clears the previous generation, and a conclusive denial clears the joined root's cached branches immediately.
 Every read rechecks the current synced links and membership.
-A membership-epoch change invalidates remote data about the room, and leaving or removing the root removes its crawl and candidates.
+Membership epochs fence in-flight requests, and profile changes for a still-joined account preserve committed browse results.
+A synced membership loss clears the root's crawl and its candidates, and a local purge removes the root's crawl.
+A database-only sweep clears expired candidates in bounded batches at startup and periodically, preserving crawl status and retry backoff.
 
 `GET /v1/accounts/{account_id}/spaces/discovered` pages pairs of joined roots and joined descendants reached through at least one unjoined space.
 Clients can combine these pairs with `spaces/graph` and the synced room list to group joined rooms in the sidebar.

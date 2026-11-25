@@ -195,12 +195,19 @@ fn child_link(event: &Value) -> Option<(&str, Value)> {
 /// [`MAX_TOKEN_BYTES`], or carrying a U+0000 PostgreSQL cannot store). The
 /// requested space's own entry is skipped. Nested browsing also validates
 /// stripped child events for returned spaces.
-fn parse_page(body: &[u8], space_id: &str, depth: HierarchyDepth) -> Option<CrawlStep> {
+fn parse_page(
+    body: &[u8],
+    space_id: &str,
+    depth: HierarchyDepth,
+    page_limit: i32,
+) -> Option<CrawlStep> {
     let body: Value = serde_json::from_slice(body).ok()?;
     let rooms = body.get("rooms")?.as_array()?;
-    if depth == HierarchyDepth::Nested && rooms.len() > PAGE_LIMIT as usize {
-        return None;
-    }
+    let accepted = match depth {
+        HierarchyDepth::Direct => rooms.len(),
+        HierarchyDepth::Nested => rooms.len().min(page_limit as usize),
+    };
+    let excess = rooms.len() - accepted;
     let next_batch = match body.get("next_batch") {
         None | Some(Value::Null) => None,
         Some(Value::String(token))
@@ -210,9 +217,9 @@ fn parse_page(body: &[u8], space_id: &str, depth: HierarchyDepth) -> Option<Craw
         }
         Some(_) => return None,
     };
-    let mut entries = Vec::with_capacity(rooms.len());
-    let mut unidentified = 0_i32;
-    for raw in rooms {
+    let mut entries = Vec::with_capacity(accepted);
+    let mut unidentified = i32::try_from(excess).unwrap_or(i32::MAX);
+    for raw in &rooms[..accepted] {
         match parse_entry(raw) {
             Some(entry) if entry.room_id == space_id => {}
             Some(mut entry) => {
@@ -240,6 +247,7 @@ fn parse_page(body: &[u8], space_id: &str, depth: HierarchyDepth) -> Option<Craw
     Some(CrawlStep::Page {
         entries,
         unidentified,
+        over_limit: excess > 0,
         next_batch,
     })
 }
@@ -258,15 +266,15 @@ fn interpret_for_depth(
     space_id: &str,
     resumed: bool,
     depth: HierarchyDepth,
+    page_limit: i32,
 ) -> CrawlStep {
     match reply {
         Reply::Failed(NoAnswer::Timeout) => failure("timeout", None),
         Reply::Failed(NoAnswer::Transport) => failure("transport", None),
         Reply::Failed(NoAnswer::Unauthorized) => failure("unauthorized", None),
         Reply::TooLarge => CrawlStep::TooLarge,
-        Reply::Ok(body) => {
-            parse_page(&body, space_id, depth).unwrap_or_else(|| failure("invalid_response", None))
-        }
+        Reply::Ok(body) => parse_page(&body, space_id, depth, page_limit)
+            .unwrap_or_else(|| failure("invalid_response", None)),
         Reply::Status {
             status,
             errcode,
@@ -361,7 +369,13 @@ impl<U: Upstream> Worker<U> {
                 timeout: HIERARCHY_TIMEOUT,
             })
             .await;
-        let step = interpret_for_depth(reply, space_id.as_str(), position.from.is_some(), depth);
+        let step = interpret_for_depth(
+            reply,
+            space_id.as_str(),
+            position.from.is_some(),
+            depth,
+            position.page_limit,
+        );
         let label = step_label(&step);
         let (returned, withheld_fields, unidentified) = match &step {
             CrawlStep::Page {
@@ -504,7 +518,7 @@ mod tests {
     use super::*;
 
     fn interpret(reply: Reply, space_id: &str, resumed: bool) -> CrawlStep {
-        interpret_for_depth(reply, space_id, resumed, HierarchyDepth::Direct)
+        interpret_for_depth(reply, space_id, resumed, HierarchyDepth::Direct, PAGE_LIMIT)
     }
     use serde_json::json;
 
@@ -635,6 +649,7 @@ mod tests {
             entries,
             unidentified,
             next_batch,
+            ..
         } = step
         else {
             panic!("{step:?}");
@@ -669,6 +684,7 @@ mod tests {
             CrawlStep::Page {
                 entries: Vec::new(),
                 unidentified: 0,
+                over_limit: false,
                 next_batch: None
             }
         );

@@ -11,16 +11,18 @@ use uuid::Uuid;
 use crate::room_detail_acquisition::JOINED_EPOCH;
 use crate::space_discovery::{joined_child, DiscoveredEntry, DiscoveredRow};
 use crate::space_graph::visible_joined_room;
-use crate::spaces::{NORMALIZED_ORDER, SPACE_LINK_IS_CURRENT};
+use crate::spaces::{synced_space, NORMALIZED_ORDER, SPACE_LINK_IS_CURRENT};
 use crate::{Store, StoreError};
 
 pub const SPACE_BROWSE_MAX_DEPTH: i32 = 3;
 pub const SPACE_BROWSE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 pub const SPACE_BROWSE_MAX_PAGE: i64 = 100;
 
-pub(crate) const BROWSE_ROOT: &str = "NOT s.hidden_tombstoned AND EXISTS (
-    SELECT 1 FROM room_state c WHERE c.account_id = s.account_id AND c.room_id = s.room_id
-      AND c.event_type = 'm.room.create' AND c.state_key = '' AND c.content->>'type' = 'm.space')";
+const EXPIRED_ROOTS_PER_SWEEP: i64 = 16;
+
+pub(crate) fn browse_root() -> String {
+    format!("NOT s.hidden_tombstoned AND {}", synced_space("s.room_id"))
+}
 
 #[derive(Debug)]
 pub struct SpaceBrowseLink {
@@ -47,7 +49,7 @@ impl Store {
         space_id: &str,
     ) -> Result<bool, StoreError> {
         let row: Option<(i64,)> =
-            sqlx_core::query_as::query_as(&format!("{JOINED_EPOCH} AND {BROWSE_ROOT}"))
+            sqlx_core::query_as::query_as(&format!("{JOINED_EPOCH} AND {}", browse_root()))
                 .bind(account_id)
                 .bind(space_id)
                 .fetch_optional(&self.pool)
@@ -68,6 +70,31 @@ impl Store {
         .execute(&mut **tx)
         .await?;
         Ok(())
+    }
+
+    /// Clear one batch of expired candidate sets. The locked crawl row
+    /// serializes cleanup with page commits and new generations. Keep the
+    /// status row so expiry cannot reset retry backoff or cursor fencing.
+    pub async fn prune_expired_space_browse(&self) -> Result<u64, StoreError> {
+        let result = sqlx_core::query::query(
+            "WITH expired AS MATERIALIZED (
+                 SELECT account_id, space_id FROM space_browse_crawl
+                 WHERE rooms_cached > 0
+                   AND started_at <= floor(extract(epoch FROM statement_timestamp()) * 1000)::bigint - $1
+                 ORDER BY started_at, account_id, space_id
+                 LIMIT $2 FOR UPDATE SKIP LOCKED
+             ), cleared AS (
+                 DELETE FROM space_browse_rooms b USING expired e
+                 WHERE b.account_id = e.account_id AND b.space_id = e.space_id
+             )
+             UPDATE space_browse_crawl c SET rooms_cached = 0 FROM expired e
+             WHERE c.account_id = e.account_id AND c.space_id = e.space_id",
+        )
+        .bind(SPACE_BROWSE_TTL.as_millis() as i64)
+        .bind(EXPIRED_ROOTS_PER_SWEEP)
+        .execute(&self.maintenance_pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     pub(crate) async fn record_space_browse(
@@ -143,7 +170,8 @@ impl Store {
                  WHERE (e.parent_id, e.child_id) > ($3, $4)
                    AND EXISTS (SELECT 1 FROM walk WHERE room_id = e.parent_id AND depth < {SPACE_BROWSE_MAX_DEPTH})
                  ORDER BY e.parent_id, e.child_id LIMIT $5
-             ) link",
+             ) link
+             ORDER BY link.parent_id, link.child_id",
             roots = roots("c.space_id = $2"),
             walk = walk(),
         );
@@ -227,10 +255,11 @@ fn roots(filter: &str) -> String {
              JOIN accounts ac ON ac.account_id = c.account_id
              WHERE c.account_id = $1 AND ac.state = 'active' AND {filter}
                AND c.started_at > {now} - {ttl_ms} AND c.rooms_cached > 0
-               AND {BROWSE_ROOT} AND {joined}
+               AND {eligible} AND {joined}
                AND NOT EXISTS (SELECT 1 FROM room_upstream_reconcile r
                    WHERE r.account_id = $1 AND r.room_id = c.space_id AND r.state = 'gone')
          )",
+        eligible = browse_root(),
         joined = visible_joined_room("c.space_id"),
     )
 }
@@ -253,9 +282,7 @@ fn walk() -> String {
              SELECT root.space_id AS room_id, true AS joined, '{{}}'::jsonb AS children
              UNION ALL
              SELECT n.room_id, n.joined, n.children FROM nodes n
-             WHERE CASE WHEN n.joined THEN EXISTS (
-                   SELECT 1 FROM room_state c WHERE c.account_id = $1 AND c.room_id = n.room_id
-                     AND c.event_type = 'm.room.create' AND c.state_key = '' AND c.content->>'type' = 'm.space')
+             WHERE CASE WHEN n.joined THEN {synced_space}
                    ELSE n.summary->>'room_type' = 'm.space' END
          ), edges AS MATERIALIZED (
              SELECT p.room_id AS parent_id, n.room_id AS child_id, p.joined AS parent_joined,
@@ -278,5 +305,6 @@ fn walk() -> String {
          )",
         joined = joined_child("b.room_id"),
         visible = visible_joined_room("b.room_id"),
+        synced_space = synced_space("n.room_id"),
     )
 }

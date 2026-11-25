@@ -113,6 +113,7 @@ async fn crawl(store: &Store, account_id: Uuid, space: &str, name: &str) {
                     children: Default::default(),
                 }],
                 unidentified: 0,
+                over_limit: false,
                 next_batch: None,
             },
         )
@@ -293,6 +294,7 @@ async fn a_page_from_before_a_leave_and_rejoin_is_fenced_even_in_the_same_genera
                     children: Default::default(),
                 }],
                 unidentified: 0,
+                over_limit: false,
                 next_batch: None,
             },
         )
@@ -409,6 +411,7 @@ async fn summary_refresh_rows_go_when_no_joined_space_links_the_room() {
             &CrawlStep::Page {
                 entries: Vec::new(),
                 unidentified: 0,
+                over_limit: false,
                 next_batch: None,
             },
         )

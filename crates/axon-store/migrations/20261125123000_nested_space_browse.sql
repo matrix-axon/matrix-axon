@@ -8,6 +8,9 @@ ALTER TABLE space_browse_crawl
 CREATE INDEX space_browse_crawl_by_start ON space_browse_crawl (account_id, started_at)
     WHERE rooms_cached > 0;
 
+CREATE INDEX space_browse_crawl_expiry ON space_browse_crawl (started_at, account_id, space_id)
+    WHERE rooms_cached > 0;
+
 -- A returned room is a candidate, scoped to the joined space whose crawl
 -- returned it. Only candidates reachable through current links are readable.
 -- The crawl transaction discards all candidates before changing generation.
@@ -27,10 +30,25 @@ CREATE TABLE space_browse_rooms (
 
 CREATE INDEX space_browse_rooms_by_room ON space_browse_rooms (account_id, room_id);
 
--- A new membership epoch fences the root and invalidates remote data for
--- the changed room under other roots. Keep the returned ID for synced joins.
+-- A new membership epoch always fences an in-flight request. Keep committed
+-- browse evidence when the account is still joined, including profile updates.
+-- A membership loss or visibility transition clears the joined root and
+-- remote data for the changed room under other roots.
 CREATE FUNCTION invalidate_space_browse() RETURNS TRIGGER AS $$
 BEGIN
+    IF NEW.hidden_left IS NOT DISTINCT FROM OLD.hidden_left
+       AND NOT NEW.hidden_left
+       AND EXISTS (
+           SELECT 1 FROM accounts a JOIN room_state m
+             ON m.account_id = a.account_id AND m.state_key = a.user_id
+           WHERE a.account_id = NEW.account_id AND m.room_id = NEW.room_id
+             AND m.event_type = 'm.room.member' AND m.content->>'membership' = 'join'
+             AND m.redacted IS DISTINCT FROM true
+       )
+    THEN
+        RETURN NULL;
+    END IF;
+
     DELETE FROM space_browse_crawl
     WHERE account_id = NEW.account_id AND space_id = NEW.room_id;
     UPDATE space_browse_rooms
