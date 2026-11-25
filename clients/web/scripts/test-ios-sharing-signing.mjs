@@ -20,7 +20,7 @@ import { minimumIosVersion } from './ios-minimum-version.mjs'
 // Run the real generation hook in an isolated project and return what it wrote.
 // XcodeGen is replaced only after the hook has written its project and export
 // settings.
-function generate(env) {
+function generate(env, tauriFiles = {}) {
   const source = fileURLToPath(new URL('../', import.meta.url))
   const root = mkdtempSync(join(tmpdir(), 'axon-signing-contract-'))
   try {
@@ -43,8 +43,14 @@ function generate(env) {
       'Entitlements.ios.plist',
       'Entitlements.share.ios.plist',
       'tauri.conf.json',
+      // The iOS override wins over tauri.conf.json when it sets the minimum, so the
+      // generator has to see the same two files the real project has.
+      'tauri.ios.conf.json',
     ])
       copyFileSync(join(source, 'src-tauri', name), join(tauri, name))
+    // A test may replace or add configuration, as JSON.
+    for (const [name, body] of Object.entries(tauriFiles))
+      writeFileSync(join(tauri, name), JSON.stringify(body))
     copyFileSync(join(source, 'package.json'), join(web, 'package.json'))
     writeFileSync(
       join(apple, 'project.yml'),
@@ -90,7 +96,7 @@ function generate(env) {
         { encoding: 'utf8', timeout: 10_000 },
       ),
     )
-    return { project, options }
+    return { project, options, minimum: minimumIosVersion(tauri) }
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -222,14 +228,35 @@ test(
     // The app target once declared nothing and took the SDK's version as its minimum:
     // 26.5 under Xcode 26, 27.2 under Xcode 27. Only the extension, which sets its
     // own, was right.
-    const { project } = generate({
+    // `minimum` is what the isolated project's own configuration resolves to, so the
+    // expectation and the generator's input are the same files.
+    const { project, minimum } = generate({
       AXON_IOS_EXPORT_METHOD: 'debugging',
       AXON_APS_ENVIRONMENT: 'development',
     })
-    const configured = minimumIosVersion(
-      fileURLToPath(new URL('../src-tauri/', import.meta.url)),
+    assert.equal(project.targets.axon_iOS.deploymentTarget, minimum)
+    assert.equal(project.targets.axon_share.deploymentTarget, '15.0')
+  },
+)
+
+test(
+  'an iOS override of the minimum reaches the app target and not the extension',
+  { skip: process.platform !== 'darwin' },
+  () => {
+    // tauri.ios.conf.json wins over tauri.conf.json, and the hook has to follow it.
+    const { project, minimum } = generate(
+      {
+        AXON_IOS_EXPORT_METHOD: 'debugging',
+        AXON_APS_ENVIRONMENT: 'development',
+      },
+      {
+        'tauri.ios.conf.json': {
+          bundle: { iOS: { minimumSystemVersion: '18.4' } },
+        },
+      },
     )
-    assert.equal(project.targets.axon_iOS.deploymentTarget, configured)
+    assert.equal(minimum, '18.4')
+    assert.equal(project.targets.axon_iOS.deploymentTarget, '18.4')
     assert.equal(project.targets.axon_share.deploymentTarget, '15.0')
   },
 )

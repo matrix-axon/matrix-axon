@@ -98,6 +98,29 @@ if (!requested && rankDevice(device.name) >= 3) {
       `Created ${created.name} (${created.udid}) instead of ${device.name}.`,
     )
     device = created
+    // Removed however the script ends, not only when the test run below finishes: a
+    // throw while booting it or generating the project, before that try, would leave a
+    // simulator behind on every such failure. An 'exit' listener runs on a normal end,
+    // on process.exit and on an uncaught exception, and Ctrl-C and TERM are turned into
+    // exits so that they run it too.
+    const madeUdid = created.udid
+    process.once('exit', () => {
+      for (const action of ['shutdown', 'delete']) {
+        try {
+          execFileSync('xcrun', ['simctl', action, madeUdid], {
+            stdio: 'ignore',
+            timeout: 60_000,
+          })
+        } catch {
+          /* Only the simulator this made is ever removed, and a failure to is not news. */
+        }
+      }
+    })
+    for (const [signal, code] of [
+      ['SIGINT', 130],
+      ['SIGTERM', 143],
+    ])
+      process.once(signal, () => process.exit(code))
   }
 }
 console.log(
@@ -323,15 +346,6 @@ try {
   keepDiagnostics()
   throw error
 } finally {
-  if (created) {
-    for (const action of ['shutdown', 'delete']) {
-      try {
-        run('xcrun', ['simctl', action, created.udid], 60_000)
-      } catch {
-        /* A runner is thrown away; a Mac keeps one stray simulator at worst. */
-      }
-    }
-  }
   for (const identifier of [hostId, `${hostId}.Tests.xctrunner`]) {
     try {
       run('xcrun', ['simctl', 'uninstall', device.udid, identifier], 30_000)

@@ -71,11 +71,14 @@ jobs:
   ios:
     name: Build for iOS (App Store)
     if: ${{ inputs.platform == 'ios' || inputs.platform == 'both' }}
-    # Xcode 26 by default. The first Xcode 27 build, run through the `runner` input,
-    # produced an app that declares a minimum iOS of 27.2 although the project says
-    # 15, and one with no scene manifest, which iOS 27 stops at launch in the one
-    # case seen (the ios-sharing test host). Neither is understood yet, so a build
-    # that ships stays on 26. Any Xcode with the iOS 26 SDK or newer is accepted:
+    # Xcode 26 by default, and Xcode 27 through the `runner` input. Both build the same
+    # app: it declares the minimum iOS that bundle.iOS.minimumSystemVersion says (26.0)
+    # whichever SDK builds it, which scripts/package-ios.sh checks of every .ipa, and the
+    # iOS launch check (ios-launch-check.yml) launches the Xcode 27 build on iOS 27.2 and
+    # 26.0 and the Xcode 26 build on 26.5. A first Xcode 27 build declared a minimum of
+    # 27.2, because the app target named none and took the SDK's; that is fixed. What
+    # ships stays on 26 until the team chooses to move it, and that is now a choice, not a
+    # known problem. Any Xcode with the iOS 26 SDK or newer is accepted:
     # App Store Connect rejects uploads made with an older one, after the build and
     # the upload have succeeded, and the Xcode step below checks it rather than
     # trusting the image. The llvm-tools step below is what Xcode 27 needs and is
