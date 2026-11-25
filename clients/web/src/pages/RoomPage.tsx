@@ -153,6 +153,11 @@ const KEYBOARD_PIN_MS = 600
 // Pages one arrival at the top may pull automatically. The chain exists to
 // cross runs of filtered-out events, not to walk history unattended.
 const AUTO_SCROLL_BACK_PAGES = 5
+// Pages one arrival at the bottom may pull automatically. One forward read
+// can append a whole gap and still leave `atEnd` false; the next read is
+// the probe that retires "Load newer". The cap bounds an unattended chain,
+// same as scroll-back. A further scroll starts another.
+const AUTO_SCROLL_FORWARD_PAGES = 5
 // How far the scroll anchor may drift from the viewport, in viewport heights,
 // before a fresh one is taken. Growth between the anchor and the visible rows
 // is not counted, so it has to stay nearby — but retaking it costs a missed
@@ -3088,19 +3093,91 @@ function Timeline({
       if (root === null) {
         return
       }
+      let cancelled = false
+      let pumping = false
+      let requested = false
+      let frame = 0
+
+      // One intersection is not one page. `loadNewer` appends whatever the
+      // straddling read found, and only the next call — the one that finds
+      // nothing newer — sets `atEnd` and retires the button. The observer
+      // reports changes. A sentinel that stays fully inside the scroller
+      // produces none, and Firefox often delivers none for a programmatic
+      // `scrollTop` either. The chain keeps paging while the sentinel is
+      // actually on screen, up to a cap. Past that an idle reader stops,
+      // and any further scroll starts a new chain.
+      const pump = async () => {
+        if (timeline.atEnd.value) {
+          return
+        }
+        if (pumping) {
+          requested = true
+          return
+        }
+        pumping = true
+        try {
+          do {
+            requested = false
+            for (let page = 0; page < AUTO_SCROLL_FORWARD_PAGES; page += 1) {
+              if (cancelled || timeline.atEnd.value) {
+                return
+              }
+              if (
+                !sentinel.isConnected ||
+                !sentinelWithinScroller(sentinel, root)
+              ) {
+                return
+              }
+              const loaded = timeline.events.value.length
+              await timeline.loadNewer()
+              if (cancelled || timeline.atEnd.value) {
+                return
+              }
+              // A no-op (in flight, a failed read, a superseded slice) must
+              // not spin. The button stays, and the next scroll retries.
+              if (timeline.events.value.length === loaded) {
+                return
+              }
+              await nextFrame()
+            }
+          } while (requested && !cancelled)
+        } finally {
+          pumping = false
+        }
+      }
+
       const observer = new IntersectionObserver(
         (entries) => {
           if (
             sentinel.isConnected &&
             entries.some((entry) => entry.isIntersecting)
           ) {
-            void timeline.loadNewer()
+            void pump()
           }
         },
         { root },
       )
       observer.observe(sentinel)
-      return () => observer.disconnect()
+      const onScroll = () => {
+        if (frame !== 0) {
+          return
+        }
+        frame = requestAnimationFrame(() => {
+          frame = 0
+          if (sentinel.isConnected && sentinelWithinScroller(sentinel, root)) {
+            void pump()
+          }
+        })
+      }
+      root.addEventListener('scroll', onScroll, { passive: true })
+      return () => {
+        cancelled = true
+        observer.disconnect()
+        root.removeEventListener('scroll', onScroll)
+        if (frame !== 0) {
+          cancelAnimationFrame(frame)
+        }
+      }
     },
     [timeline],
   )
@@ -3819,6 +3896,25 @@ function withinPrefetchBand(sentinel: Element, root: Element | null): boolean {
     rect.bottom >= bounds.top - SCROLL_BACK_PREFETCH_PX &&
     rect.top <= bounds.bottom
   )
+}
+
+/**
+ * Whether the forward sentinel is inside the scroller's visible box.
+ *
+ * Measured from live geometry, not from the observer's last entry. A page
+ * landing moves the sentinel, and the browser only reports intersection
+ * *changes* — a signal that may never come again once the sentinel is
+ * already fully visible, which is when the confirming probe has to run.
+ * A zero-height sentinel counts when its edge lies in the box, so the
+ * button just below it is on screen too.
+ */
+function sentinelWithinScroller(
+  sentinel: Element,
+  root: Element | null,
+): boolean {
+  const bounds = (root ?? document.documentElement).getBoundingClientRect()
+  const rect = sentinel.getBoundingClientRect()
+  return rect.bottom >= bounds.top && rect.top <= bounds.bottom
 }
 
 /** One frame, so layout and scroll anchoring settle before a re-measure. */

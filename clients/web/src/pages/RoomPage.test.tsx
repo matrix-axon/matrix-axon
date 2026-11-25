@@ -313,6 +313,55 @@ function triggerObservedResize(): void {
   resizeObserverCallback?.([], {} as ResizeObserver)
 }
 
+/**
+ * jsdom has no IntersectionObserver. The forward sentinel's chain is the part
+ * a click cannot stand in for: one notification has to page again while the
+ * sentinel stays inside the scroller, which is what retires "Load newer"
+ * after the append. Fires only the sentinel that sits above that button.
+ */
+function installForwardSentinelObserver(): {
+  show: (isIntersecting: boolean) => boolean
+} {
+  const observers: {
+    callback: IntersectionObserverCallback
+    target: Element | null
+  }[] = []
+  class FakeIntersectionObserver {
+    private readonly record: (typeof observers)[number]
+    constructor(callback: IntersectionObserverCallback) {
+      this.record = { callback, target: null }
+      observers.push(this.record)
+    }
+    observe(target: Element) {
+      this.record.target = target
+    }
+    disconnect() {
+      this.record.target = null
+    }
+    unobserve() {}
+    takeRecords() {
+      return []
+    }
+  }
+  vi.stubGlobal('IntersectionObserver', FakeIntersectionObserver)
+  return {
+    show: (isIntersecting: boolean) => {
+      const observer = observers
+        .filter(
+          ({ target }) =>
+            target?.isConnected === true &&
+            target.nextElementSibling?.textContent === 'Load newer messages',
+        )
+        .at(-1)
+      observer?.callback(
+        [{ isIntersecting } as IntersectionObserverEntry],
+        null as unknown as IntersectionObserver,
+      )
+      return observer !== undefined
+    },
+  }
+}
+
 async function triggerObservedResizeFrame(): Promise<void> {
   triggerObservedResize()
   await new Promise((resolve) => requestAnimationFrame(resolve))
@@ -4153,6 +4202,69 @@ describe('RoomPage', () => {
     await waitFor(() =>
       expect(queryByRole('button', { name: 'Load newer messages' })).toBeNull(),
     )
+  })
+
+  it('a visible forward sentinel keeps probing until the present', async () => {
+    // The click test above is the manual path. What Firefox was dropping is
+    // the automatic one: the append leaves the sentinel inside the scroller,
+    // the observer does not report a new intersection, and only a follow-up
+    // read discovers there is nothing newer and removes the button.
+    onTestFinished(() => {
+      vi.unstubAllGlobals()
+    })
+    const showSentinel = installForwardSentinelObserver().show
+    const all = [
+      event('$old', T0 - 5 * DAY),
+      event('$mid', T0 - 2 * DAY),
+      event('$new', T0),
+    ]
+    let forwardReads = 0
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`, () =>
+        HttpResponse.json({ data: event('$old', T0 - 5 * DAY) }),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(TIMELINE_PATH, ({ request }) => {
+        const params = new URL(request.url).searchParams
+        const atTs = params.get('at_ts')
+        if (atTs !== null) {
+          forwardReads += 1
+        }
+        let pool = [...all].sort((a, b) => b.origin_ts - a.origin_ts)
+        if (atTs !== null) {
+          pool = pool.filter((e) => e.origin_ts <= Number(atTs))
+        }
+        return HttpResponse.json({
+          data: { events: pool, next_cursor: null },
+        })
+      }),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24old`,
+    )
+    const { findByText, findByRole, queryByRole, queryByText } = render(
+      routedRoomPage(testServices()),
+    )
+    await findByText('body of $old')
+    expect(queryByText('body of $new')).toBeNull()
+    // The label flips to "Loading…" while a read is in flight, so absence of
+    // this name is not "caught up". Wait until the newest body is on screen,
+    // then until the confirming probe removes the button.
+    await findByRole('button', { name: 'Load newer messages' })
+    const readsAtJump = forwardReads
+
+    expect(showSentinel(true)).toBe(true)
+
+    await findByText('body of $new')
+    await waitFor(() =>
+      expect(queryByRole('button', { name: 'Load newer messages' })).toBeNull(),
+    )
+    // The append and the confirming empty probe. One notification, no click.
+    expect(forwardReads - readsAtJump).toBeGreaterThanOrEqual(2)
   })
 
   it('opening the room clears its unread count', async () => {
