@@ -196,6 +196,12 @@ If the runner logs a permission error for a file outside `_work` and `_diag`, gi
 
 In any job that ran on the runner, the **Set up runner** step shows the hook's line: "Self-hosted runner: allowed push job from matrix-axon/matrix-axon."
 
+The lint-and-test job keeps its Cargo build artifacts in `_work/axon-lint-target`, outside the checkout, and reuses the runner account's Cargo registry and Git downloads.
+It also reuses the runner account's pip and pre-commit caches without uploading them to GitHub.
+For those caches to speed up later jobs, the runner account and its home cache directories must persist between jobs; an ephemeral home or a different account causes them to be rebuilt.
+The workflow sets `CARGO_TARGET_DIR` automatically; no runner configuration is needed.
+This directory can grow over time and may be removed while the runner is idle to reclaim disk space; the next job rebuilds it.
+
 ### After changing permissions
 
 The start check runs only when the service starts.

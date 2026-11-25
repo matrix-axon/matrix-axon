@@ -19,7 +19,7 @@
     "iOS": {
       "infoPlist": "Info.ios.plist",
       "developmentTeam": "4GT4UKXZ4V",
-      "minimumSystemVersion": "15.0"
+      "minimumSystemVersion": "26.0"
     },
     "targets": ["deb", "appimage", "nsis", "app", "dmg"],
     "icon": [
@@ -41,8 +41,9 @@
     },
     "linux": {
       "deb": {
+        "depends": ["libwebkit2gtk-4.1-0 (>= 2.42)"],
         "desktopTemplate": "bundle/axon.desktop",
-        "recommends": ["hunspell-dictionary"],
+        "recommends": ["hunspell-dictionary", "zenity"],
         "conflicts": ["axon-desktop"],
         "replaces": ["axon-desktop"]
       }

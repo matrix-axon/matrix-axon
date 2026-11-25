@@ -69,8 +69,25 @@ impl From<ClaimedUpload> for MediaAttachment {
             content_type: upload.content_type,
             size_bytes: upload.size_bytes,
             bytes: upload.bytes,
+            width: None,
+            height: None,
+            duration_ms: None,
+            thumbnail: None,
         }
     }
+}
+
+/// What [`StagedUploadService::claim_send_thumbnail`] made of a client's
+/// thumbnail. Either way the upload is claimed, and the caller settles it with
+/// the send (ADR 0142 section 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendThumbnail {
+    /// Validated and normalised to ADR 0142 section 2.
+    Ready(axon_core::MediaThumbnail),
+    /// The budget ran out before the work finished: the decoder pool was busy
+    /// or the image was slow. Not the client's fault, so the send goes on
+    /// without a thumbnail. The reason is a log `error_kind`.
+    Skipped(&'static str),
 }
 
 /// What can go wrong while staging or deleting upload bytes.
@@ -131,6 +148,28 @@ pub trait StagedUploadService: Send + Sync {
             "preview images unavailable".into(),
         ))
     }
+    /// Claim a client-supplied thumbnail for `send-media` (ADR 0142 section
+    /// 4): claim it first (reading at most 2 MiB), then wait for a decoder
+    /// permit, validate it as [`claim_preview_upload`] does, and normalise it
+    /// to ADR 0142 section 2, all within `budget`.
+    ///
+    /// `Ok` means the upload is claimed, whether or not it is
+    /// [`SendThumbnail::Ready`], and the caller settles it. `Err` means
+    /// nothing is left claimed: the claim failed, or the image failed
+    /// validation and was released.
+    ///
+    /// [`claim_preview_upload`]: Self::claim_preview_upload
+    async fn claim_send_thumbnail(
+        &self,
+        _account_id: Uuid,
+        _upload_id: Uuid,
+        _budget: std::time::Duration,
+    ) -> Result<SendThumbnail, StageUploadError> {
+        Err(StageUploadError::Invalid(
+            "send thumbnails unavailable".into(),
+        ))
+    }
+
     async fn stage_upload(
         &self,
         request: StageUploadRequest,

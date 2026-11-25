@@ -24,7 +24,7 @@ use axon_core::{
     Relation, ResolvedPowerLevels, ResolvedUserLevel, RoomPreset,
 };
 use matrix_sdk::attachment::{
-    AttachmentConfig, AttachmentInfo, BaseAudioInfo, BaseFileInfo, BaseImageInfo, BaseVideoInfo,
+    AttachmentInfo, BaseAudioInfo, BaseFileInfo, BaseImageInfo, BaseVideoInfo,
 };
 use matrix_sdk::room::reply::{EnforceThread, Reply};
 use matrix_sdk::room::Receipts;
@@ -47,7 +47,7 @@ use matrix_sdk::ruma::events::room::message::{
 use matrix_sdk::ruma::events::room::power_levels::{
     RoomPowerLevels, RoomPowerLevelsEventContent, UserPowerLevel,
 };
-use matrix_sdk::ruma::events::room::{ImageInfo, MediaSource};
+use matrix_sdk::ruma::events::room::{ImageInfo, MediaSource, ThumbnailInfo};
 use matrix_sdk::ruma::events::tag::{TagInfo, TagName, UserTagName};
 use matrix_sdk::ruma::events::{
     AnySyncMessageLikeEvent, AnySyncTimelineEvent, InitialStateEvent, StateEventType,
@@ -55,8 +55,8 @@ use matrix_sdk::ruma::events::{
 };
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{
-    EventId, Int, OwnedEventId, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomId,
-    RoomOrAliasId, ServerName, UInt, UserId,
+    EventId, Int, OwnedEventId, OwnedRoomOrAliasId, OwnedServerName, OwnedTransactionId,
+    OwnedUserId, RoomId, RoomOrAliasId, ServerName, UInt, UserId,
 };
 use matrix_sdk::{Client, Room, RoomState};
 use serde_json::{json, Value};
@@ -616,21 +616,43 @@ fn effective_mime(
     }
 }
 
-fn attachment_info(kind: MediaSendKind, size_bytes: u64) -> Result<AttachmentInfo, GatewayError> {
-    let size = UInt::new(size_bytes).ok_or_else(|| {
+/// The event's `info` for `attachment`: its size, and the dimensions and
+/// duration its kind can carry (ADR 0142 section 4). The API has already
+/// refused a field the kind cannot carry; one that slips through is dropped
+/// here rather than sent.
+fn attachment_info(attachment: &MediaAttachment) -> Result<AttachmentInfo, GatewayError> {
+    let size = UInt::new(attachment.size_bytes).ok_or_else(|| {
         GatewayError::Invalid("upload is too large for Matrix metadata".to_owned())
     })?;
-    Ok(match kind {
+    let matrix_int = |value: Option<u64>| {
+        value
+            .map(|value| {
+                UInt::new(value).ok_or_else(|| {
+                    GatewayError::Invalid("media info is too large for Matrix metadata".into())
+                })
+            })
+            .transpose()
+    };
+    let width = matrix_int(attachment.width)?;
+    let height = matrix_int(attachment.height)?;
+    let duration = attachment.duration_ms.map(std::time::Duration::from_millis);
+    Ok(match attachment.kind {
         MediaSendKind::Image => AttachmentInfo::Image(BaseImageInfo {
             size: Some(size),
+            width,
+            height,
             ..BaseImageInfo::default()
         }),
         MediaSendKind::Video => AttachmentInfo::Video(BaseVideoInfo {
             size: Some(size),
+            width,
+            height,
+            duration,
             ..BaseVideoInfo::default()
         }),
         MediaSendKind::Audio => AttachmentInfo::Audio(BaseAudioInfo {
             size: Some(size),
+            duration,
             ..BaseAudioInfo::default()
         }),
         MediaSendKind::File => AttachmentInfo::File(BaseFileInfo { size: Some(size) }),
@@ -685,23 +707,10 @@ fn thread_member_root(relation: Relation<'_>) -> Result<Option<OwnedEventId>, Ga
     }
 }
 
-/// Upload `bytes` for a media send, matching the room's current encryption
-/// state — encrypted upload for an encrypted room, plain upload otherwise —
-/// mirroring what `Room::send_attachment` does internally (matrix-sdk 0.18
-/// `room/mod.rs::prepare_and_send_attachment`), which isn't exposed for reuse.
-async fn upload_media_source(
-    room: &Room,
-    content_type: &mime::Mime,
-    bytes: Vec<u8>,
-) -> Result<MediaSource, GatewayError> {
-    let encrypted = room
-        .latest_encryption_state()
-        .await
-        .map_err(map_sdk_err)?
-        .is_encrypted();
-    upload_media_source_with_encryption(room, content_type, bytes, encrypted).await
-}
-
+/// Upload `bytes` for a media send: an encrypted upload (`EncryptedFile`) when
+/// `encrypted`, a plain one otherwise. The caller decides `encrypted` once per
+/// send, so an attachment and its thumbnail always agree, as they did inside
+/// `Room::send_attachment` (matrix-sdk 0.19 `prepare_and_send_attachment`).
 async fn upload_media_source_with_encryption(
     room: &Room,
     content_type: &mime::Mime,
@@ -778,6 +787,10 @@ async fn fresh_preview_encryption(room: &Room, account_id: Uuid) -> Result<bool,
 /// `filename`, and its HTML, if any, in `formatted_body`); otherwise the
 /// filename is the body and `filename` is left unset, matching
 /// `Room::send_attachment`'s convention (MSC2530).
+///
+/// An uploaded `thumbnail` becomes `thumbnail_source` and `thumbnail_info`
+/// on an `m.image`, `m.video` or `m.file`, as the SDK's macro sets them.
+/// `m.audio` has no thumbnail in the Matrix spec, so it is dropped there.
 fn media_message_type(
     kind: MediaSendKind,
     filename: String,
@@ -785,6 +798,7 @@ fn media_message_type(
     source: MediaSource,
     info: AttachmentInfo,
     caption: Option<TextMessageEventContent>,
+    thumbnail: Option<(MediaSource, Box<ThumbnailInfo>)>,
 ) -> MessageType {
     let (body, formatted, filename) = match caption {
         Some(TextMessageEventContent {
@@ -793,11 +807,14 @@ fn media_message_type(
         None => (filename, None, None),
     };
     let mimetype = Some(content_type.as_ref().to_owned());
+    let (thumbnail_source, thumbnail_info) = thumbnail.unzip();
 
     match kind {
         MediaSendKind::Image => {
             let mut info: ImageInfo = info.into();
             info.mimetype = mimetype;
+            info.thumbnail_source = thumbnail_source;
+            info.thumbnail_info = thumbnail_info;
             let mut content = ImageMessageEventContent::new(body, source);
             content.formatted = formatted;
             content.filename = filename;
@@ -807,6 +824,8 @@ fn media_message_type(
         MediaSendKind::File => {
             let mut info: FileInfo = info.into();
             info.mimetype = mimetype;
+            info.thumbnail_source = thumbnail_source;
+            info.thumbnail_info = thumbnail_info;
             let mut content = FileMessageEventContent::new(body, source);
             content.formatted = formatted;
             content.filename = filename;
@@ -816,6 +835,8 @@ fn media_message_type(
         MediaSendKind::Video => {
             let mut info: VideoInfo = info.into();
             info.mimetype = mimetype;
+            info.thumbnail_source = thumbnail_source;
+            info.thumbnail_info = thumbnail_info;
             let mut content = VideoMessageEventContent::new(body, source);
             content.formatted = formatted;
             content.filename = filename;
@@ -927,44 +948,21 @@ async fn media_content_with_relation(
     Ok(content)
 }
 
-/// Send a media attachment as a thread member (`thread_root` without
-/// `reply_to`): upload directly via [`upload_media_source`], then attach
-/// `Thread::without_fallback` — `rel_type: m.thread` with no `m.in_reply_to` —
-/// so it can't render as a reply in other clients (#266). See
-/// [`SdkGateway::send_media`] for why this bypasses `room.send_attachment`.
-async fn send_thread_member_attachment(
-    room: &Room,
-    attachment: MediaAttachment,
-    content_type: &mime::Mime,
-    info: AttachmentInfo,
-    caption: Option<TextMessageEventContent>,
-    thread_root: OwnedEventId,
-) -> Result<String, GatewayError> {
-    let source = upload_media_source(room, content_type, attachment.bytes).await?;
-    let msg_type = media_message_type(
-        attachment.kind,
-        attachment.filename,
-        content_type,
-        source,
-        info,
-        caption,
-    );
-    let mut content = RoomMessageEventContent::new(msg_type);
-    content.relates_to = Some(MessageRelation::Thread(Thread::without_fallback(
-        thread_root,
-    )));
-    let resp = room.send(content).await.map_err(map_sdk_err)?;
-    Ok(resp.response.event_id.to_string())
-}
-
 /// [`SdkGateway::send_with_previews`] once the room is resolved. Everything a
 /// request can get wrong, the attachment's kind and type included, is checked
 /// before the first upload.
+///
+/// Everything runs against `clock`'s budget except an attachment's
+/// thumbnail upload, which is best-effort and outside it, as in
+/// [`send_media_in_room`]. A text send has no thumbnail, so its whole send is
+/// one budget, as before.
 async fn send_with_previews_in_room(
     room: &Room,
     account_id: Uuid,
     message: axon_core::link_preview::PreviewSend<'_>,
     attachment: Option<MediaAttachment>,
+    txn_id: Option<&str>,
+    mut clock: MediaClock,
 ) -> Result<String, GatewayError> {
     use axon_core::link_preview;
     link_preview::preflight(
@@ -997,103 +995,362 @@ async fn send_with_previews_in_room(
                 ));
             }
             let mime = effective_mime(attachment.kind, attachment.content_type.as_deref())?;
-            let info = attachment_info(attachment.kind, attachment.size_bytes)?;
+            let info = attachment_info(&attachment)?;
             Ok((attachment, mime, info))
         })
         .transpose()?;
     ensure_joined(room)?;
     // A cached false state can also expose the message itself. Keep one
     // fresh lookup even for metadata-only sends, including explicit opt-out.
-    let encrypted = fresh_preview_encryption(room, account_id).await?;
+    let encrypted = clock
+        .run(fresh_preview_encryption(room, account_id))
+        .await?;
     let has_uploads = attachment.is_some() || message.previews.iter().any(|p| p.image.is_some());
     use futures_util::{FutureExt, StreamExt, TryStreamExt};
     // At most two uploads per send run at once. Consume the owned bytes;
     // avoid cloning up to 16 MiB while preserving input card order.
-    let entries = futures_util::stream::iter(message.previews)
-        .map(|preview| preview_entry(room, preview, encrypted).boxed())
-        .buffered(2)
-        .try_collect::<Vec<_>>()
+    let (entries, uploaded) = clock
+        .run(async {
+            let entries = futures_util::stream::iter(message.previews)
+                .map(|preview| preview_entry(room, preview, encrypted).boxed())
+                .buffered(2)
+                .try_collect::<Vec<_>>()
+                .await?;
+            let uploaded = match attachment {
+                Some((attachment, mime, info)) => {
+                    let MediaAttachment {
+                        kind,
+                        filename,
+                        bytes,
+                        thumbnail,
+                        ..
+                    } = attachment;
+                    let source =
+                        upload_media_source_with_encryption(room, &mime, bytes, encrypted).await?;
+                    validate_preview_media_source(&source)?;
+                    Some((kind, filename, mime, info, source, thumbnail))
+                }
+                None => None,
+            };
+            Ok((entries, uploaded))
+        })
         .await?;
-    let mut content = if let Some((attachment, mime, info)) = attachment {
-        let source =
-            upload_media_source_with_encryption(room, &mime, attachment.bytes, encrypted).await?;
-        validate_preview_media_source(&source)?;
+    let media = if let Some((kind, filename, mime, info, source, thumbnail)) = uploaded {
+        let thumbnail = match thumbnail.filter(|_| kind != MediaSendKind::Audio) {
+            Some(thumbnail) => clock
+                .thumbnail(room, thumbnail, encrypted)
+                .await
+                // The same check as the original's: an odd URI from the
+                // homeserver costs the thumbnail, not the send.
+                .filter(|(source, _)| validate_preview_media_source(source).is_ok()),
+            None => None,
+        };
         let caption = (!message.body.is_empty()).then(|| match message.formatted {
             Some(f) => TextMessageEventContent::html(message.body, f.body),
             None => TextMessageEventContent::plain(message.body),
         });
-        let media = RoomMessageEventContent::new(media_message_type(
-            attachment.kind,
-            attachment.filename,
-            &mime,
-            source,
-            info,
-            caption,
-        ));
-        serde_json::to_value(media_content_with_relation(room, media, message.relation).await?)
-            .map_err(|_| GatewayError::Invalid("invalid media metadata".into()))?
+        Some(RoomMessageEventContent::new(media_message_type(
+            kind, filename, &mime, source, info, caption, thumbnail,
+        )))
     } else {
-        link_preview::text_content(message.body, message.formatted, message.relation)
+        None
     };
-    link_preview::install_previews(&mut content, entries);
-    // Preflight reserves are conservative, but validate actual SDK fields
-    // too. If they exceed the reserve, reject the parent event and accept
-    // that already-uploaded Matrix objects can remain orphaned; staged
-    // originals are released for explicit correction/retry by the caller.
-    link_preview::check_content(&content).map_err(preview_validation_error)?;
-    // Do not send plaintext thumbnail references after a concurrent room
-    // encryption upgrade. The next explicit attempt will reupload them.
-    if has_uploads && !encrypted && fresh_preview_encryption(room, account_id).await? {
-        return Err(GatewayError::Invalid(
-            "room encryption changed; review and retry the send".into(),
-        ));
-    }
-    let response = room
-        .send_raw("m.room.message", content)
+    clock
+        .run(async {
+            let mut content = match media {
+                Some(media) => serde_json::to_value(
+                    media_content_with_relation(room, media, message.relation).await?,
+                )
+                .map_err(|_| GatewayError::Invalid("invalid media metadata".into()))?,
+                None => {
+                    link_preview::text_content(message.body, message.formatted, message.relation)
+                }
+            };
+            link_preview::install_previews(&mut content, entries);
+            // Preflight reserves are conservative, but validate actual SDK fields
+            // too. If they exceed the reserve, reject the parent event and accept
+            // that already-uploaded Matrix objects can remain orphaned; staged
+            // originals are released for explicit correction/retry by the caller.
+            // A thumbnail is the exception: it is dropped rather than fail the send.
+            check_preview_content(room.room_id(), &mut content)?;
+            // Do not send plaintext thumbnail references after a concurrent room
+            // encryption upgrade. The next explicit attempt will reupload them.
+            if has_uploads && !encrypted && fresh_preview_encryption(room, account_id).await? {
+                return Err(GatewayError::Invalid(
+                    "room encryption changed; review and retry the send".into(),
+                ));
+            }
+            let mut send = room.send_raw("m.room.message", content);
+            let txn_id = txn_id.map(|txn_id| media_transaction_id(room.room_id(), txn_id));
+            if let Some(txn_id) = &txn_id {
+                send = send.with_transaction_id(txn_id);
+            }
+            let response = send.await.map_err(map_preview_send_error)?;
+            Ok(response.response.event_id.to_string())
+        })
         .await
-        .map_err(map_preview_send_error)?;
-    Ok(response.response.event_id.to_string())
 }
 
-/// [`SdkGateway::send_media`] once the room is resolved: the relation decides
-/// between the SDK's `send_attachment` and [`send_thread_member_attachment`],
-/// and both send the event type `attachment.kind` names.
+/// [`link_preview::check_content`](axon_core::link_preview::check_content) for
+/// a preview-aware media event, with the thumbnail best-effort as everywhere
+/// else (ADR 0142 section 6): preflight reserves room for the media fields
+/// but not for a thumbnail's, so when the event is over the limit with its
+/// thumbnail, the thumbnail is dropped and the event checked again. An event
+/// that is over without it still fails.
+fn check_preview_content(room_id: &RoomId, content: &mut Value) -> Result<(), GatewayError> {
+    use axon_core::link_preview::check_content;
+    if check_content(content).is_err() {
+        if let Some(info) = content.get_mut("info").and_then(Value::as_object_mut) {
+            let dropped = ["thumbnail_url", "thumbnail_file", "thumbnail_info"]
+                .iter()
+                .filter(|key| info.remove(**key).is_some())
+                .count();
+            if dropped > 0 {
+                tracing::warn!(%room_id, error_kind = "too_large", "media thumbnail dropped: the event is too large with it");
+            }
+        }
+    }
+    check_content(content).map_err(preview_validation_error)
+}
+
+/// How long a media send may take.
+///
+/// ADR 0142 section 8 gives each step its own bound (60 s, 10 s and 30 s),
+/// but the shipped web client gives up on `send-media` after 65 s and sends
+/// no `txn_id`, so a send that succeeded later than that would be retried and
+/// posted twice. Until clients wait for the longer sum (issue 24; the
+/// per-step bounds return with issue 1243), everything but the thumbnail
+/// upload shares the one budget it had before ADR 0142: resolving the room, the encryption state, preview images, the original, a
+/// reply lookup and the event. The thumbnail upload runs outside that budget,
+/// under its own bound, so it can never fail the send (section 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaSendBounds {
+    /// Everything but the thumbnail upload
+    /// (`media.upstream_upload_timeout_secs`).
+    pub send: std::time::Duration,
+    /// The thumbnail upload. When it runs out, the event goes without one,
+    /// and the time it took is not charged to `send`.
+    pub thumbnail: std::time::Duration,
+}
+
+impl MediaSendBounds {
+    /// A thumbnail upload's bound (ADR 0142 section 6): tens of KiB, so ten
+    /// seconds is long even on a slow link.
+    pub const THUMBNAIL_UPLOAD: std::time::Duration = std::time::Duration::from_secs(10);
+}
+
+/// The clock one media send runs against: [`MediaSendBounds::send`] from the
+/// start, paused while the thumbnail uploads.
+pub(crate) struct MediaClock {
+    deadline: tokio::time::Instant,
+    bounds: MediaSendBounds,
+}
+
+impl MediaClock {
+    pub(crate) fn start(bounds: MediaSendBounds) -> Self {
+        Self {
+            deadline: tokio::time::Instant::now() + bounds.send,
+            bounds,
+        }
+    }
+
+    /// Run part of the send against the budget. Running out is a
+    /// [`GatewayError::Timeout`], a `504`: the homeserver may still finish it.
+    async fn run<T>(
+        &self,
+        fut: impl std::future::Future<Output = Result<T, GatewayError>>,
+    ) -> Result<T, GatewayError> {
+        tokio::time::timeout_at(self.deadline, fut)
+            .await
+            .map_err(|_| {
+                GatewayError::Timeout(format!(
+                    "media send timed out after {}s",
+                    self.bounds.send.as_secs()
+                ))
+            })?
+    }
+
+    /// Upload a thumbnail outside the budget: the deadline moves back by
+    /// however long it took, so a slow thumbnail costs only itself.
+    async fn thumbnail(
+        &mut self,
+        room: &Room,
+        thumbnail: axon_core::MediaThumbnail,
+        encrypted: bool,
+    ) -> Option<(MediaSource, Box<ThumbnailInfo>)> {
+        let started = tokio::time::Instant::now();
+        let uploaded = upload_thumbnail(room, thumbnail, encrypted, self.bounds.thumbnail).await;
+        self.deadline += started.elapsed();
+        uploaded
+    }
+}
+
+/// The Matrix transaction id for a client's `txn_id` in `room` (ADR 0142
+/// section 4). Every Axon client of an account shares one Matrix device, so
+/// the prefix keeps these apart from the SDK's own random ids.
+///
+/// The spec scopes a transaction id to the device and the endpoint, and the
+/// endpoint names the room, which is how Axon's own retry map is keyed too.
+/// A homeserver that keyed on the device alone could answer a send to room B
+/// with room A's event, so the id also carries a stable hash of the room id:
+/// the same `txn_id` in two rooms is two transactions everywhere.
+fn media_transaction_id(room_id: &RoomId, txn_id: &str) -> OwnedTransactionId {
+    use sha2::{Digest, Sha256};
+    let room = Sha256::digest(room_id.as_bytes());
+    let room: String = room[..8].iter().map(|b| format!("{b:02x}")).collect();
+    OwnedTransactionId::from(format!("axon-media-{room}-{txn_id}"))
+}
+
+/// Upload a thumbnail on a best-effort basis (ADR 0142 section 6): a
+/// rejected, failed or slow upload returns `None`, logged with an
+/// `error_kind`, and the event goes without a thumbnail. Encrypted when the
+/// original is.
+async fn upload_thumbnail(
+    room: &Room,
+    thumbnail: axon_core::MediaThumbnail,
+    encrypted: bool,
+    limit: std::time::Duration,
+) -> Option<(MediaSource, Box<ThumbnailInfo>)> {
+    let room_id = room.room_id();
+    let Ok(mimetype) = thumbnail.mimetype.parse::<mime::Mime>() else {
+        tracing::warn!(%room_id, error_kind = "invalid_mimetype", "media thumbnail dropped");
+        return None;
+    };
+    let mut info = ThumbnailInfo::new();
+    info.width = Some(UInt::from(thumbnail.width));
+    info.height = Some(UInt::from(thumbnail.height));
+    info.size = UInt::new(thumbnail.bytes.len() as u64);
+    info.mimetype = Some(thumbnail.mimetype);
+    let upload = upload_media_source_with_encryption(room, &mimetype, thumbnail.bytes, encrypted);
+    match tokio::time::timeout(limit, upload).await {
+        Ok(Ok(source)) => Some((source, Box::new(info))),
+        Ok(Err(error)) => {
+            let error_kind = match error {
+                GatewayError::Timeout(_) => "timeout",
+                GatewayError::EventTooLarge => "too_large",
+                _ => "upload_failed",
+            };
+            tracing::warn!(%room_id, error_kind, "media thumbnail upload failed; sending without it");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(%room_id, error_kind = "timeout", timeout_secs = limit.as_secs(), "media thumbnail upload timed out; sending without it");
+            None
+        }
+    }
+}
+
+/// Upload an attachment and, best-effort, its thumbnail, and build its
+/// message type: steps 1 to 3 of ADR 0142 section 6, shared by every media
+/// send.
+async fn upload_media(
+    room: &Room,
+    attachment: MediaAttachment,
+    content_type: &mime::Mime,
+    info: AttachmentInfo,
+    caption: Option<TextMessageEventContent>,
+    encrypted: bool,
+    clock: &mut MediaClock,
+) -> Result<MessageType, GatewayError> {
+    let MediaAttachment {
+        kind,
+        filename,
+        bytes,
+        thumbnail,
+        ..
+    } = attachment;
+    let source = clock
+        .run(upload_media_source_with_encryption(
+            room,
+            content_type,
+            bytes,
+            encrypted,
+        ))
+        .await?;
+    // `m.audio` has no thumbnail; the API refuses one, so this only guards.
+    let thumbnail = match thumbnail.filter(|_| kind != MediaSendKind::Audio) {
+        Some(thumbnail) => clock
+            .thumbnail(room, thumbnail, encrypted)
+            .await
+            // As on the preview path: an odd URI from the homeserver costs the
+            // thumbnail, not the send.
+            .filter(|(source, _)| validate_preview_media_source(source).is_ok()),
+        None => None,
+    };
+    Ok(media_message_type(
+        kind,
+        filename,
+        content_type,
+        source,
+        info,
+        caption,
+        thumbnail,
+    ))
+}
+
+/// [`SdkGateway::send_media`] once the room is resolved: the one hand-built
+/// send for every media event (ADR 0142 section 6).
+///
+/// It does what `Room::send_attachment` did for the options Axon used, step
+/// by step, so a thumbnail can be best-effort: the SDK uploads the original
+/// and the thumbnail together and fails the whole send when either fails.
+/// A reply goes through `Room::make_reply_event`, which `send_attachment`
+/// calls itself. A thread member (`thread_root` without `reply_to`) gets
+/// `Thread::without_fallback`, with no `m.in_reply_to`, so other clients do
+/// not render it as a reply to the root (#266).
+///
+/// Everything the request can get wrong, the relation and the kind's type
+/// included, is checked before anything is uploaded.
 async fn send_media_in_room(
     room: &Room,
     attachment: MediaAttachment,
     caption: Option<&str>,
     formatted: Option<Formatted<'_>>,
     relation: Relation<'_>,
+    txn_id: Option<&str>,
+    mut clock: MediaClock,
 ) -> Result<String, GatewayError> {
     let content_type = effective_mime(attachment.kind, attachment.content_type.as_deref())?;
-    let info = attachment_info(attachment.kind, attachment.size_bytes)?;
+    let info = attachment_info(&attachment)?;
+    attachment_reply(relation)?;
+    thread_member_root(relation)?;
     let caption = caption.map(|caption| match formatted {
         Some(f) => TextMessageEventContent::html(caption, f.body),
         None => TextMessageEventContent::plain(caption),
     });
-
-    if let Some(thread_root) = thread_member_root(relation)? {
-        return send_thread_member_attachment(
-            room,
-            attachment,
-            &content_type,
-            info,
-            caption,
-            thread_root,
-        )
-        .await;
-    }
-
-    let reply = attachment_reply(relation)?;
-    let config = AttachmentConfig::new()
-        .info(info)
-        .caption(caption)
-        .reply(reply);
-    let resp = room
-        .send_attachment(attachment.filename, &content_type, attachment.bytes, config)
+    ensure_joined(room)?;
+    let encrypted = clock
+        .run(async {
+            Ok(room
+                .latest_encryption_state()
+                .await
+                .map_err(map_sdk_err)?
+                .is_encrypted())
+        })
+        .await?;
+    let msg_type = upload_media(
+        room,
+        attachment,
+        &content_type,
+        info,
+        caption,
+        encrypted,
+        &mut clock,
+    )
+    .await?;
+    clock
+        .run(async {
+            let content =
+                media_content_with_relation(room, RoomMessageEventContent::new(msg_type), relation)
+                    .await?;
+            let mut send = room.send(content);
+            if let Some(txn_id) = txn_id {
+                send = send.with_transaction_id(media_transaction_id(room.room_id(), txn_id));
+            }
+            let resp = send.await.map_err(map_sdk_err)?;
+            Ok(resp.response.event_id.to_string())
+        })
         .await
-        .map_err(map_sdk_err)?;
-    Ok(resp.event_id.to_string())
 }
 
 /// The content of the `m.room.message` an edit replaces, from the fetched
@@ -1406,13 +1663,18 @@ impl SdkGateway {
         room_id: &str,
         message: axon_core::link_preview::PreviewSend<'_>,
         attachment: Option<MediaAttachment>,
+        txn_id: Option<&str>,
+        bounds: MediaSendBounds,
     ) -> Result<String, GatewayError> {
         use futures_util::FutureExt;
-        let room = self.room(account_id, room_id).await?;
+        // The budget starts before the room is resolved, as the adapter's
+        // single timeout did.
+        let clock = MediaClock::start(bounds);
+        let room = clock.run(self.room(account_id, room_id)).await?;
         // Boxed as a trait object: the send future is deep enough that,
         // nested once more inside the server's adapter, proving it `Send`
         // overflows the compiler's recursion limit.
-        send_with_previews_in_room(&room, account_id, message, attachment)
+        send_with_previews_in_room(&room, account_id, message, attachment, txn_id, clock)
             .boxed()
             .await
     }
@@ -1469,25 +1731,21 @@ impl SdkGateway {
     }
 
     /// Send a staged media attachment as an `m.image`, `m.file`, `m.video` or
-    /// `m.audio`, following its kind (ADR 0142 section 1).
+    /// `m.audio`, following its kind (ADR 0142 section 1), with its
+    /// dimensions, duration and thumbnail (section 4).
     ///
-    /// `thread_root` without `reply_to` (a thread member, not a reply) can't be
-    /// expressed through the SDK's typed reply/attachment helper: `AttachmentConfig`
-    /// only accepts a [`Reply`], and matrix-sdk 0.18's `make_for_thread`
-    /// unconditionally sets a fallback `m.in_reply_to` even when no reply was
-    /// requested (`room/reply.rs`; confirmed by the SDK's own
-    /// `test_start_thread` unit test) — other clients render that fallback as
-    /// a genuine reply to the thread root (#266). So that one relation shape
-    /// is built by hand in [`send_thread_member_attachment`], driving the
-    /// upload directly instead of through `room.send_attachment`. Every other
-    /// shape (no relation, a plain reply, or an explicit in-thread reply)
-    /// keeps going through the SDK helper below, which already gets those
-    /// right.
+    /// Every relation shape goes through one hand-built send
+    /// ([`send_media_in_room`]) under `bounds` (see [`MediaSendBounds`]): one
+    /// budget for the whole send, with the thumbnail upload outside it.
+    /// `txn_id`, when present, is the client's id for this send;
+    /// it becomes the Matrix transaction id, so a retry the homeserver has
+    /// already seen returns the first event instead of posting another.
     ///
     /// `formatted`, when present, is the caption's rich-text rendering and is
     /// carried as the event's `format` + `formatted_body` (MSC2530). The API
     /// boundary rejects it without a `caption`; it is ignored if one slips
     /// through, since Matrix only defines formatting for a caption.
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_media(
         &self,
         account_id: Uuid,
@@ -1496,9 +1754,18 @@ impl SdkGateway {
         caption: Option<&str>,
         formatted: Option<Formatted<'_>>,
         relation: Relation<'_>,
+        txn_id: Option<&str>,
+        bounds: MediaSendBounds,
     ) -> Result<String, GatewayError> {
-        let room = self.room(account_id, room_id).await?;
-        send_media_in_room(&room, attachment, caption, formatted, relation).await
+        use futures_util::FutureExt;
+        let clock = MediaClock::start(bounds);
+        let room = clock.run(self.room(account_id, room_id)).await?;
+        // Boxed for the same reason as `send_with_previews`.
+        send_media_in_room(
+            &room, attachment, caption, formatted, relation, txn_id, clock,
+        )
+        .boxed()
+        .await
     }
 
     /// Edit a message by sending an `m.replace` replacement of `event_id`.
@@ -2897,13 +3164,13 @@ mod tests {
 
     #[test]
     fn attachment_info_records_size_for_each_send_kind() {
-        let image_info = attachment_info(MediaSendKind::Image, 123).expect("image info");
+        let image_info = attachment_info(&sized(MediaSendKind::Image, 123)).expect("image info");
         let AttachmentInfo::Image(image_info) = image_info else {
             panic!("expected image attachment info");
         };
         assert_eq!(u64::from(image_info.size.expect("image size")), 123);
 
-        let file_info = attachment_info(MediaSendKind::File, 456).expect("file info");
+        let file_info = attachment_info(&sized(MediaSendKind::File, 456)).expect("file info");
         let AttachmentInfo::File(file_info) = file_info else {
             panic!("expected file attachment info");
         };
@@ -2977,13 +3244,13 @@ mod tests {
     #[test]
     fn attachment_info_records_size_for_video_and_audio() {
         let AttachmentInfo::Video(video) =
-            attachment_info(MediaSendKind::Video, 789).expect("video info")
+            attachment_info(&sized(MediaSendKind::Video, 789)).expect("video info")
         else {
             panic!("expected video attachment info");
         };
         assert_eq!(u64::from(video.size.expect("video size")), 789);
         let AttachmentInfo::Audio(audio) =
-            attachment_info(MediaSendKind::Audio, 1011).expect("audio info")
+            attachment_info(&sized(MediaSendKind::Audio, 1011)).expect("audio info")
         else {
             panic!("expected audio attachment info");
         };
@@ -2992,13 +3259,33 @@ mod tests {
 
     #[test]
     fn attachment_info_rejects_sizes_too_large_for_matrix_metadata() {
-        let err = attachment_info(MediaSendKind::File, u64::MAX)
+        let err = attachment_info(&sized(MediaSendKind::File, u64::MAX))
             .expect_err("oversized attachment metadata should fail");
 
         assert!(
             matches!(err, GatewayError::Invalid(message) if message == "upload is too large for Matrix metadata")
         );
     }
+
+    fn sized(kind: MediaSendKind, size_bytes: u64) -> axon_core::MediaAttachment {
+        axon_core::MediaAttachment {
+            kind,
+            filename: "f".into(),
+            content_type: None,
+            size_bytes,
+            bytes: Vec::new(),
+            width: None,
+            height: None,
+            duration_ms: None,
+            thumbnail: None,
+        }
+    }
+
+    /// Bounds long enough that no test step runs out.
+    const TEST_BOUNDS: super::MediaSendBounds = super::MediaSendBounds {
+        send: std::time::Duration::from_secs(30),
+        thumbnail: std::time::Duration::from_secs(30),
+    };
 
     fn plain_media_source() -> MediaSource {
         MediaSource::Plain(OwnedMxcUri::from("mxc://example.org/abc"))
@@ -3017,6 +3304,7 @@ mod tests {
             &content_type,
             plain_media_source(),
             info,
+            None,
             None,
         );
         let MessageType::Image(content) = msg_type else {
@@ -3045,6 +3333,7 @@ mod tests {
             plain_media_source(),
             info,
             Some(TextMessageEventContent::plain("quarterly report")),
+            None,
         );
         let MessageType::File(content) = msg_type else {
             panic!("expected a file message type");
@@ -3073,6 +3362,7 @@ mod tests {
                 "a **cat**",
                 "a <strong>cat</strong>",
             )),
+            None,
         );
         // Issue #237: the caption's HTML rides on the media event itself.
         let json = serde_json::to_value(&msg_type).expect("serialize");
@@ -3232,8 +3522,9 @@ mod tests {
                 "file.txt".into(),
                 &mime::APPLICATION_OCTET_STREAM,
                 plain_media_source(),
-                attachment_info(MediaSendKind::File, 3).unwrap(),
+                attachment_info(&sized(MediaSendKind::File, 3)).unwrap(),
                 Some(TextMessageEventContent::plain("caption")),
+                None,
             ));
             let content = super::media_content_with_relation(
                 &room,
@@ -3268,11 +3559,12 @@ mod tests {
 
     /// ADR 0142 section 1 through the real send paths: each kind, sent with
     /// each relation shape, reaches the homeserver with the event type the
-    /// kind names and the mimetype `effective_mime` chose. No relation, a
-    /// reply and a reply inside a thread go through matrix-sdk's
-    /// `send_attachment`; a thread member goes through
-    /// `send_thread_member_attachment`. A kind that does not match its type
-    /// fails before anything is uploaded.
+    /// kind names and the mimetype `effective_mime` chose, with its
+    /// dimensions and duration (section 4). Every shape `send_attachment`
+    /// could express (no relation, a reply, a reply inside a thread) sends
+    /// exactly what it sent (section 6); a thread member has no fallback
+    /// `m.in_reply_to`. A kind that does not match its type fails before
+    /// anything is uploaded.
     #[tokio::test]
     async fn send_media_sends_the_event_type_its_kind_names_on_every_relation_path() {
         use axum::{
@@ -3374,12 +3666,44 @@ mod tests {
             ),
         ] {
             for (reply_to, thread_root) in relations {
+                let relation = Relation {
+                    reply_to,
+                    thread_root,
+                };
+                let visual = matches!(kind, MediaSendKind::Image | MediaSendKind::Video);
+                let timed = matches!(kind, MediaSendKind::Video | MediaSendKind::Audio);
                 let attachment = axon_core::MediaAttachment {
                     kind,
                     filename: "IMG_9306.mov".into(),
                     content_type: Some(declared.into()),
                     size_bytes: 3,
                     bytes: vec![1, 2, 3],
+                    width: visual.then_some(1920),
+                    height: visual.then_some(1080),
+                    duration_ms: timed.then_some(31_250),
+                    thumbnail: None,
+                };
+                // What matrix-sdk's `send_attachment` sent for the same input,
+                // for every shape it could express (not a thread member,
+                // #266): the hand-built send must match it field for field.
+                let expected = if super::thread_member_root(relation).unwrap().is_none() {
+                    let config = matrix_sdk::attachment::AttachmentConfig::new()
+                        .info(super::attachment_info(&attachment).unwrap())
+                        .caption(Some(TextMessageEventContent::plain("caption")))
+                        .reply(super::attachment_reply(relation).unwrap());
+                    room.send_attachment(
+                        attachment.filename.clone(),
+                        &super::effective_mime(kind, Some(declared)).unwrap(),
+                        attachment.bytes.clone(),
+                        config,
+                    )
+                    .await
+                    .unwrap();
+                    let mut seen = seen.lock().unwrap();
+                    seen.uploads.pop().expect("the SDK's upload");
+                    Some(seen.sent.pop().expect("the SDK's event"))
+                } else {
+                    None
                 };
                 let event_id = super::send_media_in_room(
                     &room,
@@ -3390,6 +3714,8 @@ mod tests {
                         reply_to,
                         thread_root,
                     },
+                    None,
+                    super::MediaClock::start(TEST_BOUNDS),
                 )
                 .await
                 .unwrap_or_else(|e| panic!("{kind:?} {reply_to:?} {thread_root:?}: {e:?}"));
@@ -3410,6 +3736,24 @@ mod tests {
                 assert_eq!(content["body"], "caption", "{case}");
                 assert_eq!(content["filename"], "IMG_9306.mov", "{case}");
                 assert_eq!(content["url"], "mxc://localhost/uploaded", "{case}");
+                if let Some(expected) = expected {
+                    assert_eq!(content, expected, "{case}: differs from send_attachment");
+                }
+                let info = &content["info"];
+                if visual {
+                    assert_eq!(
+                        (&info["w"], &info["h"]),
+                        (&json!(1920), &json!(1080)),
+                        "{case}"
+                    );
+                } else {
+                    assert!(info.get("w").is_none() && info.get("h").is_none(), "{case}");
+                }
+                if timed {
+                    assert_eq!(info["duration"], 31_250, "{case}");
+                } else {
+                    assert!(info.get("duration").is_none(), "{case}");
+                }
                 match (reply_to, thread_root) {
                     (None, None) => assert!(content.get("m.relates_to").is_none(), "{case}"),
                     (Some(reply), None) => {
@@ -3447,6 +3791,10 @@ mod tests {
                     content_type: declared.map(Into::into),
                     size_bytes: 3,
                     bytes: vec![1, 2, 3],
+                    width: None,
+                    height: None,
+                    duration_ms: None,
+                    thumbnail: None,
                 };
                 let err = super::send_media_in_room(
                     &room,
@@ -3457,6 +3805,8 @@ mod tests {
                         reply_to,
                         thread_root,
                     },
+                    None,
+                    super::MediaClock::start(TEST_BOUNDS),
                 )
                 .await
                 .expect_err("a mismatched kind fails");
@@ -3466,6 +3816,532 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert!(seen.uploads.is_empty() && seen.sent.is_empty());
         drop(seen);
+        server.abort();
+    }
+
+    /// The #1241 review: the Matrix transaction id carries a stable hash of
+    /// the room, so the same `txn_id` in two rooms is two transactions even
+    /// on a homeserver that keys on the device alone.
+    #[test]
+    fn media_transaction_ids_are_stable_and_per_room() {
+        let a = matrix_sdk::ruma::room_id!("!a:example.org");
+        let b = matrix_sdk::ruma::room_id!("!b:example.org");
+        let id = super::media_transaction_id(a, "t-1");
+        assert_eq!(id, super::media_transaction_id(a, "t-1"), "stable");
+        assert_ne!(id, super::media_transaction_id(b, "t-1"), "per room");
+        assert_ne!(id, super::media_transaction_id(a, "t-2"), "per txn_id");
+        let id = id.to_string();
+        assert!(
+            id.starts_with("axon-media-") && id.ends_with("-t-1"),
+            "{id}"
+        );
+        // The longest client id still fits Matrix's 255-byte limit.
+        assert!(
+            super::media_transaction_id(a, &"x".repeat(64))
+                .as_str()
+                .len()
+                <= 255
+        );
+    }
+
+    /// The #1241 review, round 3: a thumbnail that alone takes a
+    /// preview-aware event over the content limit is dropped, not allowed to
+    /// fail the send; an event over the limit without it still fails, and one
+    /// within it keeps its thumbnail.
+    #[test]
+    fn a_thumbnail_is_dropped_when_it_alone_makes_the_event_too_large() {
+        let room = matrix_sdk::ruma::room_id!("!r:example.org");
+        let event = |body_len: usize| {
+            json!({
+                "msgtype": "m.image",
+                "body": "x".repeat(body_len),
+                "url": "mxc://example.org/original",
+                "info": {
+                    "mimetype": "image/png",
+                    "thumbnail_url": "mxc://example.org/thumb",
+                    "thumbnail_info": {"w": 800, "h": 600, "mimetype": "image/jpeg", "size": 1, "pad": "p".repeat(400)},
+                },
+            })
+        };
+        let size = |v: &serde_json::Value| serde_json::to_vec(v).unwrap().len();
+        let limit = axon_core::link_preview::MAX_CONTENT_BYTES;
+        let base = size(&event(0));
+
+        let mut fits = event(limit - base - 10);
+        super::check_preview_content(room, &mut fits).expect("within the limit");
+        assert!(
+            fits["info"].get("thumbnail_info").is_some(),
+            "a fitting event keeps its thumbnail"
+        );
+
+        let mut over_by_thumb = event(limit - base + 100);
+        super::check_preview_content(room, &mut over_by_thumb)
+            .expect("the thumbnail is dropped instead of failing the send");
+        assert!(over_by_thumb["info"].get("thumbnail_info").is_none());
+        assert!(over_by_thumb["info"].get("thumbnail_url").is_none());
+        assert_eq!(over_by_thumb["info"]["mimetype"], "image/png");
+
+        let mut over_anyway = event(limit + 100);
+        assert!(matches!(
+            super::check_preview_content(room, &mut over_anyway),
+            Err(GatewayError::EventTooLarge)
+        ));
+    }
+
+    /// How the thumbnail test's homeserver treats an upload of
+    /// [`THUMB_LEN`] bytes, which only the thumbnail has.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum ThumbUpload {
+        Accept,
+        Reject,
+        Slow,
+        /// Accept it, but answer with a URI too long to embed.
+        OddUri,
+    }
+
+    const THUMB_LEN: usize = 7;
+
+    #[derive(Default)]
+    struct ThumbSeen {
+        mode: Option<ThumbUpload>,
+        /// How long the original's upload and the event send take.
+        original_delay: std::time::Duration,
+        send_delay: std::time::Duration,
+        /// (content type, body length) of each upload.
+        uploads: Vec<(String, usize)>,
+        /// (request path, content) of each event.
+        sent: Vec<(String, serde_json::Value)>,
+    }
+
+    async fn thumb_handler(
+        axum::extract::State(seen): axum::extract::State<
+            std::sync::Arc<std::sync::Mutex<ThumbSeen>>,
+        >,
+        method: axum::http::Method,
+        uri: axum::http::Uri,
+        headers: axum::http::HeaderMap,
+        body: axum::body::Bytes,
+    ) -> axum::response::Response {
+        use axum::{http::StatusCode, response::IntoResponse, Json};
+        let path = uri.path();
+        if path.contains("/join") {
+            return Json(json!({"room_id":"!preview:localhost"})).into_response();
+        }
+        if path.ends_with("/media/config") {
+            return Json(json!({"m.upload.size": 1024})).into_response();
+        }
+        if path.contains("/media/") && path.ends_with("/upload") {
+            let content_type = headers
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_owned();
+            let mode = {
+                let mut seen = seen.lock().unwrap();
+                seen.uploads.push((content_type, body.len()));
+                seen.mode.unwrap_or(ThumbUpload::Accept)
+            };
+            if body.len() == THUMB_LEN {
+                match mode {
+                    ThumbUpload::Accept => {}
+                    ThumbUpload::Reject => {
+                        return (
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            Json(json!({"errcode":"M_TOO_LARGE","error":"no"})),
+                        )
+                            .into_response()
+                    }
+                    ThumbUpload::Slow => {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await
+                    }
+                    ThumbUpload::OddUri => {
+                        let uri = format!("mxc://localhost/{}", "a".repeat(4096));
+                        return Json(json!({"content_uri": uri})).into_response();
+                    }
+                }
+                return Json(json!({"content_uri":"mxc://localhost/thumb"})).into_response();
+            }
+            let delay = seen.lock().unwrap().original_delay;
+            tokio::time::sleep(delay).await;
+            return Json(json!({"content_uri":"mxc://localhost/original"})).into_response();
+        }
+        if method == axum::http::Method::PUT && path.contains("/send/m.room.message/") {
+            let delay = seen.lock().unwrap().send_delay;
+            tokio::time::sleep(delay).await;
+            let content: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            seen.lock().unwrap().sent.push((path.to_owned(), content));
+            return Json(json!({"event_id":"$sent:localhost"})).into_response();
+        }
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"errcode":"M_NOT_FOUND","error":"absent"})),
+        )
+            .into_response()
+    }
+
+    fn with_thumbnail(kind: MediaSendKind, content_type: &str) -> axon_core::MediaAttachment {
+        axon_core::MediaAttachment {
+            kind,
+            filename: "clip".into(),
+            content_type: Some(content_type.into()),
+            size_bytes: 3,
+            bytes: vec![1, 2, 3],
+            width: None,
+            height: None,
+            duration_ms: None,
+            thumbnail: Some(axon_core::MediaThumbnail {
+                bytes: vec![9; THUMB_LEN],
+                mimetype: "image/jpeg".into(),
+                width: 80,
+                height: 60,
+            }),
+        }
+    }
+
+    /// ADR 0142 section 6: a thumbnail is uploaded after the original and
+    /// attached as `thumbnail_url` and `thumbnail_info`; a rejected or slow
+    /// thumbnail upload sends the event without `thumbnail_*` instead of
+    /// failing it; `m.audio` never gets one; and a `txn_id` becomes the
+    /// Matrix transaction id, on the plain and the preview-aware path.
+    #[tokio::test]
+    async fn a_thumbnail_is_attached_best_effort_and_txn_id_is_the_transaction_id() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(ThumbSeen::default()));
+        let (room, server) = preview_test_room(
+            axum::Router::new()
+                .fallback(thumb_handler)
+                .with_state(seen.clone()),
+        )
+        .await;
+        room.update_room_info(|mut info| {
+            info.set_encryption_event(None);
+            info.mark_encryption_state_synced();
+            (info, matrix_sdk_base::RoomInfoNotableUpdateReasons::empty())
+        })
+        .await;
+        let take = |seen: &std::sync::Arc<std::sync::Mutex<ThumbSeen>>| {
+            let mut seen = seen.lock().unwrap();
+            let uploads = std::mem::take(&mut seen.uploads);
+            let (path, content) = seen.sent.pop().expect("one event");
+            assert!(seen.sent.is_empty());
+            (uploads, path, content)
+        };
+
+        for (kind, content_type, msgtype) in [
+            (MediaSendKind::Image, "image/png", "m.image"),
+            (MediaSendKind::Video, "video/mp4", "m.video"),
+            (MediaSendKind::File, "application/pdf", "m.file"),
+        ] {
+            seen.lock().unwrap().mode = Some(ThumbUpload::Accept);
+            super::send_media_in_room(
+                &room,
+                with_thumbnail(kind, content_type),
+                None,
+                None,
+                Relation::default(),
+                Some("abc-123"),
+                super::MediaClock::start(TEST_BOUNDS),
+            )
+            .await
+            .unwrap();
+            let (uploads, path, content) = take(&seen);
+            assert_eq!(
+                uploads,
+                [
+                    (content_type.to_owned(), 3),
+                    ("image/jpeg".to_owned(), THUMB_LEN)
+                ],
+                "{kind:?}: the original, then the thumbnail"
+            );
+            assert!(
+                path.ends_with(&format!(
+                    "/send/m.room.message/{}",
+                    super::media_transaction_id(room.room_id(), "abc-123")
+                )),
+                "{path}"
+            );
+            assert_eq!(content["msgtype"], msgtype);
+            assert_eq!(content["url"], "mxc://localhost/original");
+            assert_eq!(content["info"]["thumbnail_url"], "mxc://localhost/thumb");
+            assert_eq!(
+                content["info"]["thumbnail_info"],
+                json!({"w": 80, "h": 60, "mimetype": "image/jpeg", "size": THUMB_LEN}),
+                "{kind:?}"
+            );
+
+            for mode in [ThumbUpload::Reject, ThumbUpload::Slow] {
+                seen.lock().unwrap().mode = Some(mode);
+                let bounds = super::MediaSendBounds {
+                    thumbnail: std::time::Duration::from_millis(200),
+                    ..TEST_BOUNDS
+                };
+                super::send_media_in_room(
+                    &room,
+                    with_thumbnail(kind, content_type),
+                    None,
+                    None,
+                    Relation::default(),
+                    None,
+                    super::MediaClock::start(bounds),
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("{kind:?} {mode:?}: a thumbnail cannot fail the send: {e:?}")
+                });
+                let (uploads, path, content) = take(&seen);
+                assert_eq!(
+                    uploads.len(),
+                    2,
+                    "{kind:?} {mode:?}: the thumbnail was tried"
+                );
+                assert!(
+                    !path.contains("axon-media-"),
+                    "no txn_id, an SDK id: {path}"
+                );
+                assert_eq!(content["url"], "mxc://localhost/original");
+                assert!(
+                    content["info"].get("thumbnail_url").is_none()
+                        && content["info"].get("thumbnail_file").is_none()
+                        && content["info"].get("thumbnail_info").is_none(),
+                    "{kind:?} {mode:?}: {content}"
+                );
+            }
+        }
+
+        // A thumbnail URI the homeserver answers with that could not be
+        // embedded costs the thumbnail, not the send, on the plain path too.
+        seen.lock().unwrap().mode = Some(ThumbUpload::OddUri);
+        super::send_media_in_room(
+            &room,
+            with_thumbnail(MediaSendKind::Image, "image/png"),
+            None,
+            None,
+            Relation::default(),
+            None,
+            super::MediaClock::start(TEST_BOUNDS),
+        )
+        .await
+        .expect("an odd thumbnail URI does not fail the send");
+        let (_, _, content) = take(&seen);
+        assert!(content["info"].get("thumbnail_url").is_none(), "{content}");
+
+        // `m.audio` has no thumbnail in the spec: none is uploaded.
+        seen.lock().unwrap().mode = Some(ThumbUpload::Accept);
+        super::send_media_in_room(
+            &room,
+            with_thumbnail(MediaSendKind::Audio, "audio/ogg"),
+            None,
+            None,
+            Relation::default(),
+            None,
+            super::MediaClock::start(TEST_BOUNDS),
+        )
+        .await
+        .unwrap();
+        let (uploads, _, content) = take(&seen);
+        assert_eq!(uploads, [("audio/ogg".to_owned(), 3)]);
+        assert!(content["info"].get("thumbnail_info").is_none());
+
+        // The preview-aware path attaches it, and uses the txn_id, the same way.
+        let message = || axon_core::link_preview::PreviewSend {
+            body: "see https://example.org",
+            formatted: None,
+            relation: Relation::default(),
+            previews: vec![axon_core::link_preview::LinkPreview {
+                metadata: axon_core::link_preview::PreviewMetadata {
+                    matched_url: "https://example.org".into(),
+                    ..Default::default()
+                },
+                image: None,
+            }],
+        };
+        super::send_with_previews_in_room(
+            &room,
+            uuid::Uuid::nil(),
+            message(),
+            Some(with_thumbnail(MediaSendKind::Video, "video/mp4")),
+            Some("p-1"),
+            super::MediaClock::start(TEST_BOUNDS),
+        )
+        .await
+        .unwrap();
+        let (uploads, path, content) = take(&seen);
+        assert_eq!(uploads.len(), 2);
+        assert!(
+            path.ends_with(&format!(
+                "/send/m.room.message/{}",
+                super::media_transaction_id(room.room_id(), "p-1")
+            )),
+            "{path}"
+        );
+        assert_eq!(content["info"]["thumbnail_url"], "mxc://localhost/thumb");
+        seen.lock().unwrap().mode = Some(ThumbUpload::Reject);
+        super::send_with_previews_in_room(
+            &room,
+            uuid::Uuid::nil(),
+            message(),
+            Some(with_thumbnail(MediaSendKind::Video, "video/mp4")),
+            None,
+            super::MediaClock::start(TEST_BOUNDS),
+        )
+        .await
+        .expect("a rejected thumbnail does not fail a preview-aware send");
+        let (_, _, content) = take(&seen);
+        assert!(content["info"].get("thumbnail_url").is_none(), "{content}");
+
+        // In an encrypted room both uploads are encrypted, and a rejected
+        // thumbnail still leaves the original's `file`. Checked at the
+        // content step: sending the event would need a real Olm exchange.
+        for mode in [ThumbUpload::Accept, ThumbUpload::Reject] {
+            seen.lock().unwrap().mode = Some(mode);
+            let attachment = with_thumbnail(MediaSendKind::Image, "image/png");
+            let mime =
+                super::effective_mime(attachment.kind, attachment.content_type.as_deref()).unwrap();
+            let info = super::attachment_info(&attachment).unwrap();
+            let msg_type = super::upload_media(
+                &room,
+                attachment,
+                &mime,
+                info,
+                None,
+                true,
+                &mut super::MediaClock::start(TEST_BOUNDS),
+            )
+            .await
+            .unwrap();
+            let uploads = std::mem::take(&mut seen.lock().unwrap().uploads);
+            assert_eq!(
+                uploads,
+                [
+                    ("application/octet-stream".to_owned(), 3),
+                    ("application/octet-stream".to_owned(), THUMB_LEN)
+                ],
+                "{mode:?}: both encrypted"
+            );
+            let MessageType::Image(image) = msg_type else {
+                panic!("an m.image")
+            };
+            assert!(matches!(image.source, MediaSource::Encrypted(_)));
+            let info = image.info.expect("info");
+            match mode {
+                ThumbUpload::Accept => {
+                    assert!(matches!(
+                        info.thumbnail_source,
+                        Some(MediaSource::Encrypted(_))
+                    ));
+                    assert!(info.thumbnail_info.is_some());
+                }
+                _ => assert!(info.thumbnail_source.is_none() && info.thumbnail_info.is_none()),
+            }
+        }
+        server.abort();
+    }
+
+    /// The #1241 review's budget: everything but the thumbnail upload shares
+    /// one `send` budget, as the single upload timeout did before ADR 0142,
+    /// so a send never succeeds later than shipped clients wait; and the
+    /// clock stops while the thumbnail uploads, so a slow thumbnail can never
+    /// time out the send it is optional for. A text send with previews has
+    /// the same single budget.
+    #[tokio::test]
+    async fn one_send_budget_covers_everything_but_the_thumbnail_upload() {
+        use std::time::Duration;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(ThumbSeen::default()));
+        let (room, server) = preview_test_room(
+            axum::Router::new()
+                .fallback(thumb_handler)
+                .with_state(seen.clone()),
+        )
+        .await;
+        room.update_room_info(|mut info| {
+            info.set_encryption_event(None);
+            info.mark_encryption_state_synced();
+            (info, matrix_sdk_base::RoomInfoNotableUpdateReasons::empty())
+        })
+        .await;
+        let bounds = super::MediaSendBounds {
+            send: Duration::from_millis(2000),
+            thumbnail: Duration::from_millis(1200),
+        };
+        let set = |original: u64, send: u64, mode: ThumbUpload| {
+            let mut seen = seen.lock().unwrap();
+            seen.original_delay = Duration::from_millis(original);
+            seen.send_delay = Duration::from_millis(send);
+            seen.mode = Some(mode);
+            seen.sent.clear();
+            seen.uploads.clear();
+        };
+
+        // 1.2 s original + 1.2 s thumbnail (timed out) + 0.3 s event: 2.7 s
+        // in all, but only 1.5 s of it is charged to the 2 s budget.
+        set(1200, 300, ThumbUpload::Slow);
+        super::send_media_in_room(
+            &room,
+            with_thumbnail(MediaSendKind::Image, "image/png"),
+            None,
+            None,
+            Relation::default(),
+            None,
+            super::MediaClock::start(bounds),
+        )
+        .await
+        .expect("a slow thumbnail does not use up the send's budget");
+        let content = seen.lock().unwrap().sent.pop().expect("sent").1;
+        assert!(content["info"].get("thumbnail_url").is_none());
+
+        // No thumbnail: a 1.2 s original and a 1.2 s event overrun the 2 s
+        // budget together, as they did the single upload timeout.
+        set(1200, 1200, ThumbUpload::Accept);
+        let mut attachment = with_thumbnail(MediaSendKind::Image, "image/png");
+        attachment.thumbnail = None;
+        let err = super::send_media_in_room(
+            &room,
+            attachment,
+            None,
+            None,
+            Relation::default(),
+            None,
+            super::MediaClock::start(bounds),
+        )
+        .await
+        .expect_err("the original and the event share one budget");
+        assert!(matches!(err, GatewayError::Timeout(_)), "{err:?}");
+
+        // A text send with previews: one budget for the whole send.
+        let message = || axon_core::link_preview::PreviewSend {
+            body: "see https://example.org",
+            formatted: None,
+            relation: Relation::default(),
+            previews: vec![axon_core::link_preview::LinkPreview {
+                metadata: axon_core::link_preview::PreviewMetadata {
+                    matched_url: "https://example.org".into(),
+                    ..Default::default()
+                },
+                image: None,
+            }],
+        };
+        set(0, 1500, ThumbUpload::Accept);
+        super::send_with_previews_in_room(
+            &room,
+            uuid::Uuid::nil(),
+            message(),
+            None,
+            None,
+            super::MediaClock::start(bounds),
+        )
+        .await
+        .expect("a 1.5 s event fits the text send's 2 s budget");
+        set(0, 2500, ThumbUpload::Accept);
+        let err = super::send_with_previews_in_room(
+            &room,
+            uuid::Uuid::nil(),
+            message(),
+            None,
+            None,
+            super::MediaClock::start(bounds),
+        )
+        .await
+        .expect_err("but not a 2.5 s one");
+        assert!(matches!(err, GatewayError::Timeout(_)), "{err:?}");
         server.abort();
     }
 
@@ -3549,6 +4425,10 @@ mod tests {
             content_type: content_type.map(Into::into),
             size_bytes: 3,
             bytes: vec![4, 5, 6],
+            width: None,
+            height: None,
+            duration_ms: None,
+            thumbnail: None,
         };
 
         let event_id = super::send_with_previews_in_room(
@@ -3556,6 +4436,8 @@ mod tests {
             uuid::Uuid::nil(),
             message(),
             Some(attachment(MediaSendKind::Video, Some("video/mp4"))),
+            None,
+            super::MediaClock::start(TEST_BOUNDS),
         )
         .await
         .expect("a valid send");
@@ -3581,6 +4463,8 @@ mod tests {
                 uuid::Uuid::nil(),
                 message(),
                 Some(attachment(kind, content_type)),
+                None,
+                super::MediaClock::start(TEST_BOUNDS),
             )
             .await
             .expect_err("a mismatched kind fails");

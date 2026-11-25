@@ -1336,7 +1336,17 @@ export interface paths {
         put?: never;
         /**
          * Send media
-         * @description Send a staged media upload to a room.
+         * @description Send a staged media upload to a room, as the event its staged kind names,
+         *     with optional `info` and a thumbnail (`thumbnail_upload_id`). A send with a
+         *     `txn_id` already in flight or sent within 10 minutes in this room returns
+         *     that send's event id and sends nothing (ADR 0142 section 4).
+         *
+         *     The send runs in a task of its own, which settles every upload it
+         *     claimed even if the client disconnects: consumed when the event is sent,
+         *     released when it fails. The send, from resolving the room to the event,
+         *     has one budget (`media.upstream_upload_timeout_secs`, 60 s by default), as
+         *     before thumbnails. A thumbnail adds at most 5 s to prepare and 10 s to
+         *     upload, outside that budget; without one, a send answers within it.
          */
         post: operations["send_media"];
         delete?: never;
@@ -2838,6 +2848,14 @@ export interface components {
                  *     server that predates it answers without it.
                  */
                 media_upload_kinds?: components["schemas"]["MediaUploadKindDto"][];
+                /**
+                 * @description `send-media` accepts and applies `info`, `thumbnail_upload_id` and
+                 *     `txn_id` (ADR 0142 section 1). A server without this field ignores all
+                 *     three, so a client sends a thumbnail only when this is true, and relies
+                 *     on `txn_id` deduplication only then. The schema marks it optional
+                 *     because a server that predates it answers without it.
+                 */
+                send_media_thumbnails?: boolean;
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -4625,6 +4643,14 @@ export interface components {
              *     server that predates it answers without it.
              */
             media_upload_kinds?: components["schemas"]["MediaUploadKindDto"][];
+            /**
+             * @description `send-media` accepts and applies `info`, `thumbnail_upload_id` and
+             *     `txn_id` (ADR 0142 section 1). A server without this field ignores all
+             *     three, so a client sends a thumbnail only when this is true, and relies
+             *     on `txn_id` deduplication only then. The schema marks it optional
+             *     because a server that predates it answers without it.
+             */
+            send_media_thumbnails?: boolean;
         };
         /**
          * @description Why a crawl failed or stopped early. Allowlisted; never upstream text.
@@ -6634,6 +6660,21 @@ export interface components {
          */
         SearchSort: "relevance" | "newest" | "oldest";
         /**
+         * @description `info` of a [`SendMediaRequest`] (ADR 0142 section 4). Each field is
+         *     optional, and each value must be at least 1 and at most 2^53 − 1.
+         *     `width` and `height` come together, and are accepted for `image` and
+         *     `video`; `duration_ms` is accepted for `video` and `audio`. Anything else
+         *     is a `400`. The values are sent in the event's `info` as given.
+         */
+        SendMediaInfo: {
+            /** Format: int64 */
+            duration_ms?: number | null;
+            /** Format: int64 */
+            height?: number | null;
+            /** Format: int64 */
+            width?: number | null;
+        };
+        /**
          * @description Request body for sending a staged media upload into a room
          *     (`POST …/rooms/{room_id}/send-media`). The `upload_id` must refer to an
          *     unsent staged upload owned by the path account.
@@ -6655,6 +6696,7 @@ export interface components {
              *     its plain-text fallback.
              */
             formatted_body?: string | null;
+            info?: null | components["schemas"]["SendMediaInfo"];
             /** @description Send as a reply to this event id (`m.in_reply_to`). Optional. */
             reply_to?: string | null;
             /**
@@ -6664,6 +6706,41 @@ export interface components {
              *     not a reply.
              */
             thread_root?: string | null;
+            /**
+             * Format: uuid
+             * @description A second staged upload, staged with kind `image`, to send as this
+             *     media's thumbnail or poster: PNG, JPEG or WebP, at most 2 MiB and
+             *     4,000,000 pixels, with a type matching its bytes. Accepted for
+             *     `image`, `video` and `file`, and refused for `audio`. The server
+             *     re-encodes it to fit inside 800 × 600, upright, as JPEG or (for real
+             *     transparency) PNG. It is consumed when the event is sent and released
+             *     when the send fails, whether or not it made it into the event: a
+             *     thumbnail is best-effort, and never fails a send that would succeed
+             *     without it. An invalid one is a `400`. Send it only when
+             *     `send_media_thumbnails` is advertised: an older server ignores it and
+             *     leaves it staged until it expires.
+             */
+            thumbnail_upload_id?: string | null;
+            /**
+             * @description The client's id for this send, kept across its retries (ADR 0142
+             *     section 4). A retry with the same id in the same room joins the send
+             *     still in flight, or, within 10 minutes of its success, gets its event
+             *     id without sending again; the retry's own staged uploads are then
+             *     deleted. A retry whose caption, relation, `info`, thumbnail or
+             *     previews differ from the first send's is a `409`, and keeps its
+             *     uploads. The check cannot see which file is sent, so the id must be
+             *     unique to one file: another file sent with the same id and the same
+             *     caption within 10 minutes is taken for a retry, answered with the
+             *     first event, and never sent.
+             *
+             *     A send that failed, a `504` included, is not remembered: Axon cannot
+             *     learn the outcome of a call it stopped waiting for. Its retry uploads
+             *     and sends again, under the same Matrix transaction id, so a homeserver
+             *     that completed the first send returns that event instead of posting
+             *     another. Deduplication holds only against a server that advertises
+             *     `send_media_thumbnails`.
+             */
+            txn_id?: string | null;
             /**
              * Format: uuid
              * @description Server-issued staged upload id returned by `POST …/media/uploads`.
@@ -11541,7 +11618,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Media sent */
+            /** @description Media sent, or the event id of the earlier send this txn_id names */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11550,7 +11627,7 @@ export interface operations {
                     "application/json": components["schemas"]["ApiResponse_SendResultDto"];
                 };
             };
-            /** @description Malformed request */
+            /** @description Malformed request: invalid info or txn_id, a field or thumbnail the upload's kind cannot carry, or a thumbnail that is not a valid image. Every claimed upload is released. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -11588,6 +11665,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description txn_id was already used for a different send in this room. Nothing was sent and the request's uploads are kept. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             /** @description Definite event_too_large, preview_too_large or payload_too_large validation rejection; preview-aware content uses a 40960-byte budget including 12288 bytes reserved for media fields. No preflight upload claims or event dispatch. */
             413: {
                 headers: {
@@ -11615,7 +11701,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Preview-aware send deadline exceeded: outcome unknown; do not automatically resend */
+            /** @description Send deadline exceeded: outcome unknown, or a retry waited too long for the earlier send with its txn_id. Resend only with the same txn_id: Axon does not remember a timed-out send, so the retry uploads again, but it reuses the Matrix transaction id, so a homeserver that completed the first send returns that event instead of posting another. */
             504: {
                 headers: {
                     [name: string]: unknown;

@@ -193,7 +193,14 @@ Explicit room navigation during startup takes precedence over that automatic cho
 Until those reads complete, rooms remain accessible in the provisional Ungrouped section.
 A failed or incomplete walk marks the root `(incomplete; retrying)` and keeps its last complete grouping.
 On an initial failure, joined rooms remain accessible under provisional Ungrouped.
-Only a complete walk can remove old child links; retries start from the first page after 30 seconds, and `/refresh` retries immediately.
+Only a complete walk can remove old child links.
+Retries start from the first page after 30, 60, 120, then 240 seconds.
+A byte-total, per-page size, or page-count failure starts at 240 seconds, and the 60-second walk deadline stays on the ladder.
+A complete walk clears that count.
+`/refresh` retries immediately and clears it.
+A relationship change retries immediately while the count is below the cap, and keeps the wait at the cap.
+At the cap, child-link changes do not abort the in-flight walk or extend its wait.
+A successful walk then schedules one follow-up.
 An older server without `space/hierarchy` shows the same incomplete marker; upgrade Axon to load space membership.
 Live `m.space.child` updates invalidate the affected group, and reconnect refreshes both membership and saved order.
 An account without joined spaces retains the flat room list.

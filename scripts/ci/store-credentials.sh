@@ -171,6 +171,21 @@ cmd_xcode() {
   fi
   echo "using $best (iOS SDK $best_ver)"
   export_env DEVELOPER_DIR "$best"
+
+  # DEVELOPER_DIR reaches only what inherits it. `tauri ios build` starts its own
+  # xcodebuild, and on the first Xcode 27 run that one came from the runner's default
+  # (27.1) while this step had chosen 27.2 for everything else: the build and the
+  # upload used different Xcodes. Selecting it system-wide as well makes every
+  # process agree. Only on a runner: `xcode-select -s` changes the whole machine and
+  # needs sudo, neither of which a developer running this on a Mac wants.
+  if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+    sudo xcode-select -s "$best" || die "xcode: could not select $best with xcode-select"
+    local selected
+    selected=$(xcode-select -p)
+    [ "$selected" = "$best" ] || die "xcode: asked xcode-select for $best but it reports $selected"
+  fi
+  echo "xcode-select reports: $(xcode-select -p)"
+  DEVELOPER_DIR=$best xcodebuild -version 2>&1 | sed 's/^/  /' || true
 }
 
 # --- what is in a keychain ----------------------------------------------------

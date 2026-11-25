@@ -105,7 +105,11 @@ The Windows executables and installer are signed through Azure Artifact Signing 
 #### Linux
 
 The Linux builds are made on Ubuntu 22.04, so they need glibc 2.35 or newer (Debian 12 and Ubuntu 22.04 or later).
-The `.deb` also needs the system webview stack (`libwebkit2gtk-4.1-0` and `libsoup-3.0-0`), which `apt` installs for you on those releases.
+The `.deb` requires the distro's WebKitGTK 4.1 runtime (`libwebkit2gtk-4.1-0` version 2.42 or newer).
+`apt` installs it and its dependencies, including JavaScriptCore and libsoup.
+If a locally installed WebKitGTK or JavaScriptCore prevents Axon from starting, the launcher tries the distro libraries and reports the paths it found if startup still fails.
+The package recommends Zenity to show this error in a dialog on desktop-menu launches.
+The launcher always writes the diagnostic to standard error.
 The AppImage bundles its own WebKitGTK, so it needs only a new enough glibc.
 The Linux builds are not signed, so some Linux desktops will warn the first time you run them.
 
@@ -163,6 +167,9 @@ See the [TUI guide](../clients/tui/README.md) for everything else.
 ### iOS and iPadOS
 
 Install an older build [directly from the App Store](https://apps.apple.com/us/app/matrix-axon/id6813675186), or get a recent TestFlight beta build by posting in [#axon-developer:bostoncoop.net](https://matrix.to/#/%23axon-developer%3Abostoncoop.net).
+
+Current builds need iOS 26.0 or later.
+The minimum is `bundle.iOS.minimumSystemVersion` in `clients/web/src-tauri/tauri.conf.json`, and the iOS launch check launches the app on that iOS.
 
 ### Android
 

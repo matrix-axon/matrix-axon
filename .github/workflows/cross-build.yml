@@ -12,7 +12,7 @@ name: Cross-platform build
 #     floor in docs/install.md if it rises.
 #   - Windows (x86_64-pc-windows-msvc) — windows-latest, native
 #   - macOS, Intel + Apple Silicon (x86_64-apple-darwin, aarch64-apple-darwin)
-#     — macos-latest, native, cross-compiling the Intel slice via rustup's
+#     — xcode-27 (Apple Silicon), native, cross-compiling the Intel slice via rustup's
 #     macOS target support (Apple Silicon runners can build x86_64-apple-darwin
 #     without a separate SDK setup).
 #
@@ -325,7 +325,7 @@ jobs:
             arch: intel
           - target: aarch64-apple-darwin
             arch: silicon
-    runs-on: macos-latest
+    runs-on: xcode-27
     if: ${{ github.event.inputs.macos != 'false' }}
     steps:
       - name: Add rustup/cargo home and local binaries to PATH

@@ -247,10 +247,17 @@ FIXED: dict[Step, Pinned] = {
         "cargo check --locked --manifest-path clients/web/src-tauri/Cargo.toml --workspace --all-targets",
         "compile macOS-only shell code on pull requests",
     ),
+    Step(DESKTOP, DESKTOP_JOB, "Test the Debian desktop launcher"): Pinned(
+        "sh clients/web/src-tauri/bundle/test-deb.sh",
+        "exercise the Debian package and Linux dynamic loader with a WebKitGTK fixture",
+    ),
 }
 
 EXEMPT: dict[Step, str] = {
     Step(LINT, LINT_JOB, "Install pre-commit"): "installs the runner the pre-commit steps use",
+    Step(LINT, LINT_JOB, "Use persistent self-hosted Cargo target"): (
+        "sets the runner's Cargo artifact directory"
+    ),
     Step(LINT, LINT_JOB, "test changed-by-hook"): "unit test of the path filter, not a hook entry",
     Step(LINT, LINT_JOB, "rust-changed"): "decides whether the rust steps run; not a hook entry",
     Step(LINT, LINT_JOB, "test runner scripts"): (
@@ -275,6 +282,7 @@ STEP_IF = {
     # Shell Clippy runs on both legs. Formatting and tests stay on Linux.
     Step(DESKTOP, DESKTOP_JOB, "rustfmt"): "runner.os == 'Linux'",
     Step(DESKTOP, DESKTOP_JOB, "test"): "runner.os == 'Linux'",
+    Step(DESKTOP, DESKTOP_JOB, "Test the Debian desktop launcher"): "runner.os == 'Linux'",
     Step(DESKTOP, DESKTOP_JOB, "Check macOS shell targets"): "runner.os == 'macOS'",
 }
 
