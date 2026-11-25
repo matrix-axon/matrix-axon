@@ -215,6 +215,14 @@ Holes that existed before this release have no rows, so a one-time verification 
 
 `scripts/gap-fill-test.sh` exercises the whole path against a local Synapse ([integration testing](integration-testing.md#gap-fill-adr-0140)).
 
+## Image sends
+
+For staged sends, `media.send_thumbnails` defaults to `true`.
+Axon reads image dimensions from supported headers and generates thumbnails for eligible PNG, JPEG, WebP, and GIF images without a client-supplied thumbnail.
+Set `media.send_thumbnails = false` to skip generation while keeping the dimension probe.
+Inspection has five seconds to finish, including the decoder permit wait.
+An image still sends if the thumbnail cannot be generated in time.
+
 ## Media streaming
 
 Video and audio (`video/*` and `audio/*` by the event's `info.mimetype`) stream from the homeserver as they arrive ([ADR 0139](adr/0139-stream-large-video-and-audio.md)).

@@ -451,6 +451,7 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "image",
+ "image-webp",
  "jsonwebtoken",
  "libc",
  "percent-encoding",

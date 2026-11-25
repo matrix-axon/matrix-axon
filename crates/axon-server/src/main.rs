@@ -12,6 +12,7 @@ mod cli;
 mod db;
 mod devices;
 mod gateway;
+mod image_send;
 mod init;
 mod inline_media;
 mod lifecycle;
@@ -378,6 +379,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         None
     };
 
+    let send_thumbnailer = Arc::new(image_send::ImageSendService::new(
+        store.clone(),
+        config.media.send_thumbnails,
+    ));
     let mut state = axon_api::AppState::new(
         store,
         sync_engine.live_events(),
@@ -420,6 +425,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         uploads.clone(),
     )))
     .with_staged_uploads(uploads)
+    .with_send_thumbnailer(send_thumbnailer)
     .with_ephemeral(ephemeral)
     .with_membership(membership)
     .with_room_entry(room_entry)

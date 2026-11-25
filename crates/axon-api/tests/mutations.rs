@@ -236,6 +236,14 @@ fn app_with_uploads(
     sender: Arc<dyn MessageSender>,
     uploads: Arc<dyn StagedUploadService>,
 ) -> axum::Router {
+    axon_api::router(state_with_uploads(store, sender, uploads))
+}
+
+fn state_with_uploads(
+    store: Store,
+    sender: Arc<dyn MessageSender>,
+    uploads: Arc<dyn StagedUploadService>,
+) -> AppState {
     let (live, _rx) = tokio::sync::broadcast::channel(16);
     let lifecycle = Arc::new(StubLifecycle::ok(Uuid::nil()));
     let verify = Arc::new(StubVerification::ok("$unused-flow"));
@@ -243,12 +251,10 @@ fn app_with_uploads(
     let devices = Arc::new(StubDeviceList::ok());
     let verifier = Arc::new(StubTokenVerifier::ok());
     let media = Arc::new(StubMediaProxy);
-    axon_api::router(
-        AppState::new(
-            store, live, sender, lifecycle, verify, trust, devices, verifier, media, None,
-        )
-        .with_staged_uploads(uploads),
+    AppState::new(
+        store, live, sender, lifecycle, verify, trust, devices, verifier, media, None,
     )
+    .with_staged_uploads(uploads)
 }
 
 /// Issue a request (optional JSON body) and return `(status, parsed body)`. Every
@@ -1153,6 +1159,94 @@ async fn send_media_carries_info_and_a_thumbnail_and_consumes_both() {
     );
     assert_eq!(attachment.thumbnail, Some(common::stub_thumbnail()));
     assert_eq!(sender.txn_ids(), vec![Some("c0ffee".to_owned())]);
+}
+
+struct ImageInspector(Option<axon_core::SendImageMetadata>);
+
+#[async_trait::async_trait]
+impl axon_api::SendThumbnailer for ImageInspector {
+    async fn inspect(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: Uuid,
+        generate: bool,
+    ) -> axon_core::SendImageMetadata {
+        let mut result = axon_core::SendImageMetadata::default();
+        if let Some(metadata) = &self.0 {
+            result.dimensions = metadata.dimensions;
+            if generate {
+                result.thumbnail = metadata.thumbnail.clone();
+            }
+        }
+        result
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn image_inspection_runs_on_both_send_paths_and_preserves_fallbacks() {
+    let store = store().await;
+    for (previews, supplied, readable) in [
+        (false, false, true),
+        (true, false, true),
+        (false, true, true),
+        (false, false, false),
+    ] {
+        let sender = Arc::new(StubSender::ok("$image:localhost"));
+        let uploads = Arc::new(StubUploads::ok());
+        let mut generated = common::stub_thumbnail();
+        generated.width += 1;
+        let inspection = readable.then(|| axon_core::SendImageMetadata {
+            dimensions: Some((1200, 900)),
+            thumbnail: Some(generated.clone()),
+        });
+        let app = axon_api::router(
+            state_with_uploads(store.clone(), sender.clone(), uploads.clone())
+                .with_send_thumbnailer(Arc::new(ImageInspector(inspection))),
+        );
+        let account = Uuid::new_v4();
+        let upload = Uuid::new_v4();
+        let thumbnail = Uuid::new_v4();
+        uploads.set_kind(upload, axon_api::MediaUploadKindDto::Image);
+        let mut request = json!({"upload_id": upload, "info": {"width": 50, "height": 40}});
+        if previews {
+            request["url_previews"] = json!([]);
+        }
+        if supplied {
+            request["thumbnail_upload_id"] = json!(thumbnail);
+        }
+        let (status, body) = send(
+            &app,
+            "POST",
+            &format!("/v1/accounts/{account}/rooms/!room:localhost/send-media"),
+            Some(request),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let calls = sender.calls();
+        let attachment = match calls.as_slice() {
+            [Call::SendMedia { attachment, .. }] => attachment,
+            [Call::SendPreviews {
+                attachment: Some(attachment),
+                ..
+            }] => attachment,
+            _ => panic!("expected one media send: {calls:?}"),
+        };
+        let dimensions = if readable {
+            (Some(1200), Some(900))
+        } else {
+            (Some(50), Some(40))
+        };
+        assert_eq!((attachment.width, attachment.height), dimensions);
+        let expected = if supplied {
+            Some(common::stub_thumbnail())
+        } else {
+            readable.then_some(generated)
+        };
+        assert_eq!(attachment.thumbnail, expected);
+        assert!(uploads.releases().is_empty());
+    }
 }
 
 /// A malformed `info`, `txn_id` or a thumbnail that is the original is a

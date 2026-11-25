@@ -8,7 +8,7 @@ use std::future::Future;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use axon_core::{MediaAttachment, MediaSendKind};
+use axon_core::{MediaAttachment, MediaSend, MediaSendKind};
 use tokio::sync::watch;
 use uuid::Uuid;
 
@@ -195,6 +195,30 @@ pub(super) async fn claim_attachment(
         }
     }
     Ok(attachment)
+}
+
+/// Inspect only image sends. A supplied thumbnail takes priority, including
+/// when the client-thumbnail validation ran out of time.
+pub(super) fn inspect_image(
+    attachment: MediaAttachment,
+    thumbnailer: Option<std::sync::Arc<dyn crate::SendThumbnailer>>,
+    account_id: Uuid,
+    room_id: &str,
+    fields: &MediaFields,
+) -> MediaSend {
+    let mut send = MediaSend::from(attachment);
+    if let Some(thumbnailer) = thumbnailer.filter(|_| send.attachment.kind == MediaSendKind::Image)
+    {
+        let room_id = room_id.to_owned();
+        let upload_id = fields.upload_id;
+        let generate = fields.thumbnail_upload_id.is_none();
+        send.image = Some(Box::pin(async move {
+            thumbnailer
+                .inspect(account_id, &room_id, upload_id, generate)
+                .await
+        }));
+    }
+    send
 }
 
 /// The uploads one send has claimed, owned by the task that sends.

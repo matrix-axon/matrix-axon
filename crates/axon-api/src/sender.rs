@@ -61,7 +61,7 @@ pub trait MessageSender: Send + Sync {
         _account_id: Uuid,
         _room_id: &str,
         _message: axon_core::link_preview::PreviewSend<'_>,
-        _attachment: Option<MediaAttachment>,
+        _attachment: Option<axon_core::MediaSend>,
         _txn_id: Option<&str>,
     ) -> Result<String, SendError> {
         Err(SendError::Unavailable(
@@ -96,8 +96,8 @@ pub trait MessageSender: Send + Sync {
     /// Send a staged media attachment as the event its kind names (ADR 0142
     /// section 1), with the dimensions, duration and normalised thumbnail it
     /// carries (section 4). The attachment bytes are already claimed from the
-    /// staging service; the sender owns only the Matrix upload/send
-    /// operation, and uploads the thumbnail best-effort (section 6).
+    /// staging service; the sender inspects images
+    /// alongside the original upload and uploads the thumbnail best-effort.
     /// `caption`, when present, becomes the media event body, otherwise the
     /// filename is the body. `formatted`, when present, is the caption's
     /// rich-text rendering (validated at the handler, which also requires a
@@ -108,7 +108,7 @@ pub trait MessageSender: Send + Sync {
         &self,
         account_id: Uuid,
         room_id: &str,
-        attachment: MediaAttachment,
+        attachment: axon_core::MediaSend,
         caption: Option<&str>,
         formatted: Option<Formatted<'_>>,
         relation: Relation<'_>,

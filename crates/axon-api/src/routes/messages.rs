@@ -135,6 +135,7 @@ pub async fn send_message(
             room_id,
             req.into(),
             None,
+            None,
         )
         .await;
     }
@@ -158,10 +159,12 @@ pub async fn send_message(
 ///
 /// The send runs in a task of its own, which settles every upload it
 /// claimed even if the client disconnects: consumed when the event is sent,
-/// released when it fails. The send, from resolving the room to the event,
-/// has one budget (`media.upstream_upload_timeout_secs`, 60 s by default), as
-/// before thumbnails. A thumbnail adds at most 5 s to prepare and 10 s to
-/// upload, outside that budget; without one, a send answers within it.
+/// released when it fails. Room resolution, the original upload and the
+/// event send share `media.upstream_upload_timeout_secs` (60 s by default).
+/// For images, Axon probes dimensions and can generate a thumbnail while the
+/// original uploads. Preparation of a supplied thumbnail and inspection of
+/// an image original each have a 5 s budget. Thumbnail uploads are
+/// best-effort with their own 10 s budget.
 #[utoipa::path(
     post,
     path = "/v1/accounts/{account_id}/rooms/{room_id}/send-media",
@@ -186,6 +189,7 @@ pub async fn send_message(
 pub async fn send_media(
     State(sender): State<Arc<dyn MessageSender>>,
     State(uploads): State<Arc<dyn StagedUploadService>>,
+    State(thumbnailer): State<Option<Arc<dyn crate::SendThumbnailer>>>,
     Path((account_id, room_id)): Path<(Uuid, String)>,
     Json(req): Json<SendMediaRequest>,
 ) -> Result<ApiResponse<SendResultDto>, ApiError> {
@@ -204,6 +208,7 @@ pub async fn send_media(
                 room_id.clone(),
                 request,
                 txn,
+                thumbnailer,
             )
         })
         .await;
@@ -252,11 +257,18 @@ pub async fn send_media(
                     format: HTML_FORMAT,
                     body,
                 });
+                let send = media_send::inspect_image(
+                    attachment,
+                    thumbnailer,
+                    account_id,
+                    &room_id,
+                    &fields,
+                );
                 sender
                     .send_media(
                         account_id,
                         &room_id,
-                        attachment,
+                        send,
                         caption.as_deref(),
                         fmt,
                         relation,

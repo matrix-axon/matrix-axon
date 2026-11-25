@@ -2395,6 +2395,17 @@ impl StagedUploadService for StubUploads {
     }
 }
 
+async fn finish_media_inspection(send: axon_core::MediaSend) -> MediaAttachment {
+    let axon_core::MediaSend {
+        mut attachment,
+        image,
+    } = send;
+    if let Some(image) = image {
+        image.await.apply(&mut attachment);
+    }
+    attachment
+}
+
 #[async_trait]
 impl MessageSender for StubSender {
     async fn send_with_previews(
@@ -2402,12 +2413,16 @@ impl MessageSender for StubSender {
         account_id: Uuid,
         room_id: &str,
         message: axon_core::link_preview::PreviewSend<'_>,
-        attachment: Option<MediaAttachment>,
+        attachment: Option<axon_core::MediaSend>,
         txn_id: Option<&str>,
     ) -> Result<String, SendError> {
         if attachment.is_some() {
             self.txn_ids.lock().unwrap().push(txn_id.map(str::to_owned));
         }
+        let attachment = match attachment {
+            Some(send) => Some(finish_media_inspection(send).await),
+            None => None,
+        };
         if let Some(gate) = &self.preview_gate {
             gate.0.notify_one();
             gate.1.notified().await;
@@ -2499,7 +2514,7 @@ impl MessageSender for StubSender {
         &self,
         account_id: Uuid,
         room_id: &str,
-        attachment: MediaAttachment,
+        attachment: axon_core::MediaSend,
         caption: Option<&str>,
         formatted: Option<Formatted<'_>>,
         relation: Relation<'_>,
@@ -2510,6 +2525,7 @@ impl MessageSender for StubSender {
             gate.0.notify_one();
             gate.1.notified().await;
         }
+        let attachment = finish_media_inspection(attachment).await;
         self.calls.lock().unwrap().push(Call::SendMedia {
             account_id,
             room_id: room_id.to_owned(),

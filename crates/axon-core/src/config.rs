@@ -623,6 +623,10 @@ pub struct MediaConfig {
     /// adapter consumes it. Defaults to 60.
     #[serde(default = "default_media_upstream_upload_timeout_secs")]
     pub upstream_upload_timeout_secs: u64,
+    /// Generate thumbnails for staged image sends (ADR 0142). Image dimensions
+    /// are still probed when disabled.
+    #[serde(default = "default_media_send_thumbnails")]
+    pub send_thumbnails: bool,
     /// Maximum number of client uploads streamed to disk concurrently. Requests
     /// over the limit queue rather than allocating unbounded writers. Defaults
     /// to 4.
@@ -1165,6 +1169,10 @@ fn default_media_upstream_upload_timeout_secs() -> u64 {
     60
 }
 
+fn default_media_send_thumbnails() -> bool {
+    true
+}
+
 fn default_media_max_concurrent_uploads() -> usize {
     4
 }
@@ -1335,6 +1343,7 @@ impl Default for MediaConfig {
             max_upload_bytes: default_media_max_upload_bytes(),
             upload_request_timeout_secs: default_media_upload_request_timeout_secs(),
             upstream_upload_timeout_secs: default_media_upstream_upload_timeout_secs(),
+            send_thumbnails: default_media_send_thumbnails(),
             max_concurrent_uploads: default_media_max_concurrent_uploads(),
             staged_upload_ttl_secs: default_media_staged_upload_ttl_secs(),
         }

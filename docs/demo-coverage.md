@@ -177,6 +177,8 @@ shows it.
   and after the fix and prove nothing. Covering it honestly means adding a
   tagged photo, with a stripped sideways thumbnail, to the corpus, not writing
   a longer scene.
+  Axon now produces upright thumbnails for eligible image sends in both encrypted and unencrypted rooms.
+  A demo of generation needs to stage and send an EXIF-tagged image large enough to qualify.
 - **Typing indicators and read receipts, and a reaction badge updating live.**
   All need a second live client acting concurrently; the corpus is seeded history, not a running participant.
   The reaction case is worth distinguishing from the two rows above it:
