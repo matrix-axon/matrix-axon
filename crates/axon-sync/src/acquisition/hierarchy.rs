@@ -207,7 +207,7 @@ fn parse_page(
         HierarchyDepth::Direct => rooms.len(),
         HierarchyDepth::Nested => rooms.len().min(page_limit as usize),
     };
-    let excess = rooms.len() - accepted;
+    let over_limit = rooms.len() > accepted;
     let next_batch = match body.get("next_batch") {
         None | Some(Value::Null) => None,
         Some(Value::String(token))
@@ -218,7 +218,7 @@ fn parse_page(
         Some(_) => return None,
     };
     let mut entries = Vec::with_capacity(accepted);
-    let mut unidentified = i32::try_from(excess).unwrap_or(i32::MAX);
+    let mut unidentified = 0_i32;
     for raw in &rooms[..accepted] {
         match parse_entry(raw) {
             Some(entry) if entry.room_id == space_id => {}
@@ -247,7 +247,7 @@ fn parse_page(
     Some(CrawlStep::Page {
         entries,
         unidentified,
-        over_limit: excess > 0,
+        over_limit,
         next_batch,
     })
 }

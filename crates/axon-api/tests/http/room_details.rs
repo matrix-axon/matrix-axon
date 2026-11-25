@@ -1180,6 +1180,22 @@ async fn nested_space_browse_only_queues_for_an_explicit_joined_root_request() {
             .0,
         StatusCode::NOT_FOUND
     );
+    f.store
+        .flag_room_upstream_suspect(f.account_id, &f.room_id, "test")
+        .await
+        .unwrap();
+    assert!(f
+        .store
+        .mark_room_upstream_gone(f.account_id, &f.room_id, "test")
+        .await
+        .unwrap());
+    assert_eq!(post(&browse).await.0, StatusCode::NOT_FOUND);
+    assert!(f.acquirer.take().is_empty());
+    f.store
+        .clear_room_upstream_reconcile(f.account_id, &f.room_id)
+        .await
+        .unwrap();
+
     let (status, body) = post(&browse).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["data"]["state"], "queued");

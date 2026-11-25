@@ -404,6 +404,9 @@ The web client's Room Information panel has ([ADR 0133](adr/0133-web-room-inform
 ### Nested space browsing
 
 To discover deeper paths, explicitly send `POST /v1/accounts/{account_id}/rooms/{room_id}/space/browse` for a joined space and read the paged cache with `GET` on the same path.
+The browse response reads cached links and crawl progress independently, so a page commit can appear in one before the other.
+Re-read from the first page on a `room_details.changed` frame for the root with source `space_browse`.
+If the frame arrives while a read is in flight, repeat the read after it finishes.
 The cache includes validated links through browsable unjoined spaces and expires six hours after the crawl starts.
 For a joined child, get its details from the synced room list.
 `GET /v1/accounts/{account_id}/spaces/discovered` provides the sidebar with cached pairs of joined spaces and joined descendants through unjoined intermediaries.

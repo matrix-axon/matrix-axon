@@ -8,7 +8,7 @@ use sqlx_core::transaction::Transaction;
 use sqlx_postgres::Postgres;
 use uuid::Uuid;
 
-use crate::room_detail_acquisition::JOINED_EPOCH;
+use crate::room_detail_acquisition::joined_epoch_sql;
 use crate::space_discovery::{joined_child, DiscoveredEntry, DiscoveredRow};
 use crate::space_graph::visible_joined_room;
 use crate::spaces::{synced_space, NORMALIZED_ORDER, SPACE_LINK_IS_CURRENT};
@@ -20,8 +20,13 @@ pub const SPACE_BROWSE_MAX_PAGE: i64 = 100;
 
 const EXPIRED_ROOTS_PER_SWEEP: i64 = 16;
 
-pub(crate) fn browse_root() -> String {
-    format!("NOT s.hidden_tombstoned AND {}", synced_space("s.room_id"))
+/// One eligibility query for reads, scheduling, and the page-commit fence.
+pub(crate) fn browse_root_epoch_sql(room_id: &str) -> String {
+    format!(
+        "{} AND NOT s.hidden_tombstoned AND {}",
+        joined_epoch_sql(room_id),
+        synced_space("s.room_id"),
+    )
 }
 
 #[derive(Debug)]
@@ -48,12 +53,11 @@ impl Store {
         account_id: Uuid,
         space_id: &str,
     ) -> Result<bool, StoreError> {
-        let row: Option<(i64,)> =
-            sqlx_core::query_as::query_as(&format!("{JOINED_EPOCH} AND {}", browse_root()))
-                .bind(account_id)
-                .bind(space_id)
-                .fetch_optional(&self.pool)
-                .await?;
+        let row: Option<(i64,)> = sqlx_core::query_as::query_as(&browse_root_epoch_sql("$2"))
+            .bind(account_id)
+            .bind(space_id)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(row.is_some())
     }
 
@@ -61,15 +65,15 @@ impl Store {
         tx: &mut Transaction<'_, Postgres>,
         account_id: Uuid,
         space_id: &str,
-    ) -> Result<(), StoreError> {
-        sqlx_core::query::query(
+    ) -> Result<bool, StoreError> {
+        let result = sqlx_core::query::query(
             "DELETE FROM space_browse_rooms WHERE account_id = $1 AND space_id = $2",
         )
         .bind(account_id)
         .bind(space_id)
         .execute(&mut **tx)
         .await?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
     }
 
     /// Clear one batch of expired candidate sets. The locked crawl row
@@ -251,16 +255,11 @@ fn roots(filter: &str) -> String {
         "WITH roots AS (
              SELECT c.space_id, c.started_at + {ttl_ms} AS fresh_until
              FROM space_browse_crawl c
-             JOIN room_summaries s ON s.account_id = c.account_id AND s.room_id = c.space_id
-             JOIN accounts ac ON ac.account_id = c.account_id
-             WHERE c.account_id = $1 AND ac.state = 'active' AND {filter}
+             WHERE c.account_id = $1 AND {filter}
                AND c.started_at > {now} - {ttl_ms} AND c.rooms_cached > 0
-               AND {eligible} AND {joined}
-               AND NOT EXISTS (SELECT 1 FROM room_upstream_reconcile r
-                   WHERE r.account_id = $1 AND r.room_id = c.space_id AND r.state = 'gone')
+               AND EXISTS ({eligible})
          )",
-        eligible = browse_root(),
-        joined = visible_joined_room("c.space_id"),
+        eligible = browse_root_epoch_sql("c.space_id"),
     )
 }
 

@@ -19,7 +19,8 @@ use sqlx_core::row::Row;
 use sqlx_postgres::{PgRow, Postgres};
 use uuid::Uuid;
 
-use crate::room_detail_acquisition::{backoff_ms, JOINED_EPOCH, NOW_MS};
+use crate::room_detail_acquisition::{backoff_ms, joined_epoch_sql, NOW_MS};
+use crate::space_browse::browse_root_epoch_sql;
 use crate::spaces::SPACE_LINK_IS_CURRENT;
 use crate::{Store, StoreError};
 
@@ -178,7 +179,7 @@ pub enum CrawlStep {
     /// A parsed page.
     Page {
         entries: Vec<DiscoveredEntry>,
-        /// Entries skipped whole, including any excess over the nested page limit.
+        /// Entries within the limit skipped because they lack a valid room ID.
         unidentified: i32,
         /// This nested page exceeded the requested room limit.
         over_limit: bool,
@@ -619,44 +620,34 @@ impl Store {
                 )
                 .await?;
             }
-            CrawlStep::Denied { failure, ttl_ms } => {
-                // Conclusive: no backoff growth, and no cursor to resume.
+            CrawlStep::Denied { ttl_ms, .. } | CrawlStep::Unsupported { ttl_ms } => {
+                // A conclusive answer ends the crawl until its retry window.
                 // Direct summaries keep their existing availability policy.
-                if limits.depth == HierarchyDepth::Nested {
-                    Self::clear_space_browse(&mut tx, account_id, space_id).await?;
-                    write.changed = true;
+                let (support, failure) = match step {
+                    CrawlStep::Denied { failure, .. } => ("supported", Some(*failure)),
+                    _ => ("unsupported", None),
+                };
+                let nested = limits.depth == HierarchyDepth::Nested;
+                if nested {
+                    write.changed = Self::clear_space_browse(&mut tx, account_id, space_id).await?;
                 }
                 sqlx_core::query::query(&format!(
                     "UPDATE {table} SET outcome = 'failed', cursor = NULL, \
-                         failure = $3, failures = 0, support = 'supported', \
+                         failure = $3, failures = 0, support = $4, \
                          rooms_cached = CASE WHEN $5 THEN 0 ELSE rooms_cached END, \
-                         expires_at = $4, next_attempt_at = $4 \
+                         expires_at = $6, next_attempt_at = $6 \
                      WHERE account_id = $1 AND space_id = $2"
                 ))
                 .bind(account_id)
                 .bind(space_id)
-                .bind(*failure)
-                .bind(now.saturating_add(*ttl_ms))
-                .bind(limits.depth == HierarchyDepth::Nested)
-                .execute(&mut *tx)
-                .await?;
-                write.outcome = "failed";
-                write.failure = Some(failure);
-                write.conclusive = true;
-            }
-            CrawlStep::Unsupported { ttl_ms } => {
-                sqlx_core::query::query(&format!(
-                    "UPDATE {table} SET outcome = 'failed', cursor = NULL, \
-                         failure = NULL, failures = 0, support = 'unsupported', \
-                         expires_at = $3, next_attempt_at = $3 \
-                     WHERE account_id = $1 AND space_id = $2"
-                ))
-                .bind(account_id)
-                .bind(space_id)
+                .bind(failure)
+                .bind(support)
+                .bind(nested)
                 .bind(now.saturating_add(*ttl_ms))
                 .execute(&mut *tx)
                 .await?;
                 write.outcome = "failed";
+                write.failure = failure;
                 write.conclusive = true;
             }
             CrawlStep::Failure {
@@ -696,12 +687,12 @@ impl Store {
         epoch: i64,
         depth: HierarchyDepth,
     ) -> Result<bool, StoreError> {
-        let root = match depth {
-            HierarchyDepth::Direct => String::new(),
-            HierarchyDepth::Nested => format!(" AND {}", crate::space_browse::browse_root()),
+        let eligible = match depth {
+            HierarchyDepth::Direct => joined_epoch_sql("$2"),
+            HierarchyDepth::Nested => browse_root_epoch_sql("$2"),
         };
         let current: Option<(i64,)> =
-            sqlx_core::query_as::query_as(&format!("{JOINED_EPOCH}{root} FOR SHARE OF s"))
+            sqlx_core::query_as::query_as(&format!("{eligible} FOR SHARE OF s"))
                 .bind(account_id)
                 .bind(space_id)
                 .fetch_optional(&mut **tx)

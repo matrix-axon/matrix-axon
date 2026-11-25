@@ -278,7 +278,7 @@ The account's homeserver provides the access-filtered view documented by the [Ma
 
 A fresh generation can expose reachable paths as pages commit.
 Its cache expires six hours from the first page request.
-A restarted walk clears the previous generation, and a conclusive denial clears the joined root's cached branches immediately.
+A restarted walk clears the previous generation, and a conclusive denial or unsupported hierarchy response clears the joined root's cached branches immediately.
 Every read rechecks the current synced links and membership.
 Membership epochs fence in-flight requests, and profile changes for a still-joined account preserve committed browse results.
 A synced membership loss clears the root's crawl and its candidates, and a local purge removes the root's crawl.
@@ -286,6 +286,8 @@ A database-only sweep clears expired candidates in bounded batches at startup an
 
 `GET /v1/accounts/{account_id}/spaces/discovered` pages pairs of joined roots and joined descendants reached through at least one unjoined space.
 Clients can combine these pairs with `spaces/graph` and the synced room list to group joined rooms in the sidebar.
+The root browse GET samples its links and crawl status independently, so they can reflect different commits during an active crawl.
+After a browse invalidation during an in-flight read, repeat the read from the first page when it finishes.
 The pair's `expires_at` tells clients when to remove it locally.
 Clients re-read on reconnect or on an account invalidation from `room_details.changed` with source `space_browse` or `space_graph`.
 Opening or reconnecting the sidebar does not schedule upstream work.
