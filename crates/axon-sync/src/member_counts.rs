@@ -245,12 +245,12 @@ impl Worker {
             .collect::<Vec<_>>();
         let Some(page) = self
             .sweep
-            .page(store, account_id, cancel, "member_counts")
+            .page(store, account_id, cancel, "member_counts", false)
             .await
         else {
             return false;
         };
-        for room in page {
+        for (room, _) in page {
             match rooms.iter_mut().find(|(id, _, _)| id == &room) {
                 Some((_, steps, _)) => *steps = Steps::ALL,
                 None => rooms.push((room, Steps::ALL, 0)),

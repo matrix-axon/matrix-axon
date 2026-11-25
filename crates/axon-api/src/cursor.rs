@@ -10,7 +10,7 @@
 //! form is ASCII digits with at most a leading `-` — never a `.` — so
 //! `split_once('.')` always cleaves the two fields cleanly (negatives included).
 
-use axon_store::{SpaceHierarchyCursor, TimelineCursor};
+use axon_store::{SpaceGraphKey, SpaceHierarchyCursor, TimelineCursor};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -223,6 +223,49 @@ pub fn decode_hierarchy(
             room_id: wire.r,
         },
     )
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpaceGraphCursorWire {
+    a: Uuid,
+    r: String,
+    c: bool,
+    k: String,
+}
+
+pub fn encode_space_graph(account_id: Uuid, key: &SpaceGraphKey) -> String {
+    let wire = SpaceGraphCursorWire {
+        a: account_id,
+        r: key.room_id.clone(),
+        c: key.event_type == "m.space.child",
+        k: key.state_key.clone(),
+    };
+    URL_SAFE_NO_PAD.encode(serde_json::to_vec(&wire).expect("space graph cursor serializes"))
+}
+
+pub fn decode_space_graph(account_id: Uuid, cursor: &str) -> Option<SpaceGraphKey> {
+    if cursor.len() > MAX_HIERARCHY_ENCODED_LEN {
+        return None;
+    }
+    let bytes = URL_SAFE_NO_PAD.decode(cursor).ok()?;
+    let wire: SpaceGraphCursorWire = serde_json::from_slice(&bytes).ok()?;
+    let valid_room = |id: &str| {
+        id.starts_with('!') && id.len() <= MAX_HIERARCHY_ROOM_ID_BYTES && !id.contains('\0')
+    };
+    if wire.a != account_id || !valid_room(&wire.r) || !valid_room(&wire.k) {
+        return None;
+    }
+    Some(SpaceGraphKey {
+        room_id: wire.r,
+        event_type: if wire.c {
+            "m.space.child"
+        } else {
+            "m.space.parent"
+        }
+        .to_owned(),
+        state_key: wire.k,
+    })
 }
 
 #[cfg(test)]

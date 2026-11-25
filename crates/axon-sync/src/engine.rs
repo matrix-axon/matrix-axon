@@ -1424,11 +1424,16 @@ pub(crate) async fn persist_room_state_value(
         Err(err) => {
             tracing::warn!(account_id = %ctx.account_id, room_id = %room_id, event_type = event_type.as_str(), error = %err, "failed to persist room state");
         }
-        Ok(changed) => {
-            tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type = event_type.as_str(), state_key = state_key.as_str(), event_id = %event_id, evidence = ?evidence, changed, "persisted room state");
-            if changed && axon_core::room_details::is_metadata_state(&event_type, &state_key) {
-                ctx.room_details
-                    .mark(room_id.as_str(), RoomDetailSource::Metadata);
+        Ok(changes) => {
+            tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type = event_type.as_str(), state_key = state_key.as_str(), event_id = %event_id, evidence = ?evidence, changed = changes.changed, "persisted room state");
+            if changes.changed {
+                mark_room_state_changes(
+                    ctx,
+                    room_id,
+                    &event_type,
+                    &state_key,
+                    changes.space_member_changed,
+                );
             }
         }
     }
@@ -1442,6 +1447,32 @@ pub(crate) async fn persist_room_state_value(
 
     // Local leave/ban and its purge intent commit together in the store. The
     // supervised worker is notified immediately, keeping bulk cleanup off sync.
+}
+
+/// Invalidate projections after either state ingestion or redaction repair
+/// commits. For claims without a reciprocal link, only membership and power
+/// changes in the parent space affect verification.
+pub(crate) fn mark_room_state_changes(
+    ctx: &PersistContext,
+    room_id: &RoomId,
+    event_type: &str,
+    state_key: &str,
+    space_member_changed: bool,
+) {
+    if axon_core::room_details::is_metadata_state(event_type, state_key) {
+        ctx.room_details
+            .mark(room_id.as_str(), RoomDetailSource::Metadata);
+    }
+    let graph_change = match event_type {
+        "m.space.child" | "m.space.parent" => true,
+        "m.room.create" | "m.room.tombstone" | "m.room.power_levels" => state_key.is_empty(),
+        "m.room.member" => state_key == ctx.local_user_id.as_ref() || space_member_changed,
+        _ => false,
+    };
+    if graph_change {
+        ctx.room_details
+            .mark(room_id.as_str(), RoomDetailSource::SpaceGraph);
+    }
 }
 
 /// Event handler: per-room account data (fully-read markers, tags, …) → the

@@ -34,6 +34,7 @@ mod room_summary_discovery;
 mod rooms;
 mod search;
 mod space_discovery;
+mod space_graph;
 mod spaces;
 mod state;
 mod timeline_gaps;
@@ -93,13 +94,14 @@ pub use space_discovery::{
     CrawlBegin, CrawlLimits, CrawlPosition, CrawlStep, CrawlWrite, DiscoveredEntry, DiscoveredRow,
     SpaceCrawlRow, SpaceCrawlSnapshot,
 };
+pub use space_graph::{SpaceGraphKey, SpaceGraphLink, SpaceGraphPage, SPACE_GRAPH_MAX_PAGE};
 pub use spaces::{
     SpaceChildRow, SpaceHierarchyCursor, SpaceHierarchyPage, SpaceHierarchyRow, SpaceParentRow,
     SPACE_HIERARCHY_MAX_PAGE,
 };
 pub use state::{
-    AccountDataRow, AccountDataUpsert, RoomMetadataStateRow, RoomStateRedaction, RoomStateRow,
-    RoomStateUpsert, UnappliedStateRedaction,
+    AccountDataRow, AccountDataUpsert, RoomMetadataStateRow, RoomStateChanges, RoomStateRedaction,
+    RoomStateRow, RoomStateUpsert, UnappliedStateRedaction, STATE_REDACTION_PAGE_SIZE,
 };
 pub use timeline_gaps::{
     GapCheck, GapOrigin, GapPageLookup, GapTotals, HistoryGapCounts, LagMark, TimelineGap,

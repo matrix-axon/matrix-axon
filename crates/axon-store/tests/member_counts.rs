@@ -226,7 +226,7 @@ async fn member_counts_restart_transitions_and_account_isolation() {
         .await
         .unwrap();
     assert!(store
-        .state_reconciliation_rooms(account, "")
+        .state_reconciliation_rooms(account, "", false)
         .await
         .unwrap()
         .is_empty());

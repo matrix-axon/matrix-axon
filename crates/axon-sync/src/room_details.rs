@@ -44,11 +44,36 @@ struct Shared {
 #[derive(Default)]
 struct Pending {
     rooms: Rooms,
+    /// Every graph mark invalidates the same account read. Retain the first
+    /// affected room for the frame instead of publishing one per room.
+    space_graph_room: Option<String>,
     /// Counts marks, so the flusher can tell whether any arrived while it
     /// slept.
     marks: u64,
     /// The flusher has stopped; marks publish without coalescing.
     closed: bool,
+}
+
+impl Pending {
+    fn is_full(&self) -> bool {
+        let room_count = self.rooms.len();
+        room_count >= MAX_PENDING_ROOMS
+            || (room_count + 1 == MAX_PENDING_ROOMS
+                && self
+                    .space_graph_room
+                    .as_ref()
+                    .is_some_and(|room_id| !self.rooms.contains_key(room_id)))
+    }
+
+    fn take_rooms(&mut self) -> Rooms {
+        if let Some(room_id) = self.space_graph_room.take() {
+            self.rooms
+                .entry(room_id)
+                .or_default()
+                .insert(RoomDetailSource::SpaceGraph);
+        }
+        std::mem::take(&mut self.rooms)
+    }
 }
 
 impl std::fmt::Debug for RoomDetailsChanges {
@@ -77,14 +102,20 @@ impl RoomDetailsChanges {
             pending.marks = pending.marks.wrapping_add(1);
             // The flusher waits for the first pending mark only; later ones
             // are seen through `marks`, so they need no wakeup of their own.
-            let wake = pending.rooms.is_empty();
-            pending
-                .rooms
-                .entry(room_id.to_owned())
-                .or_default()
-                .insert(source);
-            let publish = pending.closed || pending.rooms.len() >= MAX_PENDING_ROOMS;
-            (wake, publish.then(|| std::mem::take(&mut pending.rooms)))
+            let wake = pending.rooms.is_empty() && pending.space_graph_room.is_none();
+            if source == RoomDetailSource::SpaceGraph {
+                pending
+                    .space_graph_room
+                    .get_or_insert_with(|| room_id.to_owned());
+            } else {
+                pending
+                    .rooms
+                    .entry(room_id.to_owned())
+                    .or_default()
+                    .insert(source);
+            }
+            let publish = pending.closed || pending.is_full();
+            (wake, publish.then(|| pending.take_rooms()))
         };
         match publish {
             Some(rooms) => self.publish(rooms),
@@ -107,7 +138,7 @@ impl RoomDetailsChanges {
     }
 
     fn flush(&self) {
-        let rooms = std::mem::take(&mut self.lock().rooms);
+        let rooms = self.lock().take_rooms();
         self.publish(rooms);
     }
 
@@ -116,7 +147,7 @@ impl RoomDetailsChanges {
         let rooms = {
             let mut pending = self.lock();
             pending.closed = true;
-            std::mem::take(&mut pending.rooms)
+            pending.take_rooms()
         };
         self.publish(rooms);
     }
@@ -125,7 +156,7 @@ impl RoomDetailsChanges {
     /// a producer without the flusher.
     #[cfg(test)]
     pub(crate) fn take_pending(&self) -> Rooms {
-        std::mem::take(&mut self.lock().rooms)
+        self.lock().take_rooms()
     }
 
     fn publish(&self, rooms: Rooms) {
@@ -181,7 +212,7 @@ pub(crate) async fn run(changes: RoomDetailsChanges, cancel: CancellationToken) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axon_core::RoomDetailSource::{MemberCounts, Metadata};
+    use axon_core::RoomDetailSource::{MemberCounts, Metadata, SpaceGraph};
 
     fn received(rx: &mut broadcast::Receiver<LiveFrame>) -> Vec<(String, Vec<RoomDetailSource>)> {
         let mut frames = Vec::new();
@@ -233,6 +264,24 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn space_graph_marks_coalesce_across_rooms() {
+        let (changes, mut rx, cancel, task) = start();
+        changes.mark("!first:x", SpaceGraph);
+        changes.mark("!first:x", Metadata);
+        for room in 0..MAX_PENDING_ROOMS {
+            changes.mark(&format!("!{room}:x"), SpaceGraph);
+        }
+        assert!(received(&mut rx).is_empty());
+        tokio::time::sleep(QUIET * 2).await;
+        assert_eq!(
+            received(&mut rx),
+            vec![("!first:x".to_owned(), vec![Metadata, SpaceGraph])]
+        );
+        cancel.cancel();
+        task.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn continuous_marks_still_publish_within_the_maximum_delay() {
         let (changes, mut rx, cancel, task) = start();
         let started = Instant::now();
@@ -257,6 +306,31 @@ mod tests {
             changes.mark(&format!("!{room}:x"), Metadata);
         }
         assert_eq!(received(&mut rx).len(), MAX_PENDING_ROOMS);
+        cancel.cancel();
+        task.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_graph_room_counts_toward_the_flush_limit_once() {
+        let (changes, mut rx, cancel, task) = start();
+        for room in 0..MAX_PENDING_ROOMS - 1 {
+            changes.mark(&format!("!{room}:x"), Metadata);
+        }
+        changes.mark("!0:x", SpaceGraph);
+        assert!(received(&mut rx).is_empty(), "an existing room counts once");
+        changes.mark("!extra:x", Metadata);
+        let frames = received(&mut rx);
+        assert_eq!(frames.len(), MAX_PENDING_ROOMS);
+        assert!(frames.contains(&("!0:x".to_owned(), vec![Metadata, SpaceGraph])));
+
+        for room in 0..MAX_PENDING_ROOMS - 1 {
+            changes.mark(&format!("!{room}:x"), Metadata);
+        }
+        assert!(received(&mut rx).is_empty());
+        changes.mark("!graph:x", SpaceGraph);
+        let frames = received(&mut rx);
+        assert_eq!(frames.len(), MAX_PENDING_ROOMS);
+        assert!(frames.contains(&("!graph:x".to_owned(), vec![SpaceGraph])));
         cancel.cancel();
         task.await.unwrap();
     }

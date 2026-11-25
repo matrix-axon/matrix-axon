@@ -1663,6 +1663,37 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/accounts/{account_id}/spaces/graph": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read joined space relationships
+         * @description Returns locally synced links between visible joined rooms for one account.
+         *     Combine all pages with the room list to find roots and descendants. Pages
+         *     follow state-tuple identity, so sort siblings after reading them by valid
+         *     order (absent last), origin timestamp, and child ID. Shared and cyclic edges
+         *     are returned as stored. Verified parent claims can inform breadcrumbs and
+         *     canonical-parent navigation. An unknown or inactive account yields an empty
+         *     page. The server never contacts the homeserver for this read.
+         *
+         *     A `room_details.changed` frame with source `space_graph` invalidates the
+         *     whole graph for its `account_id`. Use the account ID alone to route this
+         *     source. The frame's `room_id` names one of the affected rooms. Re-read
+         *     from the first page on invalidation and reconnect.
+         */
+        get: operations["space_graph"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/accounts/{account_id}/users/{user_id}/identity/accept": {
         parameters: {
             query?: never;
@@ -3568,6 +3599,14 @@ export interface components {
             data: {
                 /** @description The created Matrix event id. */
                 event_id: string;
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_SpaceGraphPageDto: {
+            data: {
+                links: components["schemas"]["SpaceGraphLinkDto"][];
+                /** @description Opaque continuation. Null on the last page. */
+                next_cursor?: string | null;
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -6958,6 +6997,26 @@ export interface components {
             state: components["schemas"]["RefreshState"];
             support: components["schemas"]["CrawlSupport"];
         };
+        SpaceGraphLinkDto: {
+            /** @description Whether this verified parent claim names a canonical parent. */
+            canonical: boolean;
+            child_room_id: string;
+            /** @description Valid Matrix sibling order, present only on advertised child links. */
+            order?: string | null;
+            /**
+             * Format: int64
+             * @description Origin timestamp of the state event in milliseconds.
+             */
+            origin_ts: number;
+            parent_room_id: string;
+            /** @description A link advertised by a space or a verified claim made in the child. */
+            source: components["schemas"]["SpaceLinkSource"];
+        };
+        SpaceGraphPageDto: {
+            links: components["schemas"]["SpaceGraphLinkDto"][];
+            /** @description Opaque continuation. Null on the last page. */
+            next_cursor?: string | null;
+        };
         /**
          * @description One child in a page of `GET …/rooms/{room_id}/space/hierarchy` (ADR 0128
          *     decision 1): every [`SpaceChildDto`] field, from local synced state, plus
@@ -7004,6 +7063,8 @@ export interface components {
              */
             total_children: number;
         };
+        /** @enum {string} */
+        SpaceLinkSource: "child" | "parent_claim";
         /**
          * @description One space-parent entry (`GET …/rooms/{room_id}/space/parents`, issue #404,
          *     ADR 0084) — the reverse lookup of [`SpaceChildDto`]: the spaces `room_id`
@@ -12568,6 +12629,61 @@ export interface operations {
                 headers: {
                     /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
                     "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    space_graph: {
+        parameters: {
+            query?: {
+                /** @description Page size (default 500, maximum 1,000). */
+                limit?: number;
+                /** @description Opaque continuation from this account's previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of joined space relationships */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_SpaceGraphPageDto"];
+                };
+            };
+            /** @description Malformed cursor or a cursor from another account */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing or invalid Axon bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal database failure */
+            500: {
+                headers: {
                     [name: string]: unknown;
                 };
                 content: {

@@ -41,19 +41,45 @@ pub(crate) const SPACE_LINK_IS_CURRENT: &str = r#"redacted IS DISTINCT FROM true
             AND content->'via'<>'[]'::jsonb
             AND NOT jsonb_path_exists(content->'via', '$[*] ? (@.type() != "string" || @ == "")')"#;
 
+/// Compute the sender and required power for an unreciprocated parent claim.
+pub(crate) const SPACE_PARENT_POWER: &str = r#"CROSS JOIN LATERAL (
+                SELECT COALESCE(levels.content#>ARRAY['users',member.state_key],
+                                levels.content->'users_default','0'::jsonb) AS sender_level,
+                       COALESCE(levels.content#>'{events,m.space.child}',
+                                levels.content->'state_default','50'::jsonb) AS required_level
+            ) power"#;
+
+/// Current membership and sufficient power verify an unreciprocated parent
+/// claim. Shared with pack ancestry.
+pub(crate) const SPACE_PARENT_AUTHORIZED: &str = r#"(member.content->>'membership'='join' AND (
+                        -- Without power levels the creator has power 100.
+                        (levels.event_id IS NULL AND
+                         COALESCE(creation.content->>'creator',creation.sender)=member.state_key)
+                        -- Room v12 creators have unbounded power.
+                        OR (creation.content->>'room_version'='12' AND
+                            (creation.sender=member.state_key OR creation.content->'additional_creators' ? member.state_key))
+                        OR (levels.event_id IS NOT NULL AND
+                            CASE WHEN power.sender_level::text ~ '^-?[0-9]{1,16}$'
+                                   AND power.required_level::text ~ '^-?[0-9]{1,16}$'
+                                 THEN abs(power.sender_level::text::numeric)<=9007199254740991
+                                  AND abs(power.required_level::text::numeric)<=9007199254740991
+                                  AND power.sender_level::text::numeric>=power.required_level::text::numeric
+                                 ELSE false END)
+                    ))"#;
+
 /// Normalized MSC1772 `order` of an `m.space.child` tuple aliased `sc`: the
 /// `content.order` string when it is at most 50 characters of printable ASCII
 /// (`0x20`–`0x7E`), and `NULL` otherwise. The spec treats a non-string or
 /// out-of-range `order` as absent, so it must sort with the absent group,
 /// not wherever its JSON text would land.
-const NORMALIZED_ORDER: &str = r#"CASE WHEN jsonb_typeof(sc.content->'order')='string'
+pub(crate) const NORMALIZED_ORDER: &str = r#"CASE WHEN jsonb_typeof(sc.content->'order')='string'
                     AND (sc.content->>'order') ~ '^[\x20-\x7E]{0,50}$'
                THEN sc.content->>'order' END"#;
 
 /// The Matrix spec's limit on a room id. A child "room id" longer than this
 /// is not a room any homeserver can serve, and the paged read leaves it out,
 /// so every row's id fits in a bounded cursor.
-const MAX_ROOM_ID_BYTES: usize = 255;
+pub(crate) const MAX_ROOM_ID_BYTES: usize = 255;
 
 /// Largest page [`Store::space_hierarchy_page`] serves. The API clamps its
 /// `limit` to this too; the store repeats the bound so no caller can turn
