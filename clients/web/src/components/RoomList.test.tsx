@@ -1243,6 +1243,32 @@ describe('RoomList keyboard shortcuts (ADR 0078)', () => {
       `/${ACCOUNT}/rooms/${encodeURIComponent('!lounge:hs')}`,
     )
   })
+
+  it('Enter in the name filter opens the top match when several rooms match', async () => {
+    const { services, findByText, getByLabelText } = renderPage()
+    await findByText('Ops')
+    const filter = getByLabelText('Filter by name') as HTMLInputElement
+    const before = services.composerFocus.value
+
+    fireEvent.keyDown(filter, { key: 'Enter' })
+
+    await waitFor(() => expect(services.composerFocus.value).toBe(before + 1))
+    expect(window.location.pathname).toMatch(/\/rooms\//)
+  })
+
+  it('a mouse click on a room row asks the new room composer for focus', async () => {
+    const { services, findByText } = renderPage()
+    const rowText = await findByText('Ops')
+    const row = rowText.closest<HTMLAnchorElement>('a.room-link')!
+    const before = services.composerFocus.value
+
+    fireEvent.click(row)
+
+    await waitFor(() => expect(services.composerFocus.value).toBe(before + 1))
+    expect(window.location.pathname).toBe(
+      `/${ACCOUNT}/rooms/${encodeURIComponent('!ops:hs')}`,
+    )
+  })
 })
 
 describe('RoomList account labels', () => {

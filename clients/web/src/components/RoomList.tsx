@@ -782,7 +782,9 @@ export function RoomList() {
       }
       focusComposer()
     } else if (event.key === 'Enter') {
-      if (event.target === filterInput.current && visible.length === 1) {
+      // Return in the filter opens the top match (the only one, when the query
+      // is narrow) and hands its composer the keyboard.
+      if (event.target === filterInput.current && visible.length > 0) {
         event.preventDefault()
         activateRoom(visible[0])
         return
@@ -1166,6 +1168,7 @@ export function RoomList() {
                     : undefined
                 }
                 onNavigate={navigateToRoom}
+                onPointerActivate={activateRoom}
               />
             )
           })}
@@ -1270,6 +1273,7 @@ function RoomRow({
   onDragKey,
   onMoved,
   onNavigate,
+  onPointerActivate,
 }: {
   room: RoomDto
   /** The account to attribute this row to, or `undefined` to omit it. */
@@ -1289,6 +1293,12 @@ function RoomRow({
   onMoved: (key: string) => void
   /** Navigate on touch taps, but leave touch scroll gestures to the browser. */
   onNavigate: (room: RoomDto, href: string) => void
+  /**
+   * A mouse click on the row: navigate, then hand the keyboard to the new
+   * room's composer. Touch taps keep `onNavigate`, which leaves focus alone so
+   * the soft keyboard does not open over a room the user only meant to read.
+   */
+  onPointerActivate: (room: RoomDto, href: string) => void
 }) {
   const { rooms, settings, favourites, activeRoom } = useServices()
   const key = roomKey(room)
@@ -1478,7 +1488,7 @@ function RoomRow({
           if (!hasModifier(click)) {
             click.preventDefault()
             click.stopPropagation()
-            onNavigate(room, href)
+            onPointerActivate(room, href)
             return
           }
           rooms.noteUnreadCounts(room.account_id, room.room_id, 0, 0)
