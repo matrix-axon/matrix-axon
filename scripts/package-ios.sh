@@ -347,6 +347,18 @@ echo "    url scheme:   $scheme"
 echo "    version:      $(plutil -extract CFBundleShortVersionString raw -o - "$shipped_plist" 2>/dev/null)"
 echo "    build number: $(plutil -extract CFBundleVersion raw -o - "$shipped_plist" 2>/dev/null)"
 problems=0
+# The app's minimum iOS is what the config says, not whichever SDK built it. The
+# generated project once declared nothing, so the app took the SDK's version (26.5
+# under Xcode 26, 27.2 under Xcode 27) and a build quietly stopped installing on
+# anything older. The share extension is not checked: it may be lower.
+expected_min=$(node "$web_dir/scripts/ios-minimum-version.mjs")
+shipped_min=$(plutil -extract MinimumOSVersion raw -o - "$shipped_plist" 2>/dev/null || echo "(none)")
+echo "    minimum iOS:  $shipped_min"
+if [ "$shipped_min" != "$expected_min" ]; then
+  echo "error: the .ipa declares a minimum iOS of $shipped_min, not the $expected_min that bundle.iOS.minimumSystemVersion asks for" >&2
+  echo "       the app target's deployment target is set in clients/web/scripts/configure-ios-sharing.mjs" >&2
+  problems=1
+fi
 if [ "$scheme" != "$expected_scheme" ]; then
   echo "error: the .ipa declares URL scheme '$scheme', not '$expected_scheme' — browser sign-in (Google, Microsoft) could not return to the app" >&2
   echo "       the merged Info.plist is $tauri_dir/gen/apple/axon_iOS/Info.plist; its source is Info.ios.plist" >&2

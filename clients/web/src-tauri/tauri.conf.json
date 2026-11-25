@@ -19,7 +19,7 @@
     "iOS": {
       "infoPlist": "Info.ios.plist",
       "developmentTeam": "4GT4UKXZ4V",
-      "minimumSystemVersion": "15.0"
+      "minimumSystemVersion": "26.0"
     },
     "targets": ["deb", "appimage", "nsis", "app", "dmg"],
     "icon": [

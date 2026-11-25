@@ -200,6 +200,46 @@ grep -q '^DEVELOPER_DIR=/Applications/Xcode.*\.app/Contents/Developer$' "$work/e
 out=$(run -- xcode --min-sdk 99)
 contains "$out" "rc=1" && contains "$out" "no installed Xcode has an iOS SDK of at least 99" || fail "xcode: too old an SDK is refused with the reason" "$out"
 
+# xcode-select -s changes the whole machine and needs sudo, so it is for a runner only.
+# These stubs stand in for `sudo` and `xcode-select`, so a test never touches the real
+# selection. Stub `sudo` records what it was asked and, unless told to fail, remembers
+# the directory as the selection; stub `xcode-select -p` reports the selection, or a
+# different one when told to lie.
+stubs="$work/xcode-stubs"
+mkdir -p "$stubs"
+cat >"$stubs/sudo" <<'STUB'
+#!/bin/sh
+echo "$*" >>"$STUB_STATE/sudo.log"
+[ -z "${STUB_SUDO_FAILS:-}" ] || exit 1
+for last; do :; done
+echo "$last" >"$STUB_STATE/selected"
+STUB
+cat >"$stubs/xcode-select" <<'STUB'
+#!/bin/sh
+[ -z "${STUB_SELECT_LIES:-}" ] || { echo /Applications/Xcode_elsewhere.app/Contents/Developer; exit 0; }
+cat "$STUB_STATE/selected" 2>/dev/null || echo "/Applications/Xcode_default.app/Contents/Developer"
+STUB
+chmod +x "$stubs/sudo" "$stubs/xcode-select"
+stub_path="$stubs:$PATH"
+
+rm -rf "$work/xs" && mkdir -p "$work/xs"
+out=$(run PATH="$stub_path" STUB_STATE="$work/xs" -- xcode --min-sdk 1)
+contains "$out" "rc=0" && [ ! -e "$work/xs/sudo.log" ] || fail "xcode: off a runner, the system-wide selection is left alone" "$out" "$(cat "$work/xs/sudo.log" 2>/dev/null)"
+
+rm -rf "$work/xs" && mkdir -p "$work/xs"
+out=$(run PATH="$stub_path" STUB_STATE="$work/xs" GITHUB_ACTIONS=true GITHUB_ENV="$work/env" -- xcode --min-sdk 1)
+contains "$out" "rc=0" && grep -q '^xcode-select -s /Applications/Xcode.*\.app/Contents/Developer$' "$work/xs/sudo.log" 2>/dev/null \
+  || fail "xcode: on a runner, the Xcode it chose is selected system-wide" "$out" "$(cat "$work/xs/sudo.log" 2>/dev/null)"
+contains "$out" "xcode-select reports: /Applications/Xcode" || fail "xcode: it says which Xcode the system now selects" "$out"
+
+rm -rf "$work/xs" && mkdir -p "$work/xs"
+out=$(run PATH="$stub_path" STUB_STATE="$work/xs" STUB_SUDO_FAILS=1 GITHUB_ACTIONS=true GITHUB_ENV="$work/env" -- xcode --min-sdk 1)
+contains "$out" "rc=1" && contains "$out" "could not select" || fail "xcode: a refused xcode-select fails the step" "$out"
+
+rm -rf "$work/xs" && mkdir -p "$work/xs"
+out=$(run PATH="$stub_path" STUB_STATE="$work/xs" STUB_SELECT_LIES=1 GITHUB_ACTIONS=true GITHUB_ENV="$work/env" -- xcode --min-sdk 1)
+contains "$out" "rc=1" && contains "$out" "but it reports" || fail "xcode: a selection that did not take fails the step" "$out"
+
 # --- keychain ----------------------------------------------------------------
 
 mkdir -p "$work/kc1"

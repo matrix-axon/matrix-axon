@@ -48,6 +48,13 @@ on:
         description: "CFBundleVersion, or 'auto' for one more than App Store Connect has on that platform"
         type: string
         default: auto
+      runner:
+        description: "Runner image, which fixes the Xcode. Keep macos-26 for a build to ship; xcode-27 is for testing it"
+        type: choice
+        options:
+          - macos-26
+          - xcode-27
+        default: macos-26
 
 permissions:
   contents: read
@@ -64,10 +71,19 @@ jobs:
   ios:
     name: Build for iOS (App Store)
     if: ${{ inputs.platform == 'ios' || inputs.platform == 'both' }}
-    # macOS 26 for its Xcode 26 and iOS 26 SDK: App Store Connect rejects uploads
-    # made with an older one, after the build and the upload have succeeded. The
-    # Xcode step below checks it rather than trusting the image.
-    runs-on: macos-26
+    # Xcode 26 by default, and Xcode 27 through the `runner` input. Both build the same
+    # app: it declares the minimum iOS that bundle.iOS.minimumSystemVersion says (26.0)
+    # whichever SDK builds it, which scripts/package-ios.sh checks of every .ipa, and the
+    # iOS launch check (ios-launch-check.yml) launches the Xcode 27 build on iOS 27.2 and
+    # 26.0 and the Xcode 26 build on 26.5. A first Xcode 27 build declared a minimum of
+    # 27.2, because the app target named none and took the SDK's; that is fixed. What
+    # ships stays on 26 until the team chooses to move it, and that is now a choice, not a
+    # known problem. Any Xcode with the iOS 26 SDK or newer is accepted:
+    # App Store Connect rejects uploads made with an older one, after the build and
+    # the upload have succeeded, and the Xcode step below checks it rather than
+    # trusting the image. The llvm-tools step below is what Xcode 27 needs and is
+    # harmless on 26.
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 60
     env:
       BUILD_NUMBER: ${{ inputs.build_number }}
@@ -110,7 +126,7 @@ jobs:
           if [ "$NEED_ASC" = "yes" ]; then args+=(--asc); fi
           scripts/ci/store-credentials.sh check-secrets ios ${args[@]+"${args[@]}"}
 
-      - name: Select an Xcode with the iOS 26 SDK
+      - name: Select an Xcode with the iOS 26 SDK, system-wide as well
         run: scripts/ci/store-credentials.sh xcode --min-sdk 26
 
       - name: Install Rust toolchain
@@ -124,6 +140,23 @@ jobs:
         run: |
           rustup target add aarch64-apple-ios
           rustup target list --installed
+
+      # Xcode 27's SwiftPM internalizes the `@_cdecl` exports of a static Swift
+      # library, so the Rust link fails with `_init_plugin_*`, `_register_plugin` and
+      # the like undefined. swift-rs puts them back with rustup's llvm-objcopy, and
+      # only warns ("llvm-objcopy not found") when it is missing, which is how the
+      # first Xcode 27 run got as far as the linker. Xcode 26 keeps the symbols global
+      # and never reaches for it, so this is harmless there.
+      #
+      # Added from the repository root, not through the toolchain action's
+      # `components:`: rust-toolchain.toml overrides the action's `stable` with the
+      # pinned toolchain, and the component has to be on the one that compiles.
+      - name: Add llvm-tools, which swift-rs needs on Xcode 27
+        run: |
+          rustup component add llvm-tools
+          objcopy="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-objcopy"
+          test -x "$objcopy" || { echo "::error::$objcopy is missing after adding llvm-tools"; exit 1; }
+          echo "using $objcopy for $(rustc --version)"
 
       - uses: pnpm/action-setup@v6
         with:
@@ -276,7 +309,7 @@ jobs:
   macos:
     name: Build for the Mac App Store
     if: ${{ inputs.platform == 'macos' || inputs.platform == 'both' }}
-    runs-on: macos-26
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 90
     env:
       BUILD_NUMBER: ${{ inputs.build_number }}
@@ -318,6 +351,12 @@ jobs:
           args=()
           if [ "$NEED_ASC" = "yes" ]; then args+=(--asc); fi
           scripts/ci/store-credentials.sh check-secrets macos ${args[@]+"${args[@]}"}
+
+      # The same Xcode as the iOS job, chosen the same way, rather than whichever the
+      # runner image defaults to. The check is on the iOS SDK, which matches the macOS
+      # SDK's major version in every Xcode release.
+      - name: Select an Xcode with the 26 SDKs
+        run: scripts/ci/store-credentials.sh xcode --min-sdk 26
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

@@ -164,6 +164,9 @@ See the [TUI guide](../clients/tui/README.md) for everything else.
 
 Install an older build [directly from the App Store](https://apps.apple.com/us/app/matrix-axon/id6813675186), or get a recent TestFlight beta build by posting in [#axon-developer:bostoncoop.net](https://matrix.to/#/%23axon-developer%3Abostoncoop.net).
 
+Current builds need iOS 26.0 or later.
+The minimum is `bundle.iOS.minimumSystemVersion` in `clients/web/src-tauri/tauri.conf.json`, and the iOS launch check launches the app on that iOS.
+
 ### Android
 
 Download the [Android build](https://github.com/matrix-axon/matrix-axon/releases/latest/download/app-universal-release-signed.apk).

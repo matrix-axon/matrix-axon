@@ -1,0 +1,193 @@
+# Builds the iOS app for the simulator and launches it, to find out whether a build
+# made with a given Xcode starts on the iOS that Xcode ships.
+#
+# Why it exists: iOS 27 stops an app that does not adopt the scene lifecycle at launch,
+# and the first Xcode 27 build of the real app declared no scene manifest. Nothing else
+# runs the real app in CI (ios-sharing runs a test host, not Axon), and the Mac that
+# builds it for the team cannot run Xcode 27. See scripts/ci/ios-launch-check.sh.
+#
+# It takes about as long as the store build and is not a gate. It runs by hand, and on a
+# pull request that changes this workflow, its script or the minimum iOS: once on each
+# runner so the newer Xcode has an older one to be compared with, and once more with the
+# newer Xcode's build launched on the oldest iOS the app claims to support
+# (bundle.iOS.minimumSystemVersion), which is what keeping that claim honest needs. That
+# iOS is read from the configuration, tauri.ios.conf.json overriding tauri.conf.json,
+# by the first job: it is not written here, so lowering the minimum moves the launch
+# test with it, and a change to either file runs the check.
+# (GitHub dispatches only workflows that exist on the default branch, so the pull
+# request is how a new one first runs.) It needs no signing material: the simulator
+# build is unsigned.
+
+name: iOS launch check
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner image, which fixes the Xcode and the iOS simulator it ships"
+        type: choice
+        options:
+          - xcode-27
+          - macos-26
+        default: xcode-27
+      ios:
+        description: "iOS to launch on, such as 26.0 (downloaded if not installed); empty for the SDK's own"
+        type: string
+        default: ""
+  pull_request:
+    paths:
+      - scripts/ci/ios-launch-check.sh
+      - .github/workflows/ios-launch-check.yml
+      - scripts/ci/test-ios-launch-check.sh
+      - clients/web/scripts/ios-minimum-version.mjs
+      - clients/web/scripts/is-entry-point.mjs
+      - clients/web/scripts/sharing-simulator-device.mjs
+      - clients/web/scripts/configure-ios-sharing.mjs
+      - clients/web/src-tauri/tauri.conf.json
+      - clients/web/src-tauri/tauri.ios.conf.json
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-launch-check-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The minimum iOS the app is configured for, which the oldest-runtime leg launches on. It
+  # is read from the checked-out configuration, so the matrix cannot go on testing 26.0
+  # after the minimum has been lowered to something else.
+  plan:
+    name: Read the minimum iOS
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      floor: ${{ steps.floor.outputs.floor }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      # Fails on a missing or malformed value, which fails the run before anything is built.
+      - name: Read bundle.iOS.minimumSystemVersion
+        id: floor
+        run: echo "floor=$(node clients/web/scripts/ios-minimum-version.mjs)" >> "$GITHUB_OUTPUT"
+
+  launch:
+    name: Build and launch the app in the iOS simulator (${{ matrix.runner }}${{ matrix.ios && format(', on iOS {0}', matrix.ios) || '' }})
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include: >-
+          ${{ github.event_name == 'workflow_dispatch'
+          && fromJson(format('[{{"runner":"{0}","ios":"{1}"}}]', inputs.runner, inputs.ios))
+          || fromJson(format('[{{"runner":"xcode-27","ios":""}},{{"runner":"macos-26","ios":""}},{{"runner":"xcode-27","ios":"{0}"}}]', needs.plan.outputs.floor)) }}
+    runs-on: ${{ matrix.runner }}
+    # The build is about 25 minutes; downloading an older simulator runtime adds more.
+    timeout-minutes: 80
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Keep temporary files under the runner's temp directory
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      - name: check-environment
+        uses: ./.github/actions/check-environment
+
+      - name: Check the script parses under this runner's bash
+        run: scripts/ci/check-bash-syntax.sh scripts/ci/ios-launch-check.sh scripts/ci/test-ios-launch-check.sh
+
+      # Seconds, and no simulator: that gathering evidence cannot end the script and that
+      # it removes only the simulator it made. See the test for the cases.
+      - name: Test the script's cleanup and diagnostics
+        run: scripts/ci/test-ios-launch-check.sh
+
+      # One Xcode for every process, as in the store build: the Tauri build starts its
+      # own xcodebuild, which ignores DEVELOPER_DIR.
+      - name: Select an Xcode with the iOS 26 SDK, system-wide as well
+        run: scripts/ci/store-credentials.sh xcode --min-sdk 26
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim
+
+      # See apple-store-build.yml: the toolchain action's `targets:` has been seen to
+      # leave a target out, and rust-toolchain.toml makes the pinned toolchain, not
+      # `stable`, the one that compiles.
+      - name: Ensure the simulator target is present
+        run: |
+          rustup target add aarch64-apple-ios-sim
+          rustup target list --installed
+
+      # swift-rs needs it on Xcode 27; see apple-store-build.yml.
+      - name: Add llvm-tools, which swift-rs needs on Xcode 27
+        run: |
+          rustup component add llvm-tools
+          objcopy="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-objcopy"
+          test -x "$objcopy" || { echo "::error::$objcopy is missing after adding llvm-tools"; exit 1; }
+          echo "using $objcopy for $(rustc --version)"
+
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: clients/web/package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: clients/web/pnpm-lock.yaml
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            clients/web/src-tauri/target
+          key: ios-launch-cargo-${{ matrix.runner }}-${{ hashFiles('clients/web/src-tauri/Cargo.lock') }}
+          restore-keys: ios-launch-cargo-${{ matrix.runner }}-
+
+      - name: Install web dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: clients/web
+
+      # See apple-store-build.yml: the Xcode build phase runs pnpm in a scrubbed
+      # environment, where its dependency check judges the install stale and aborts.
+      - name: Stop pnpm re-checking dependencies inside the Xcode build phase
+        run: |
+          printf '\nverifyDepsBeforeRun: false\n' >> pnpm-workspace.yaml
+        working-directory: clients/web
+
+      - name: Install the iOS build tooling
+        run: brew install xcodegen cocoapods libimobiledevice
+
+      - name: Pin the build id to the commit
+        run: echo "VITE_AXON_WEB_VERSION=${VITE_AXON_WEB_VERSION:-$(git rev-parse --short=12 HEAD)}" >> "$GITHUB_ENV"
+
+      # Fails if the app is not running after it settles, or wrote a crash report. The
+      # facts about the built app (minimum iOS, SDK, scene manifest) go in the summary
+      # whichever way it ends.
+      - name: Build, install and launch the app
+        env:
+          AXON_LAUNCH_DIAGNOSTICS: ${{ runner.temp }}/ios-launch-diagnostics
+          LAUNCH_CHECK_IOS: ${{ matrix.ios }}
+        run: scripts/ci/ios-launch-check.sh
+
+      - name: Keep the launch results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-launch-check-${{ matrix.runner }}${{ matrix.ios && format('-ios{0}', matrix.ios) || '' }}
+          path: ${{ runner.temp }}/ios-launch-diagnostics
+          if-no-files-found: ignore
+          retention-days: 7
