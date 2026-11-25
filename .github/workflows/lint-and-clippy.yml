@@ -66,9 +66,9 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.x"
-          # Without this, `pip install pre-commit` re-resolves and re-downloads
-          # from PyPI on every run of a job that has no path filter.
-          cache: pip
+          # Hosted runners need a restored pip cache; the self-hosted runner
+          # retains its own cache between jobs.
+          cache: ${{ runner.environment != 'self-hosted' && 'pip' || '' }}
           # The repo has no requirements.txt or pyproject.toml, and `cache: pip`
           # fails outright ("No file matched to ...") rather than degrading when
           # it finds none. Any tracked file serves as the cache key; this is the
@@ -76,12 +76,12 @@ jobs:
           cache-dependency-path: .pre-commit-config.yaml
 
       - name: Cache pre-commit environments
+        if: runner.environment != 'self-hosted'
         uses: actions/cache@v6
         with:
           path: ~/.cache/pre-commit
-          # runner.environment keeps the self-hosted runner's environments, built
-          # against its own Python and system libraries, apart from the hosted ones
-          # (ADR 0141, decision 6).
+          # Environments depend on the machine's libraries (ADR 0141, decision 6).
+          # Keep hosted environments separate from older self-hosted caches.
           key: pre-commit-${{ runner.environment }}-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
 
       - name: Install pre-commit
@@ -163,18 +163,26 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # Keep self-hosted artifacts outside the checkout, which checkout cleans.
+      # RUNNER_TEMP is inside the runner's writable _work directory, but is
+      # itself cleaned between jobs; its sibling persists on the runner's disk.
+      - name: Use persistent self-hosted Cargo target
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=$(dirname "$RUNNER_TEMP")/axon-lint-target" >> "$GITHUB_ENV"
+
       - name: Cache Cargo registry and build
-        if: steps.rust-changed.outputs.changed == 'true'
+        if: steps.rust-changed.outputs.changed == 'true' && runner.environment != 'self-hosted'
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          # A target/ built against the self-hosted machine's system libraries must
-          # not be restored on ubuntu-latest, or the other way round (ADR 0141,
-          # decision 6).
-          key: cargo-${{ runner.environment }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          # System libraries differ across runners (ADR 0141, decision 6).
+          # Keep hosted artifacts separate from any older self-hosted cache.
+          # Update this list when another Cargo workspace adds a lockfile.
+          key: cargo-${{ runner.environment }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'clients/web/src-tauri/Cargo.lock') }}
           restore-keys: cargo-${{ runner.environment }}-${{ runner.os }}-
 
       # After the toolchain: the script asks cargo for the workspace version.
