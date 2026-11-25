@@ -15,13 +15,14 @@ final class PreviewConnectionRaceTests: XCTestCase {
     // The same serial queue as the production race owns these observations.
     private var starts: [Int] = []
     private var stops: [Int] = []
+    private var pending: [Int: (Result<Void, Error>) -> Void] = [:]
     init(_ behaviors: [Behavior]) { self.behaviors = behaviors }
     func race(delay: TimeInterval = 0.25) -> PreviewConnectionRace<Int> {
       PreviewConnectionRace(Array(behaviors.indices), queue: queue, delay: delay) {
         index, queue, complete in
         self.starts.append(index)
         switch self.behaviors[index] {
-        case .hanging: break
+        case .hanging: self.pending[index] = complete
         case .ready(let delay):
           queue.asyncAfter(deadline: .now() + delay) { complete(.success(())) }
         case .failure(let delay):
@@ -33,6 +34,8 @@ final class PreviewConnectionRaceTests: XCTestCase {
         self.stops.append($0)
       }
     }
+    /// Reports a hanging attempt as ready, as a connection that answers after the race is over.
+    func finishLate(_ index: Int) { queue.sync { pending[index]?(.success(())) } }
     var started: [Int] { queue.sync { starts } }
     var stopped: [Int] { queue.sync { stops } }
   }
@@ -79,12 +82,13 @@ final class PreviewConnectionRaceTests: XCTestCase {
   }
 
   func testLateReadyCannotReplaceWinnerOrRestartWork() throws {
-    let probe = Probe([.ready(0.08), .ready(0)])
+    // Attempt 0 stays hanging until the winner is chosen, then reports ready. It used
+    // to be ready on a timer 80 ms in, which beat attempt 1's 10 ms fallback to the
+    // queue whenever the queue stalled for longer than the 70 ms between them.
+    let probe = Probe([.hanging, .ready(0)])
     let race = probe.race(delay: 0.01)
     XCTAssertEqual(try race.connect(deadline: .now() + 1, cancellation: ShareCancellation()), 1)
-    let settled = expectation(description: "Late ready callback processed")
-    probe.queue.asyncAfter(deadline: .now() + 0.12) { settled.fulfill() }
-    wait(for: [settled], timeout: 1)
+    probe.finishLate(0)
     XCTAssertEqual(probe.started, [0, 1])
     XCTAssertEqual(probe.stopped, [0])
   }

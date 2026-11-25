@@ -8,7 +8,6 @@ import UniformTypeIdentifiers
 /// Simulator-only sender; no Keychain, App Group, server, or account access.
 @main
 final class SourceApp: UIResponder, UIApplicationDelegate {
-  var window: UIWindow?
   func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]?
@@ -17,11 +16,25 @@ final class SourceApp: UIResponder, UIApplicationDelegate {
     // waited 60 seconds for a missing animation-complete notification after
     // dismissing the caption keyboard, although later queries and typing worked.
     UIView.setAnimationsEnabled(false)
-    let window = UIWindow(frame: UIScreen.main.bounds)
+    return true
+  }
+}
+
+/// The host's only scene. iOS 27 stops an app that does not adopt the scene
+/// lifecycle at launch (a SIGTRAP in UIKit's no-scene-lifecycle check), so the
+/// window is made here, and the manifest naming this class is declared by the
+/// ShareSource target in test-sharing-simulator.mjs.
+final class SourceSceneDelegate: UIResponder, UIWindowSceneDelegate {
+  var window: UIWindow?
+  func scene(
+    _ scene: UIScene, willConnectTo session: UISceneSession,
+    options connectionOptions: UIScene.ConnectionOptions
+  ) {
+    guard let windowScene = scene as? UIWindowScene else { return }
+    let window = UIWindow(windowScene: windowScene)
     window.rootViewController = SourceController()
     window.makeKeyAndVisible()
     self.window = window
-    return true
   }
 }
 

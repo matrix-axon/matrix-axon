@@ -4,12 +4,39 @@ import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { collectDiagnostics } from './sharing-diagnostics.mjs'
+import {
+  createStandardPhone,
+  pickPhone,
+  rankDevice,
+} from './sharing-simulator-device.mjs'
+
 // Run the real shared-module XCTest suite under iOS, without installing or
 // changing Axon itself. Signing and physical Keychain acceptance stay separate.
 const source = fileURLToPath(
   new URL('../src-tauri/incoming-share/', import.meta.url),
 )
 const output = mkdtempSync(join(tmpdir(), 'axon-sharing-simulator-'))
+const startedAt = Date.now()
+// Where to keep the result bundles and crash reports of a failed run. CI sets it
+// and uploads what is there; locally it is unset and nothing is copied.
+const diagnostics = process.env.AXON_SHARING_DIAGNOSTICS
+const keepDiagnostics = () => {
+  if (!diagnostics) return
+  try {
+    const kept = collectDiagnostics({
+      output,
+      destination: diagnostics,
+      since: startedAt,
+    })
+    console.log(`Kept ${kept.length} diagnostic file(s) in ${diagnostics}.`)
+  } catch (error) {
+    // The failure being reported is the test's, not this.
+    console.warn(
+      `::warning::could not keep the simulator diagnostics: ${error.message}`,
+    )
+  }
+}
 // Unique identities also prevent an installed XCTest runner from reusing an
 // older test bundle when its version has not changed between local runs.
 const hostId = `org.matrixaxon.sharingtest.x${basename(output).replaceAll('-', '').toLowerCase()}`
@@ -43,16 +70,59 @@ const matching = phones.filter(
     device.runtime.split('.iOS-')[1]?.split('-').slice(0, 2).join('.') ===
     sdk.split('.').slice(0, 2).join('.'),
 )
-const device = requested
+let device = requested
   ? devices.find((device) => device.udid === requested)
-  : (matching.find((device) => device.state === 'Booted') ??
-    matching[0] ??
-    phones.find((device) => device.state === 'Booted') ??
-    phones[0])
+  : (pickPhone(matching) ?? pickPhone(phones))
+console.log(
+  `iPhone simulators on SDK ${sdk}: ${matching.map((device) => device.name).join(', ') || '(none)'}`,
+)
 if (device === undefined)
   throw new Error(
     'No available iPhone simulator. Install an iOS runtime in Xcode; optionally set AXON_SHARING_SIMULATOR to its UDID.',
   )
+// The Xcode 27 runtime ships only "iPhone Duo", a screen these tests were not made for.
+// When nothing standard is installed, make a standard one from the runtime's supported
+// device types, and remove it afterwards; if that cannot be done the Duo is used.
+let created
+if (!requested && rankDevice(device.name) >= 3) {
+  created = createStandardPhone({
+    runtime: device.runtime,
+    exec: (args) =>
+      execFileSync('xcrun', ['simctl', ...args], {
+        encoding: 'utf8',
+        timeout: 60_000,
+      }),
+  })
+  if (created) {
+    console.log(
+      `Created ${created.name} (${created.udid}) instead of ${device.name}.`,
+    )
+    device = created
+    // Removed however the script ends, not only when the test run below finishes: a
+    // throw while booting it or generating the project, before that try, would leave a
+    // simulator behind on every such failure. An 'exit' listener runs on a normal end,
+    // on process.exit and on an uncaught exception, and Ctrl-C and TERM are turned into
+    // exits so that they run it too.
+    const madeUdid = created.udid
+    process.once('exit', () => {
+      for (const action of ['shutdown', 'delete']) {
+        try {
+          execFileSync('xcrun', ['simctl', action, madeUdid], {
+            stdio: 'ignore',
+            timeout: 60_000,
+          })
+        } catch {
+          /* Only the simulator this made is ever removed, and a failure to is not news. */
+        }
+      }
+    })
+    for (const [signal, code] of [
+      ['SIGINT', 130],
+      ['SIGTERM', 143],
+    ])
+      process.once(signal, () => process.exit(code))
+  }
+}
 console.log(
   `Simulator SDK ${sdk}; selected ${device.name} (${device.runtime}).`,
 )
@@ -100,6 +170,25 @@ const project = {
     ShareSource: {
       type: 'application',
       platform: 'iOS',
+      // iOS 27 stops an app that has no scene manifest at launch, so the host
+      // declares one; Source.swift's SourceSceneDelegate makes its window.
+      info: {
+        path: 'ShareSource.plist',
+        properties: {
+          UIApplicationSceneManifest: {
+            UIApplicationSupportsMultipleScenes: false,
+            UISceneConfigurations: {
+              UIWindowSceneSessionRoleApplication: [
+                {
+                  UISceneConfigurationName: 'Default',
+                  UISceneDelegateClassName:
+                    '$(PRODUCT_MODULE_NAME).SourceSceneDelegate',
+                },
+              ],
+            },
+          },
+        },
+      },
       sources: [
         join(source, '../share-extension-tests/Source.swift'),
         join(source, '../share-extension/ShareViewController.swift'),
@@ -208,23 +297,33 @@ try {
 console.log(
   `Testing on ${device.name}. Results: ${join(output, 'results.xcresult')}`,
 )
-run('xcodebuild', [
-  'test',
-  '-project',
-  join(output, 'SharingFoundationTests.xcodeproj'),
-  '-scheme',
-  'FoundationTests',
-  '-destination',
-  `platform=iOS Simulator,id=${device.udid}`,
-  '-derivedDataPath',
-  join(output, 'DerivedData'),
-  '-resultBundlePath',
-  join(output, 'results.xcresult'),
-  'CODE_SIGNING_ALLOWED=NO',
-])
 try {
+  // Build plus the unit tests took well under ten minutes on Xcode 26 and, on a slow
+  // Xcode 27 runner, ten minutes and two seconds with tests still passing as the
+  // cap killed it. The UI phase below has the same allowance for the same reason.
+  run(
+    'xcodebuild',
+    [
+      'test',
+      '-project',
+      join(output, 'SharingFoundationTests.xcodeproj'),
+      '-scheme',
+      'FoundationTests',
+      '-destination',
+      `platform=iOS Simulator,id=${device.udid}`,
+      '-derivedDataPath',
+      join(output, 'DerivedData'),
+      '-resultBundlePath',
+      join(output, 'results.xcresult'),
+      'CODE_SIGNING_ALLOWED=NO',
+    ],
+    900_000,
+  )
   // Eight UI scenarios plus their build, simulator launches, and result-bundle
-  // finalization exceeded ten minutes on CI even though every test passed.
+  // finalization exceeded ten minutes on CI even though every test passed, and on a
+  // slow Xcode 27.2 runner fifteen: seven had passed and the eighth, the longest at
+  // about four minutes, was running when the cap killed it. A green run takes about
+  // 13 and a half, so this leaves room for a slower one.
   run(
     'xcodebuild',
     [
@@ -241,8 +340,11 @@ try {
       join(output, 'activation.xcresult'),
       'CODE_SIGNING_ALLOWED=NO',
     ],
-    900_000,
+    1_500_000,
   )
+} catch (error) {
+  keepDiagnostics()
+  throw error
 } finally {
   for (const identifier of [hostId, `${hostId}.Tests.xctrunner`]) {
     try {

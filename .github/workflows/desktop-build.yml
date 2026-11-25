@@ -90,13 +90,13 @@ jobs:
   # the macOS-only code alongside the existing Linux gate. The universal
   # bundle job compiles it on release tags and on manual runs with macOS enabled.
   checks:
-    name: Check the shell crate${{ matrix.runner == 'macos-latest' && ' (macOS)' || '' }}
+    name: Check the shell crate${{ matrix.runner == 'xcode-27' && ' (macOS)' || '' }}
     strategy:
       fail-fast: false
       matrix:
         runner: >-
           ${{ github.event_name == 'pull_request'
-          && fromJson('["ubuntu-latest","macos-latest"]')
+          && fromJson('["ubuntu-latest","xcode-27"]')
           || fromJson('["ubuntu-latest"]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -476,7 +476,7 @@ jobs:
   macos:
     name: Build for macOS (universal)
     needs: checks
-    runs-on: macos-latest
+    runs-on: xcode-27
     timeout-minutes: 60
     if: >-
       ${{ github.event_name != 'pull_request'
