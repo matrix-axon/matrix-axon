@@ -41,6 +41,20 @@ export const PROBE_TIMEOUT_MS = 10_000
 
 /** `HTMLMediaElement.HAVE_CURRENT_DATA`: a frame is there to draw. */
 const HAVE_CURRENT_DATA = 2
+/**
+ * How long to wait for the browser to present a frame before drawing anyway.
+ * `requestVideoFrameCallback` may never fire for a paused, off-DOM video, so
+ * it is only ever a hint.
+ */
+const FRAME_WAIT_MS = 500
+/**
+ * A frame whose luma varies by no more than this (of 255) is blank. iPhone
+ * Safari can report a seeked, decoded frame and still draw solid black, and a
+ * black poster is worse than the placeholder a missing one leaves.
+ */
+const BLANK_LUMA_SPREAD = 8
+/** Pixels sampled for the blank check, spread evenly over the frame. */
+const BLANK_SAMPLES = 4096
 /** A Matrix integer's ceiling, which `info` values must fit. */
 const MAX_MATRIX_INT = Number.MAX_SAFE_INTEGER
 
@@ -50,6 +64,8 @@ export interface ProbeDeps {
   createAudio?: () => HTMLAudioElement
   createCanvas?: () => HTMLCanvasElement
   timeoutMs?: number
+  /** [`FRAME_WAIT_MS`], shortened by tests. */
+  frameWaitMs?: number
 }
 
 /**
@@ -183,13 +199,137 @@ async function withLoaded<E extends HTMLMediaElement, T>(
   }
 }
 
-/** Draw the element's current frame scaled into § 2's box, as a JPEG. */
+/**
+ * Whether RGBA pixels are one flat colour: solid black, or an undrawn
+ * (transparent) canvas, which JPEG would paint black. Samples at most
+ * [`BLANK_SAMPLES`] pixels, so a full 800 × 600 frame costs little.
+ */
+export function isBlankFrame(data: ArrayLike<number>): boolean {
+  const pixels = Math.floor(data.length / 4)
+  if (pixels === 0) return true
+  const step = Math.max(1, Math.floor(pixels / BLANK_SAMPLES))
+  let min = 255
+  let max = 0
+  for (let pixel = 0; pixel < pixels; pixel += step) {
+    const i = pixel * 4
+    const alpha = data[i + 3]! / 255
+    const luma =
+      (0.299 * data[i]! + 0.587 * data[i + 1]! + 0.114 * data[i + 2]!) * alpha
+    if (luma < min) min = luma
+    if (luma > max) max = luma
+    if (max - min > BLANK_LUMA_SPREAD) return false
+  }
+  return true
+}
+
+/**
+ * Resolve after `ms`, when `signal` aborts, or when `start` calls its
+ * `done`, whichever comes first. It never rejects, so nothing is left to
+ * reject unhandled once the probe's budget aborts; callers check the signal.
+ */
+function settleWithin(
+  ms: number,
+  signal: AbortSignal,
+  start?: (done: () => void) => void,
+): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal.addEventListener('abort', done)
+    try {
+      start?.(done)
+    } catch {
+      // An engine without the API, or one that throws: the timer decides.
+    }
+  })
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw new Error('aborted')
+}
+
+/**
+ * Wait for the browser to present the current frame, where it says so
+ * (`requestVideoFrameCallback`, Safari 15.4+), for at most `waitMs`.
+ */
+async function presentedFrame(
+  video: HTMLVideoElement,
+  signal: AbortSignal,
+  waitMs: number,
+): Promise<void> {
+  await settleWithin(waitMs, signal, (done) => {
+    if (typeof video.requestVideoFrameCallback === 'function')
+      video.requestVideoFrameCallback(() => done())
+  })
+  throwIfAborted(signal)
+}
+
+/**
+ * Nudge a frame out of a decoder that drew nothing: play muted for a moment,
+ * then pause. iOS allows a muted inline video to play without a gesture; a
+ * refusal is ignored, and the next draw simply tries again.
+ */
+async function playBriefly(
+  video: HTMLVideoElement,
+  signal: AbortSignal,
+  waitMs: number,
+): Promise<void> {
+  try {
+    await settleWithin(waitMs, signal, (done) => {
+      void Promise.resolve(video.play()).then(done, done)
+    })
+    throwIfAborted(signal)
+    await presentedFrame(video, signal, waitMs)
+  } finally {
+    video.pause()
+  }
+}
+
+/**
+ * Draw the element's current frame into `context`, and say whether it holds
+ * a picture. Three tries: after the browser presents the frame, again after
+ * playing for a moment, and once more after another frame.
+ */
+async function drawFrame(
+  video: HTMLVideoElement,
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  signal: AbortSignal,
+  waitMs: number,
+): Promise<boolean> {
+  const nudges = [presentedFrame, playBriefly, presentedFrame]
+  for (const nudge of nudges) {
+    await nudge(video, signal, waitMs)
+    context.drawImage(video, 0, 0, width, height)
+    let blank: boolean
+    try {
+      blank = isBlankFrame(context.getImageData(0, 0, width, height).data)
+    } catch {
+      // A canvas the browser will not read back cannot be checked; it holds
+      // whatever was drawn, as it did before this check existed.
+      return true
+    }
+    if (!blank) return true
+  }
+  return false
+}
+
+/**
+ * Draw the element's current frame scaled into § 2's box, as a JPEG, or
+ * `null` when it cannot be drawn or stays blank.
+ */
 async function encodePoster(
   video: HTMLVideoElement,
   width: number,
   height: number,
   createCanvas: () => HTMLCanvasElement,
   signal: AbortSignal,
+  waitMs: number,
 ): Promise<Blob | null> {
   const size = fitWithin(width, height)
   const canvas = createCanvas()
@@ -197,7 +337,10 @@ async function encodePoster(
   canvas.height = size.height
   const context = canvas.getContext('2d')
   if (context === null) return null
-  context.drawImage(video, 0, 0, size.width, size.height)
+  if (
+    !(await drawFrame(video, context, size.width, size.height, signal, waitMs))
+  )
+    return null
   const blob = await abortable(
     new Promise<Blob | null>((resolve) =>
       canvas.toBlob(resolve, 'image/jpeg', POSTER_JPEG_QUALITY),
@@ -212,9 +355,10 @@ async function encodePoster(
 }
 
 /**
- * A video's dimensions, duration and poster frame, or `null` when any of it
- * could not be had in time. All or nothing, as ADR 0142 § 7 asks: a video the
- * browser could not decode reports nothing it might have guessed wrong.
+ * A video's dimensions, duration and poster frame, or `null` when the browser
+ * could not decode it in time: ADR 0142 § 7 reports nothing it might have
+ * guessed wrong for such a video. A decoded video whose frame draws blank, or
+ * will not encode, keeps its dimensions and duration and gets no poster.
  */
 export function probeVideo(
   file: Blob,
@@ -245,8 +389,8 @@ export function probeVideo(
         height,
         deps.createCanvas ?? (() => document.createElement('canvas')),
         signal,
+        deps.frameWaitMs ?? FRAME_WAIT_MS,
       )
-      if (poster === null) return null
       return {
         info: {
           width,

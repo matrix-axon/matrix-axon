@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   durationMs,
   fitWithin,
+  isBlankFrame,
   POSTER_JPEG_QUALITY,
   posterFrameTime,
   probeAudio,
@@ -23,6 +24,8 @@ interface Script {
   readyAfterSeek?: number
   /** Fire `seeked` when `currentTime` is set. */
   seeks?: boolean
+  /** Whether the element has `requestVideoFrameCallback` (Safari 15.4+). */
+  frameCallbacks?: boolean
 }
 
 /** A media element that plays back `script` asynchronously, as browsers do. */
@@ -37,6 +40,9 @@ class FakeMedia extends EventTarget {
   seekedTo: number | null = null
   srcRemoved = false
   loads = 0
+  plays = 0
+  paused = true
+  requestVideoFrameCallback?: (callback: () => void) => number
   #src = ''
 
   private readonly script: Script
@@ -47,6 +53,21 @@ class FakeMedia extends EventTarget {
     this.videoWidth = script.videoWidth ?? 1920
     this.videoHeight = script.videoHeight ?? 1080
     this.duration = script.duration ?? 31.2501
+    if (script.frameCallbacks !== false)
+      this.requestVideoFrameCallback = (callback) => {
+        queueMicrotask(callback)
+        return 1
+      }
+  }
+
+  play(): Promise<void> {
+    this.plays += 1
+    this.paused = false
+    return Promise.resolve()
+  }
+
+  pause() {
+    this.paused = true
   }
 
   get src(): string {
@@ -106,10 +127,22 @@ class FakeMedia extends EventTarget {
   }
 }
 
+/** RGBA pixels: one flat colour, or a picture with real contrast. */
+function pixels(frame: 'picture' | 'blank', count = 64): Uint8ClampedArray {
+  const data = new Uint8ClampedArray(count * 4)
+  for (let i = 0; i < count; i += 1) {
+    const value = frame === 'blank' ? 0 : (i * 37) % 256
+    data.set([value, value, value, 255], i * 4)
+  }
+  return data
+}
+
 class FakeCanvas {
   width = 0
   height = 0
   drawn: unknown[][] = []
+  /** What each successive draw reads back; the last one repeats. */
+  frames: ('picture' | 'blank')[] = ['picture']
   encoded: { type?: string; quality?: unknown } | null = null
   private readonly result: Blob | null
   private readonly context: boolean
@@ -122,7 +155,14 @@ class FakeCanvas {
   }
   getContext() {
     return this.context
-      ? { drawImage: (...args: unknown[]) => this.drawn.push(args) }
+      ? {
+          drawImage: (...args: unknown[]) => this.drawn.push(args),
+          getImageData: () => ({
+            data: pixels(
+              this.frames[Math.min(this.drawn.length, this.frames.length) - 1]!,
+            ),
+          }),
+        }
       : null
   }
   toBlob(
@@ -291,23 +331,70 @@ describe('probeVideo', () => {
     expect(element.attached()).toBe(0)
   })
 
-  it('reports nothing when the frame cannot be encoded', async () => {
-    const { createVideo } = video()
-
+  it('keeps the info, with no poster, when the frame cannot be encoded', async () => {
+    const info = { width: 1920, height: 1080, duration_ms: 31251 }
     expect(
       await probeVideo(file(), {
-        createVideo,
+        createVideo: video().createVideo,
         createCanvas: () =>
           new FakeCanvas(null) as unknown as HTMLCanvasElement,
       }),
-    ).toBeNull()
+    ).toEqual({ info, poster: null })
     expect(
       await probeVideo(file(), {
         createVideo: video().createVideo,
         createCanvas: () =>
           new FakeCanvas(undefined, false) as unknown as HTMLCanvasElement,
       }),
-    ).toBeNull()
+    ).toEqual({ info, poster: null })
+  })
+
+  it('plays for a moment and draws again when the frame comes out blank', async () => {
+    // iPhone Safari: seeked, a frame reported, and solid black drawn.
+    const { element, createVideo } = video()
+    const canvas = new FakeCanvas()
+    canvas.frames = ['blank', 'picture']
+
+    const probe = await probeVideo(file(), {
+      createVideo,
+      createCanvas: () => canvas as unknown as HTMLCanvasElement,
+    })
+
+    expect(probe?.poster).not.toBeNull()
+    expect(canvas.drawn).toHaveLength(2)
+    expect(element.plays).toBe(1)
+    expect(element.paused).toBe(true)
+  })
+
+  it('sends no poster, but keeps the info, when every frame is blank', async () => {
+    const { element, createVideo } = video()
+    const canvas = new FakeCanvas()
+    canvas.frames = ['blank']
+
+    const probe = await probeVideo(file(), {
+      createVideo,
+      createCanvas: () => canvas as unknown as HTMLCanvasElement,
+    })
+
+    expect(probe).toEqual({
+      info: { width: 1920, height: 1080, duration_ms: 31251 },
+      poster: null,
+    })
+    expect(canvas.drawn).toHaveLength(3)
+    expect(canvas.encoded).toBeNull()
+    expect(element.paused).toBe(true)
+  })
+
+  it('draws anyway when the browser never says a frame was presented', async () => {
+    const { createVideo } = video({ frameCallbacks: false })
+
+    const probe = await probeVideo(file(), {
+      createVideo,
+      createCanvas: () => new FakeCanvas() as unknown as HTMLCanvasElement,
+      frameWaitMs: 5,
+    })
+
+    expect(probe?.poster).not.toBeNull()
   })
 
   it('drops a poster over the 2 MiB the server accepts', async () => {
@@ -315,11 +402,32 @@ describe('probeVideo', () => {
       type: 'image/jpeg',
     })
     expect(
-      await probeVideo(file(), {
-        createVideo: video().createVideo,
-        createCanvas: () => new FakeCanvas(big) as unknown as HTMLCanvasElement,
-      }),
+      (
+        await probeVideo(file(), {
+          createVideo: video().createVideo,
+          createCanvas: () =>
+            new FakeCanvas(big) as unknown as HTMLCanvasElement,
+        })
+      )?.poster,
     ).toBeNull()
+  })
+})
+
+describe('isBlankFrame', () => {
+  it('calls one flat colour blank, transparent included', () => {
+    expect(isBlankFrame(pixels('blank'))).toBe(true)
+    const grey = new Uint8ClampedArray(64 * 4).fill(128)
+    expect(isBlankFrame(grey)).toBe(true)
+    // An undrawn canvas: transparent pixels, which JPEG paints black.
+    expect(isBlankFrame(new Uint8ClampedArray(64 * 4))).toBe(true)
+    expect(isBlankFrame(new Uint8ClampedArray(0))).toBe(true)
+  })
+
+  it('calls a frame with contrast a picture, however dark', () => {
+    expect(isBlankFrame(pixels('picture'))).toBe(false)
+    const dim = pixels('blank')
+    dim.set([40, 40, 40, 255], 32 * 4)
+    expect(isBlankFrame(dim)).toBe(false)
   })
 })
 
