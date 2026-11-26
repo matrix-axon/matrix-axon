@@ -202,8 +202,9 @@ export function ThreadPanel({
   const location = useLocation()
   const hideRedacted = settings.hideRedactedEvents.value
   const thread = useMemo(
-    () => createTimelineStore(api, media, accountId, roomId, rootId),
-    [api, media, accountId, roomId, rootId],
+    () =>
+      createTimelineStore(api, media, accountId, roomId, rootId, capabilities),
+    [api, media, accountId, roomId, rootId, capabilities],
   )
   const [root, setRoot] = useState<EventDto | undefined>(rootEvent)
   const [reactionPickerEventId, setReactionPickerEventId] = useState<

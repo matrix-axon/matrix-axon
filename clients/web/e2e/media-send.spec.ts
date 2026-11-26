@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { crc32, deflateSync } from 'node:zlib'
 import { openRoom } from './helpers'
 
@@ -267,4 +268,62 @@ test('removes one staged file without disturbing the rest', async ({
   // survivors are now 1 and 2 of 2.
   await expect(page.getByLabel('Remove file 1 of 2, a.png')).toBeVisible()
   await expect(page.getByLabel('Remove file 2 of 2, c.png')).toBeVisible()
+})
+
+/**
+ * A video's poster, dimensions and duration, made in a real browser (ADR 0142
+ * § 7, issue 24). The unit tests stub `<video>` and the canvas, because jsdom
+ * decodes neither; this is where the probe actually decodes a frame.
+ *
+ * The fixture is a 3 s, 320 × 240 VP8 WebM, which every Playwright engine
+ * decodes. The mock server predates the new capabilities, so this test
+ * answers `/v1/capabilities` as a current server does.
+ */
+test('sends a video as its own kind, with a poster, dimensions and duration', async ({
+  page,
+}) => {
+  await page.route('**/v1/capabilities', (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          edit_url_previews: true,
+          media_upload_kinds: ['image', 'file', 'video', 'audio'],
+          send_media_thumbnails: true,
+        },
+      },
+    }),
+  )
+  const sends: Record<string, unknown>[] = []
+  await page.route('**/send-media', async (route) => {
+    sends.push(route.request().postDataJSON() as Record<string, unknown>)
+    await route.continue()
+  })
+  await openRoom(page)
+  const before = (await staged(page)).length
+
+  const clip = readFileSync(new URL('./fixtures/clip.webm', import.meta.url))
+  await page.getByLabel('Attach a file').setInputFiles({
+    name: 'clip.webm',
+    mimeType: 'video/webm',
+    buffer: clip,
+  })
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+
+  await expect.poll(() => sends.length).toBe(1)
+  const uploads = (await staged(page)).slice(before)
+  const original = uploads.find((u) => u.filename === 'clip.webm')
+  const poster = uploads.find((u) => u.filename === 'poster.jpg')
+  expect(original).toMatchObject({ kind: 'video', content_type: 'video/webm' })
+  expect(original?.sha1).toBe(createHash('sha1').update(clip).digest('hex'))
+  // Never upscaled, so the poster is the frame's own size; a JPEG of a
+  // 320 × 240 test pattern is a few KiB.
+  expect(poster).toMatchObject({ kind: 'image', content_type: 'image/jpeg' })
+  expect(poster!.size_bytes).toBeGreaterThan(0)
+  expect(sends[0]).toMatchObject({
+    upload_id: expect.any(String),
+    info: { width: 320, height: 240, duration_ms: 3000 },
+    txn_id: expect.stringMatching(/^[A-Za-z0-9._~-]{1,64}$/),
+  })
+  expect(typeof sends[0].thumbnail_upload_id).toBe('string')
+  expect(sends[0].thumbnail_upload_id).not.toBe(sends[0].upload_id)
 })

@@ -1859,7 +1859,15 @@ export function createServices(
     // does not have to remember.
     enabled: platform.updatesFromOrigin,
   })
-  const timelines = createTimelineStoreCache(api, media)
+  // Created here, ahead of its connection below, because media sends read
+  // it (ADR 0142 § 1).
+  const capabilities = createServerCapabilities(api)
+  const timelines = createTimelineStoreCache(
+    api,
+    media,
+    undefined,
+    capabilities,
+  )
   const memberDirectory = createMemberDirectory()
   const memberStores = createMembersStoreCache(api, memberDirectory)
   const threadStores = createThreadsStoreCache(api)
@@ -2141,7 +2149,6 @@ export function createServices(
   connectAttachmentReset(auth, attachments)
   const linkPreviews = createLinkPreviewCache()
   connectLinkPreviewCacheReset(auth, linkPreviews)
-  const capabilities = createServerCapabilities(api)
   connectCapabilities(auth.signedIn, capabilities, live.reconnects)
   const linkedEvents = createLinkedEventCache(api)
   connectLinkedEventCacheReset(auth, linkedEvents)

@@ -99,6 +99,34 @@ const AXON_ROOM_ENTRY_MS = 30_000
 /** `default_media_upstream_upload_timeout_secs`: media sends, avatar sets (room and account). */
 const AXON_UPSTREAM_UPLOAD_MS = 60_000
 /**
+ * How long axon waits for one of the account's preview-send slots before it
+ * answers 503 (`crates/axon-api/src/routes/bundled_previews.rs`).
+ */
+const AXON_PREVIEW_SLOT_MS = 5_000
+/**
+ * The longest a synchronous `send-media` can take (ADR 0142 § 8): a client
+ * thumbnail's 5 s of preparation, the original's upload, the thumbnail's
+ * 10 s upload, and the 30 s event send, 105 s with the defaults. A send that
+ * carries link previews first waits for a preview slot, as a text send with
+ * them does (`AXON_PREVIEW_SEND_MS`).
+ *
+ * Today's server keeps the upload and the event send under one upload bound
+ * and pauses it for the thumbnail work, so it ends sooner, near 80 s; the
+ * separate bounds arrive with issue 1243. Waiting for the sum covers both,
+ * and lets the server answer a slow send rather than the client hanging up
+ * on one that may still land. A send that outlasts even this is retried with
+ * its `txn_id`, which joins it or returns its event (ADR 0142 § 4).
+ *
+ * With `PAST_AXON_MS` this is 115 s, inside the packaged shells' 120 s
+ * backstop on every request (`REQUEST_TIMEOUT_MS`, `platform/tauri.ts`).
+ */
+const AXON_SEND_MEDIA_MS =
+  AXON_PREVIEW_SLOT_MS +
+  5_000 +
+  AXON_UPSTREAM_UPLOAD_MS +
+  10_000 +
+  AXON_SEND_MUTATION_MS
+/**
  * Homeserver link-preview generation: one fixed deadline covers connecting
  * and every request (`crates/axon-sync/src/preview_generation.rs`).
  */
@@ -160,7 +188,7 @@ export const AXON_DEADLINES_MS: RouteDeadlines = {
   'GET /v1/accounts/{account_id}/directory/public_rooms':
     AXON_ROOM_ENTRY_MS + PAST_AXON_MS,
   'POST /v1/accounts/{account_id}/rooms/{room_id}/send-media':
-    AXON_UPSTREAM_UPLOAD_MS + PAST_AXON_MS,
+    AXON_SEND_MEDIA_MS + PAST_AXON_MS,
   'PUT /v1/accounts/{account_id}/rooms/{room_id}/avatar':
     AXON_UPSTREAM_UPLOAD_MS + PAST_AXON_MS,
   'PUT /v1/accounts/{account_id}/profile/avatar':
@@ -170,12 +198,6 @@ export const AXON_DEADLINES_MS: RouteDeadlines = {
   'GET /v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}':
     AXON_LINKED_EVENT_MS + PAST_AXON_MS,
 }
-
-/**
- * How long axon waits for one of the account's preview-send slots before it
- * answers 503 (`crates/axon-api/src/routes/bundled_previews.rs`).
- */
-const AXON_PREVIEW_SLOT_MS = 5_000
 
 /**
  * A `POST …/send` that carries `url_previews`, even `[]`: axon runs it as a

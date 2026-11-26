@@ -149,7 +149,15 @@ export function testServices(
   })
   const api = createApiClient(auth, TEST_BASE_URL)
   const media = createMediaService({ auth, baseUrl: TEST_BASE_URL })
-  const timelines = createTimelineStoreCache(api, media)
+  // Not asked at sign-in here, so a test makes no request it did not
+  // handle; one that needs an answer calls `refresh` against its handler.
+  const capabilities = createServerCapabilities(api)
+  const timelines = createTimelineStoreCache(
+    api,
+    media,
+    undefined,
+    capabilities,
+  )
   const memberDirectory = createMemberDirectory()
   const memberStores = createMembersStoreCache(api, memberDirectory)
   const threadStores = createThreadsStoreCache(api)
@@ -304,9 +312,6 @@ export function testServices(
   connectAttachmentReset(auth, attachments)
   const linkPreviews = createLinkPreviewCache()
   connectLinkPreviewCacheReset(auth, linkPreviews)
-  // Not asked at sign-in here, so a test makes no request it did not
-  // handle; one that needs an answer calls `refresh` against its handler.
-  const capabilities = createServerCapabilities(api)
   const linkedEvents = createLinkedEventCache(api)
   connectLinkedEventCacheReset(auth, linkedEvents)
   return {

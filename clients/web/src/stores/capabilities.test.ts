@@ -86,6 +86,54 @@ describe('server capabilities (ADR 0132 § 8)', () => {
     expect(asked()).toBe(2)
   })
 
+  it('reads the media kinds and send-media fields (ADR 0142 § 1)', async () => {
+    serve(() =>
+      HttpResponse.json({
+        data: {
+          edit_url_previews: true,
+          media_upload_kinds: ['image', 'file', 'video', 'audio'],
+          send_media_thumbnails: true,
+        },
+      }),
+    )
+    const capabilities = make()
+    expect(capabilities.mediaUploadKinds.value).toBeNull()
+    expect(capabilities.sendMediaThumbnails.value).toBeNull()
+    capabilities.refresh()
+    await settled()
+    expect(capabilities.mediaUploadKinds.value).toEqual([
+      'image',
+      'file',
+      'video',
+      'audio',
+    ])
+    expect(capabilities.sendMediaThumbnails.value).toBe(true)
+    capabilities.reset()
+    expect(capabilities.mediaUploadKinds.value).toBeNull()
+    expect(capabilities.sendMediaThumbnails.value).toBeNull()
+  })
+
+  it('reads a server without the media fields as image and file only', async () => {
+    let route = true
+    serve(() =>
+      route
+        ? HttpResponse.json({ data: { edit_url_previews: true } })
+        : HttpResponse.json({ error: { code: 'not_found' } }, { status: 404 }),
+    )
+    const capabilities = make()
+    capabilities.refresh()
+    await settled()
+    expect(capabilities.mediaUploadKinds.value).toEqual(['image', 'file'])
+    expect(capabilities.sendMediaThumbnails.value).toBe(false)
+    // A server with no route at all supports neither.
+    route = false
+    capabilities.recheck()
+    await settled()
+    expect(capabilities.mediaUploadKinds.value).toEqual(['image', 'file'])
+    expect(capabilities.sendMediaThumbnails.value).toBe(false)
+    expect(capabilities.editUrlPreviews.value).toBe(false)
+  })
+
   it('asks when signed in, and forgets at sign-out', async () => {
     serve(() => HttpResponse.json({ data: { edit_url_previews: true } }))
     const signedIn = signal(false)
