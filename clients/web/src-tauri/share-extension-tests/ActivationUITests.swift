@@ -200,22 +200,49 @@ final class ActivationUITests: XCTestCase {
     // and the second was below the 874-point viewport, outside the AX snapshot.
     if handles.count < 2 { app.swipeUp() }
     XCTAssertEqual(handles.count, 2, app.debugDescription)
-    reveal(handles.element(boundBy: 1), app: app)
-    // Both handles have the same label, so only their position tells them apart,
-    // and XCTest looks up an element's coordinate again while the drag runs. Once
-    // the first row lifts, "index 1" is no longer the second row: on CI it came
-    // back with an infinite frame (an exception inside XCTest) or as a row that
-    // made the drop a no-op. Read both frames now and drag between fixed points.
-    let from = handles.element(boundBy: 0).frame
-    let to = handles.element(boundBy: 1).frame
-    XCTAssertFalse(
-      from.isInfinite || from.isEmpty || to.isInfinite || to.isEmpty,
-      "Handle frames \(from) and \(to)\n\(app.debugDescription)")
-    let origin = app.coordinate(withNormalizedOffset: .zero)
-    origin.withOffset(CGVector(dx: from.midX, dy: from.midY)).press(
-      forDuration: 0.5,
-      thenDragTo: origin.withOffset(CGVector(dx: to.midX, dy: to.minY + to.height * 0.9)),
-      withVelocity: .default, thenHoldForDuration: 0.3)
+    // In edit mode each row keeps its remove button, identified by photo ID, so
+    // the order can be read right after a drop without leaving edit mode.
+    let photoID = String(firstID.dropFirst("share-photo-caption-".count))
+    let removes = app.buttons.matching(
+      NSPredicate(format: "identifier BEGINSWITH 'share-photo-remove-'"))
+    // On a loaded hosted runner a synthesized drag sometimes shows the rows
+    // swapping and still ends with the order unchanged (CI runs 45737930099 and
+    // 45737948628, even with the fixed drop points below). The cause is not
+    // known, so the drag is retried in place and each miss is logged with the
+    // "[drag-reorder]" tag to keep the miss rate visible in CI logs. A
+    // reorder that never works still fails.
+    var moved = false
+    for attempt in 1...3 {
+      reveal(handles.element(boundBy: 1), app: app)
+      // Both handles have the same label, so only their position tells them
+      // apart, and XCTest looks up an element's coordinate again while the drag
+      // runs. Once the first row lifts, "index 1" is no longer the second row:
+      // on CI it came back with an infinite frame, which raised an exception
+      // inside XCTest. Read both frames now and drag between fixed points.
+      let from = handles.element(boundBy: 0).frame
+      let to = handles.element(boundBy: 1).frame
+      XCTAssertFalse(
+        from.isInfinite || from.isEmpty || to.isInfinite || to.isEmpty,
+        "Handle frames \(from) and \(to)\n\(app.debugDescription)")
+      // Drop well past the second row's center but inside that row. The old
+      // drop, at 0.9 of the second handle's height, was only 18 points past
+      // its center. Half a row past is no good either: it reaches the row's
+      // bottom edge (y=733 for 142-point rows), and every drop there was
+      // cancelled locally, since the List is a collection view and the next
+      // section begins below that edge.
+      let dropY = to.midY + (to.midY - from.midY) * 0.35
+      let origin = app.coordinate(withNormalizedOffset: .zero)
+      origin.withOffset(CGVector(dx: from.midX, dy: from.midY)).press(
+        forDuration: 0.5,
+        thenDragTo: origin.withOffset(CGVector(dx: to.midX, dy: dropY)),
+        withVelocity: .default, thenHoldForDuration: 0.3)
+      if waitFor(removes.firstMatch, "identifier != 'share-photo-remove-\(photoID)'", timeout: 5) {
+        moved = true
+        break
+      }
+      print("[drag-reorder] attempt \(attempt) left \(photoID) first")
+    }
+    XCTAssertTrue(moved, "Three drags left \(photoID) first\n\(app.debugDescription)")
     // The status row is virtualized above the viewport here. Verify the saved
     // photo IDs after ending edit mode instead of polling an absent AX row.
     reveal(reorder, app: app, down: true)
