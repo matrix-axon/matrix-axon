@@ -292,7 +292,7 @@ export function testServices(
   connectTimelineCacheReset(auth, timelines)
   connectRoomCachesReset(auth, { memberStores, memberDirectory, threadStores })
   connectCacheReset(auth, cache)
-  connectRoomsSessionReset(auth, rooms)
+  connectRoomsSessionReset(auth, rooms, spaces)
   connectMatrixOAuthQrSessionReset(
     auth,
     matrixOAuthQr,

@@ -176,3 +176,16 @@ export function roomDiscovery(
     ...overrides,
   }
 }
+
+/** Default sidebar reads for tests focused on other routes. */
+export function spaceReadHandlers(baseUrl: string, graphStatus = 200) {
+  const base = `${baseUrl}/v1/accounts/:accountId/spaces`
+  return [
+    http.get(`${base}/graph`, () =>
+      HttpResponse.json({ data: { links: [] } }, { status: graphStatus }),
+    ),
+    http.get(`${base}/discovered`, () =>
+      HttpResponse.json({ data: { memberships: [] } }),
+    ),
+  ]
+}

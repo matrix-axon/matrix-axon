@@ -1,28 +1,26 @@
-import { useLayoutEffect, useMemo, useRef } from 'preact/hooks'
+import { useLayoutEffect, useRef } from 'preact/hooks'
 import { ErrorBanner } from './ErrorBanner'
 import { SINGLE_PANE_QUERY, useMediaQuery } from '../layout'
 import { useMediaBlob } from '../media/use-media-blob'
 import { useServices } from '../services'
 import { hint, KEYS, keyAria } from '../shortcuts'
 import { roomKey, roomTitle, type RoomDto } from '../stores/room-list'
-import { orderedSpaces } from '../stores/spaces'
+import { spacePickerEntries } from '../stores/spaces'
 
 /** The space picker scopes the neighboring RoomList; it never changes Matrix state. */
 export function SpaceList() {
   const { rooms, spaces, settings, spaceOrder } = useServices()
   const dragging = useRef<string | null>(null)
   const selected = spaces.selected.value
-  const entries = useMemo(
-    () =>
-      orderedSpaces(
-        spaces.visible.value,
-        settings.spaceOrder.value,
-        rooms.titles.value,
-      ),
-    [spaces.visible.value, settings.spaceOrder.value, rooms.titles.value],
+  const entries = spacePickerEntries(
+    spaces,
+    settings.spaceOrder.value,
+    rooms.titles.value,
   )
-  // The order the user sees, which is what a move target indexes into.
-  const order = useMemo(() => entries.map(roomKey), [entries])
+  const order = entries
+    .filter(({ depth }) => depth === 0)
+    .map(({ space }) => roomKey(space))
+  const rootRanks = new Map(order.map((key, index) => [key, index]))
   const reordering = spaces.reordering.value
   // The picker is a vertical rail beside the room list, but a horizontal strip
   // above it in single-pane mode, where "up" and "down" would name the wrong
@@ -93,8 +91,10 @@ export function SpaceList() {
       >
         All
       </button>
-      {entries.map((space, index) => {
+      {entries.map(({ space, path, depth, expandable }) => {
         const key = roomKey(space)
+        const index = rootRanks.get(key)
+        const expanded = spaces.expanded.value.has(path)
         const title = roomTitle(space, rooms.titles.value)
         const unread = spaces.unread.value.get(key) ?? 0
         const move = (toIndex: number) => {
@@ -103,10 +103,18 @@ export function SpaceList() {
         }
         return (
           <div
-            class="space-picker-row"
-            key={key}
-            draggable
+            class={
+              depth === 0
+                ? 'space-picker-row'
+                : 'space-picker-row space-picker-nested'
+            }
+            key={path}
+            style={
+              depth === 0 ? undefined : { '--space-depth': Math.min(depth, 3) }
+            }
+            draggable={index !== undefined}
             onDragStart={(event) => {
+              if (index === undefined) return
               dragging.current = key
               // Firefox refuses to start a drag unless `dragstart` sets data,
               // and iOS Safari (which runs this off a long press) wants it too.
@@ -114,8 +122,12 @@ export function SpaceList() {
               // caught this.
               event.dataTransfer?.setData('text/plain', key)
             }}
-            onDragOver={(event) => event.preventDefault()}
+            onDragEnd={() => (dragging.current = null)}
+            onDragOver={(event) => {
+              if (index !== undefined) event.preventDefault()
+            }}
             onDrop={(event) => {
+              if (index === undefined) return
               event.preventDefault()
               const source = dragging.current
               dragging.current = null
@@ -130,13 +142,19 @@ export function SpaceList() {
                   : 'space-picker-entry'
               }
               aria-pressed={selected === key}
-              data-space-key={key}
+              data-space-key={index === undefined ? undefined : key}
               onClick={() => (spaces.selected.value = key)}
               // Reordering without any visible chrome: the arrows below stay
               // hidden until asked for, so a focused space also answers to
               // Alt-↑/↓ directly.
               onKeyDown={(event) => {
-                if (!event.altKey || event.ctrlKey || event.metaKey) return
+                if (
+                  index === undefined ||
+                  !event.altKey ||
+                  event.ctrlKey ||
+                  event.metaKey
+                )
+                  return
                 const back = horizontal ? 'ArrowLeft' : 'ArrowUp'
                 const forward = horizontal ? 'ArrowRight' : 'ArrowDown'
                 if (event.key !== back && event.key !== forward) return
@@ -144,12 +162,18 @@ export function SpaceList() {
                 move(index + (event.key === back ? -1 : 1))
                 focusAfterMove.current = key
               }}
-              title={`${title} (Alt-${horizontal ? '←/→' : '↑/↓'} to move)`}
+              title={
+                index === undefined
+                  ? title
+                  : `${title} (Alt-${horizontal ? '←/→' : '↑/↓'} to move)`
+              }
               aria-label={unread > 0 ? `${title}, ${unread} unread` : title}
               aria-keyshortcuts={
-                horizontal
-                  ? 'Alt+ArrowLeft Alt+ArrowRight'
-                  : 'Alt+ArrowUp Alt+ArrowDown'
+                index === undefined
+                  ? undefined
+                  : horizontal
+                    ? 'Alt+ArrowLeft Alt+ArrowRight'
+                    : 'Alt+ArrowUp Alt+ArrowDown'
               }
             >
               <SpaceAvatar
@@ -166,10 +190,27 @@ export function SpaceList() {
                 </span>
               )}
             </button>
+            {expandable && (
+              <button
+                type="button"
+                class="space-picker-expand"
+                aria-expanded={expanded}
+                aria-label={`${expanded ? 'Collapse' : 'Expand'} ${title} subspaces`}
+                title={`${expanded ? 'Collapse' : 'Expand'} ${title} subspaces`}
+                onClick={() => {
+                  const paths = new Set(spaces.expanded.value)
+                  if (expanded) paths.delete(path)
+                  else paths.add(path)
+                  spaces.expanded.value = paths
+                }}
+              >
+                <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+              </button>
+            )}
             {/* Drag-and-drop is undiscoverable and uneven on touch, so pointer
                 users get buttons too — but only on request, so the rail stays
                 as compact as possible by default. */}
-            {reordering && (
+            {reordering && index !== undefined && (
               <div class="space-picker-reorder">
                 <button
                   type="button"
@@ -184,7 +225,7 @@ export function SpaceList() {
                 <button
                   type="button"
                   class="space-picker-move"
-                  disabled={index === entries.length - 1}
+                  disabled={index === order.length - 1}
                   onClick={() => move(index + 1)}
                   title={`Move ${title} ${axis.onward}`}
                   aria-label={`Move ${title} ${axis.onward}`}

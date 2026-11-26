@@ -1100,24 +1100,23 @@ async function handleApi(req, res, url) {
       ].map(attachTags),
     })
   }
-  // The unnamed room above has no `display_name` (ADR 0118), so the room-id
-  // fallback stands.
-  if (method === 'GET' && /\/space\/children$/.test(pathname)) {
-    const spaceId = decodeURIComponent(pathname.split('/').at(-3))
+  if (method === 'GET' && /\/spaces\/graph$/.test(pathname)) {
     return json(res, {
-      data:
-        spaceId === '!space-one:hs'
-          ? [
-              {
-                room_id: ROOM_ID,
-                name: 'E2E Room',
-                room_type: null,
-                suggested: false,
-                via: ['hs'],
-              },
-            ]
-          : [],
+      data: {
+        links: [
+          {
+            parent_room_id: '!space-one:hs',
+            child_room_id: ROOM_ID,
+            source: 'child',
+            canonical: false,
+            origin_ts: 0,
+          },
+        ],
+      },
     })
+  }
+  if (method === 'GET' && /\/spaces\/discovered$/.test(pathname)) {
+    return json(res, { data: { memberships: [] } })
   }
   if (method === 'GET' && /\/space\/parents$/.test(pathname)) {
     return json(res, { data: [] })

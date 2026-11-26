@@ -167,17 +167,14 @@ export function RoomList() {
 
   const allRooms = rooms.rooms.value
   const selectedSpace = spaces.selected.value
-  const selectedChildren =
-    selectedSpace === null
-      ? null
-      : (spaces.children.value.get(selectedSpace) ?? null)
+  const selectedRooms = spaces.selectedRooms.value
   // A space whose children have not loaded must not read as "this space
   // contains everything": until the fetch resolves the scope is unknown, so the
   // list shows why rather than silently falling back to the account filter.
   const spaceScope: 'none' | 'ready' | 'loading' | 'failed' =
     selectedSpace === null
       ? 'none'
-      : selectedChildren !== null
+      : selectedRooms !== null
         ? 'ready'
         : spaces.errors.value.has(selectedSpace)
           ? 'failed'
@@ -256,16 +253,12 @@ export function RoomList() {
       roomTitles,
       hasUnread: (room) => unreadKeys.has(roomKey(room)),
     })
-    if (selectedChildren === null) {
+    if (selectedRooms === null) {
       const visible = spaceScope === 'none' ? next : []
       perfMark('room-list:visible-compute:end', { visible: visible.length })
       return visible
     }
-    const childIds = new Set(selectedChildren.map((child) => child.room_id))
-    const scoped = next.filter(
-      (room) =>
-        room.account_id === selectedSpaceAccount && childIds.has(room.room_id),
-    )
+    const scoped = next.filter((room) => selectedRooms.has(roomKey(room)))
     perfMark('room-list:visible-compute:end', { visible: scoped.length })
     return scoped
   }, [
@@ -279,7 +272,7 @@ export function RoomList() {
     roomTitles,
     unreadKeys,
     selectedSpaceAccount,
-    selectedChildren,
+    selectedRooms,
     spaceScope,
   ])
   const visibleKeys = useMemo(() => visible.map(roomKey), [visible])
@@ -1024,9 +1017,9 @@ export function RoomList() {
           {spaceScope === 'loading' && (
             <p class="muted">Loading space rooms…</p>
           )}
-          {spaceScope === 'failed' && (
+          {spaceScopeError !== undefined && (
             <p class="error" role="alert">
-              {spaceScopeError ?? 'Could not load space.'}{' '}
+              {spaceScopeError}{' '}
               <button
                 type="button"
                 class="ghost"

@@ -622,6 +622,34 @@ body {
   background: transparent;
   color: inherit;
 }
+.space-picker-nested {
+  margin-inline-start: calc(var(--space-depth) * 0.15rem);
+  border-inline-start: 1px solid var(--border);
+}
+
+.space-picker-nested .space-picker-entry {
+  width: 2.35rem;
+}
+
+.space-picker-expand {
+  display: grid;
+  width: 2.35rem;
+  min-height: 1.45rem;
+  margin: -0.25rem 0 0.4rem;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 0.35rem;
+  background: transparent;
+  color: var(--muted);
+}
+
+.space-picker-expand:hover,
+.space-picker-expand:focus-visible {
+  background: var(--bg-raised);
+  color: var(--accent);
+}
+
 /* Overlaps the avatar's top-right corner so the rail stays as narrow as it was.
    Doubled with `.badge` so it outranks that rule's later size and padding. */
 .badge.space-unread {
@@ -928,6 +956,22 @@ body {
   .space-picker-row,
   .space-picker-entry {
     flex: 0 0 auto;
+  }
+
+  .space-picker-nested {
+    margin-inline-start: 0;
+    margin-block-start: calc(var(--space-depth) * 0.15rem);
+    border-inline-start: 0;
+    border-block-start: 1px solid var(--border);
+  }
+
+  .space-picker-nested .space-picker-entry {
+    width: 2.8rem;
+  }
+
+  .space-picker-expand {
+    width: 2.8rem;
+    min-height: 1.75rem;
   }
 
   /* The ◀ ▶ pair sits under its avatar rather than beside it: two 1.2rem

@@ -1046,16 +1046,21 @@ test('narrow: a collapsed spaces pane is never stranded', async ({ page }) => {
 
 test('narrow: spaces can be reordered without a keyboard', async ({ page }) => {
   // Reordering needs two populated roots; the normal second fixture is empty.
-  await page.route('**/space/children', async (route) => {
-    const path = new URL(route.request().url()).pathname
-    if (decodeURIComponent(path.split('/').at(-3)!) !== '!space-two:hs') {
-      await route.continue()
-      return
-    }
-    await route.fulfill({
-      json: { data: [{ room_id: ROOM_ID, via: ['hs'], suggested: false }] },
-    })
-  })
+  await page.route('**/spaces/graph?*', (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          links: ['!space-one:hs', '!space-two:hs'].map((parent_room_id) => ({
+            parent_room_id,
+            child_room_id: ROOM_ID,
+            source: 'child',
+            canonical: false,
+            origin_ts: 0,
+          })),
+        },
+      },
+    }),
+  )
   await signIn(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/')

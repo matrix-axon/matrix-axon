@@ -70,7 +70,6 @@ import { useStartDm } from './use-start-dm'
 import { UserAvatar } from './UserAvatar'
 
 type RoomUpgradeDto = components['schemas']['RoomUpgradeDto']
-type SpaceChildDto = components['schemas']['SpaceChildDto']
 type SpaceParentDto = components['schemas']['SpaceParentDto']
 type PowerLevelsDto = components['schemas']['PowerLevelsDto']
 type EventDto = components['schemas']['EventDto']
@@ -326,22 +325,23 @@ export function RoomInfoPanel({
   const onlyJoinedMember =
     ownUserId !== null &&
     isOnlyJoinedMember(members.members.value.values(), ownUserId)
+  const advertisedParents = spaces.parents.value.get(
+    roomKey({ account_id: accountId, room_id: roomId }),
+  )
   const parents = useMemo(
     () =>
       relatedSpaceParents(
         roomState.parents,
-        spaces.children.value,
+        advertisedParents,
         rooms.rooms.value,
         accountId,
-        roomId,
         roomTitles,
       ),
     [
       roomState.parents,
-      spaces.children.value,
+      advertisedParents,
       rooms.rooms.value,
       accountId,
-      roomId,
       roomTitles,
     ],
   )
@@ -1304,10 +1304,9 @@ function CancelInviteDialog({
  */
 function relatedSpaceParents(
   directParents: readonly SpaceParentDto[] | null,
-  childrenBySpace: ReadonlyMap<string, readonly SpaceChildDto[]>,
+  advertisedParents: ReadonlyMap<string, readonly string[]> | undefined,
   rooms: readonly RoomDto[],
   accountId: string,
-  roomId: string,
   roomTitles: ReadonlyMap<string, string>,
 ): readonly SpaceParentDto[] | null {
   const parents = new Map(
@@ -1316,16 +1315,14 @@ function relatedSpaceParents(
   for (const space of rooms) {
     if (space.account_id !== accountId || space.room_type !== 'm.space')
       continue
-    const child = childrenBySpace
-      .get(roomKey(space))
-      ?.find((candidate) => candidate.room_id === roomId)
-    if (child !== undefined && !parents.has(space.room_id)) {
+    const via = advertisedParents?.get(roomKey(space))
+    if (via !== undefined && !parents.has(space.room_id)) {
       parents.set(space.room_id, {
         room_id: space.room_id,
         room_type: space.room_type,
         name: roomTitle(space, roomTitles),
         canonical: false,
-        via: child.via,
+        via: [...via],
       })
     }
   }

@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/preact'
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
+import { spaceReadHandlers } from '../test/room-details'
 import { options } from 'preact'
 import { LocationProvider } from 'preact-iso'
 import {
@@ -93,7 +94,7 @@ function activeAccountsForRooms(rooms: unknown[]): Record<string, unknown>[] {
   )
 }
 
-const server = setupServer()
+const server = setupServer(...spaceReadHandlers(TEST_BASE_URL, 404))
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
   cleanup()

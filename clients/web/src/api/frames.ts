@@ -136,6 +136,7 @@ export interface RoomDisplayNameChange {
  * - `member_counts` and `identity_changes`: `GET …/info`
  * - `homeserver_details`: `GET …/homeserver_details`
  * - `space_hierarchy`: `GET …/space/hierarchy` (the frame's room is the space)
+ * - `space_graph` and `space_browse`: account-wide sidebar reads
  * - `discovery`: `GET …/discovery` (the frame's room is the unjoined room)
  */
 export type RoomDetailSource =
@@ -144,6 +145,8 @@ export type RoomDetailSource =
   | 'identity_changes'
   | 'homeserver_details'
   | 'space_hierarchy'
+  | 'space_graph'
+  | 'space_browse'
   | 'discovery'
 
 const ROOM_DETAIL_SOURCES: ReadonlySet<string> = new Set<RoomDetailSource>([
@@ -152,6 +155,8 @@ const ROOM_DETAIL_SOURCES: ReadonlySet<string> = new Set<RoomDetailSource>([
   'identity_changes',
   'homeserver_details',
   'space_hierarchy',
+  'space_graph',
+  'space_browse',
   'discovery',
 ])
 

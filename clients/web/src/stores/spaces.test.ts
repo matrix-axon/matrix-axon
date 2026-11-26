@@ -11,17 +11,23 @@ import {
   vi,
 } from 'vitest'
 import { createApiClient } from '../api/client'
-import { TIMELINE_EVENT, type LiveFrame } from '../api/frames'
+import {
+  ROOM_DETAILS_CHANGED,
+  TIMELINE_EVENT,
+  type LiveFrame,
+} from '../api/frames'
 import type { LiveConnection } from './live-connection'
 import type { RoomDto } from './room-list'
 import type { RoomsStore } from './rooms'
-import { createSpacesStore } from './spaces'
+import { createSpacesStore, spacePickerEntries } from './spaces'
+import { spaceReadHandlers } from '../test/room-details'
+import type { SpaceGraphLink } from './space-graph'
 
 const BASE_URL = 'http://axon.test'
 const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
 const SPACE = '!space:example.org'
 
-const server = setupServer()
+const server = setupServer(...spaceReadHandlers(BASE_URL, 404))
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
@@ -202,11 +208,7 @@ it('ignores removed relationships, unjoined children, and other accounts when te
     { ...plainRoom('!foreign:hs'), account_id: 'other-account' },
   ]
   await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
-  expect(
-    store.children.value
-      .get(`${ACCOUNT}/${SPACE}`)
-      ?.map((child) => child.room_id),
-  ).not.toContain('!removed:hs')
+  expect(store.parents.value.has(`${ACCOUNT}/!removed:hs`)).toBe(false)
   expect(store.visible.value).toEqual([])
   rooms.value = [space(), plainRoom('!foreign:hs')]
   expect(store.visible.value.map((room) => room.room_id)).toEqual([SPACE])
@@ -286,7 +288,7 @@ it('does not infer empty membership from a stale or failed room catalog', async 
   expect(store.visible.value.map((room) => room.room_id)).toEqual([SPACE])
 })
 
-it('treats subspace-only parents as empty in the shallow room picker', async () => {
+it('keeps the shallow picker when the server has no graph route', async () => {
   server.use(
     http.get(
       `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/space/children`,
@@ -402,4 +404,248 @@ it('keeps the account filter when the room catalog is stale or failed', async ()
   stale.value = false
   error.value = 'Could not load rooms'
   expect(store.visible.value.map((room) => room.account_id)).toEqual([OTHER])
+})
+
+const graphUrl = `${BASE_URL}/v1/accounts/:accountId/spaces/graph`
+const discoveredUrl = `${BASE_URL}/v1/accounts/:accountId/spaces/discovered`
+const key = (roomId: string) => `${ACCOUNT}/${roomId}`
+const link = (
+  parent: string,
+  child: string,
+  order?: string,
+  origin_ts = 0,
+): SpaceGraphLink => ({
+  parent_room_id: parent,
+  child_room_id: child,
+  source: 'child',
+  canonical: false,
+  order,
+  origin_ts,
+})
+
+function change(source: 'space_graph' | 'space_browse', accountId = ACCOUNT) {
+  return {
+    type: ROOM_DETAILS_CHANGED,
+    accountId,
+    payload: { room_id: '!different-room:hs', sources: [source] },
+  }
+}
+
+it('expands joined branches in Matrix order while keeping saved root order', async () => {
+  const early = '!early:hs'
+  const later = '!later:hs'
+  const otherRoot = '!other-root:hs'
+  const leaf = '!leaf:hs'
+  const oldest = '!oldest:hs'
+  const tieFirst = '!earlier-id:hs'
+  server.use(
+    http.get(graphUrl, () =>
+      HttpResponse.json({
+        data: {
+          links: [
+            link(SPACE, later),
+            link(SPACE, tieFirst, undefined, -2),
+            link(SPACE, oldest, undefined, -2),
+            link(SPACE, early, 'A'),
+            link(later, leaf),
+            {
+              ...link(otherRoot, SPACE),
+              source: 'parent_claim',
+              canonical: true,
+            },
+            link(early, leaf),
+            link(otherRoot, early),
+            link(SPACE, early, 'A'),
+          ],
+        },
+      }),
+    ),
+  )
+  const { store, rooms, counts } = harness()
+  rooms.value = [
+    space(),
+    space(early),
+    space(later),
+    space(oldest),
+    space(tieFirst),
+    space(otherRoot),
+    plainRoom(leaf),
+  ]
+  await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
+  const entries = () => spacePickerEntries(store, [key(otherRoot)], new Map())
+  expect(entries().map(({ space }) => space.room_id)).toEqual([
+    otherRoot,
+    SPACE,
+  ])
+  store.expanded.value = new Set(entries().map(({ path }) => path))
+  expect(entries().map(({ space }) => space.room_id)).toEqual([
+    otherRoot,
+    early,
+    SPACE,
+    early,
+    tieFirst,
+    oldest,
+    later,
+  ])
+
+  store.selected.value = key(SPACE)
+  expect(store.selectedRooms.value).toEqual(new Set([key(leaf)]))
+  counts.value = new Map([
+    [key(leaf), 3],
+    [key(early), 90],
+  ])
+  expect(store.unread.value).toEqual(
+    new Map([SPACE, early, later, otherRoot].map((id) => [key(id), 3])),
+  )
+  store.selected.value = key(early)
+  expect(store.selectedRooms.value).toEqual(new Set([key(leaf)]))
+})
+
+it('cuts picker cycles and keeps every space reachable and selectable', async () => {
+  const second = '!second:hs'
+  const leaf = '!leaf:hs'
+  server.use(
+    http.get(graphUrl, () =>
+      HttpResponse.json({
+        data: {
+          links: [link(SPACE, second), link(second, SPACE), link(SPACE, leaf)],
+        },
+      }),
+    ),
+  )
+  const { store, rooms, counts } = harness()
+  rooms.value = [space(), space(second), plainRoom(leaf)]
+  await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
+  const entries = () => spacePickerEntries(store, [], new Map())
+  expect(entries().map(({ space }) => space.room_id)).toEqual([second])
+  store.expanded.value = new Set([entries()[0].path])
+  expect(entries().map(({ space }) => space.room_id)).toEqual([second, SPACE])
+  expect(entries()[1].expandable).toBe(false)
+  store.selected.value = key(second)
+  expect(store.selectedRooms.value).toEqual(new Set([key(leaf)]))
+  counts.value = new Map([[key(leaf), 4]])
+  expect(store.unread.value.get(key(SPACE))).toBe(4)
+  expect(store.unread.value.get(key(second))).toBe(4)
+})
+
+it('reloads account graph pages after invalidation during pagination and removes dropped links', async () => {
+  const child = '!child:hs'
+  const requests: string[] = []
+  let release: (() => void) | undefined
+  server.use(
+    http.get(graphUrl, async ({ request }) => {
+      const cursor = new URL(request.url).searchParams.get('cursor') ?? ''
+      requests.push(cursor)
+      if (requests.length === 1) {
+        return HttpResponse.json({ data: { links: [], next_cursor: 'second' } })
+      }
+      if (cursor === 'second') {
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+        return HttpResponse.json({ data: { links: [link(SPACE, child)] } })
+      }
+      return HttpResponse.json({ data: { links: [] } })
+    }),
+  )
+  const { store, rooms, emit, reconnects } = harness()
+  rooms.value = [space(), plainRoom(child)]
+  await vi.waitFor(() => expect(release).toBeDefined())
+  emit(change('space_graph', OTHER))
+  expect(requests).toEqual(['', 'second'])
+  emit(change('space_graph'))
+  release?.()
+  await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
+  expect(requests).toEqual(['', 'second', ''])
+  expect(store.visible.value).toEqual([])
+  reconnects.value += 1
+  await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
+  expect(requests).toEqual(['', 'second', '', ''])
+})
+
+it('uses cached discovered memberships through ancestors and expires them locally', async () => {
+  const nested = '!nested:hs'
+  const joinedSpace = '!through:hs'
+  const leaf = '!leaf:hs'
+  const remoteOnly = '!remote-only:hs'
+  const end = Date.now() + 60_000
+  const discover = vi.fn(({ request }: { request: Request }) =>
+    new URL(request.url).searchParams.has('cursor')
+      ? HttpResponse.json({
+          data: {
+            memberships: [
+              { space_id: nested, room_id: joinedSpace, expires_at: end },
+            ],
+          },
+        })
+      : HttpResponse.json({
+          data: {
+            memberships: [
+              { space_id: nested, room_id: remoteOnly, expires_at: end },
+            ],
+            next_cursor: 'next',
+          },
+        }),
+  )
+  server.use(
+    http.get(graphUrl, () =>
+      HttpResponse.json({
+        data: { links: [link(SPACE, nested), link(joinedSpace, leaf)] },
+      }),
+    ),
+    http.get(discoveredUrl, discover),
+  )
+  const { store, rooms, counts } = harness()
+  rooms.value = [space(), space(nested), space(joinedSpace), plainRoom(leaf)]
+  vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
+  try {
+    await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
+    store.selected.value = key(SPACE)
+    expect(store.selectedRooms.value).toEqual(new Set([key(leaf)]))
+    expect(discover).toHaveBeenCalledTimes(2)
+    counts.value = new Map([[key(leaf), 2]])
+    expect(store.unread.value.get(key(SPACE))).toBe(2)
+    expect(store.unread.value.get(key(nested))).toBe(2)
+    expect(store.nested.value.has(key(joinedSpace))).toBe(false)
+    vi.setSystemTime(end - 1)
+    await vi.advanceTimersByTimeAsync(60_001)
+    expect(store.selectedRooms.value).toEqual(new Set())
+    expect(store.unread.value.has(key(SPACE))).toBe(false)
+    expect(discover).toHaveBeenCalledTimes(2)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('reconciles cached memberships on browse invalidation', async () => {
+  const child = '!child:hs'
+  let present = true
+  server.use(
+    http.get(graphUrl, () => HttpResponse.json({ data: { links: [] } })),
+    http.get(discoveredUrl, () =>
+      HttpResponse.json({
+        data: {
+          memberships: present
+            ? [
+                {
+                  space_id: SPACE,
+                  room_id: child,
+                  expires_at: Date.now() + 60_000,
+                },
+              ]
+            : [],
+        },
+      }),
+    ),
+  )
+  const { store, rooms, emit } = harness()
+  rooms.value = [space(), plainRoom(child)]
+  await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
+  store.selected.value = key(SPACE)
+  expect(store.selectedRooms.value).toEqual(new Set([key(child)]))
+  present = false
+  emit(change('space_browse'))
+  await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
+  expect(store.visible.value).toEqual([])
+  expect(store.selected.value).toBeNull()
 })

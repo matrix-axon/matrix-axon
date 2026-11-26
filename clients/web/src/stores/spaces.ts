@@ -1,4 +1,5 @@
 import {
+  batch,
   computed,
   effect,
   signal,
@@ -6,42 +7,45 @@ import {
   type ReadonlySignal,
   type Signal,
 } from '@preact/signals'
-import type { components } from '../api/schema'
-import { timelineEvent } from '../api/frames'
-import { apiErrorMessage, type ApiClient } from '../api/client'
+import { roomDetailsChange, timelineEvent } from '../api/frames'
+import type { ApiClient } from '../api/client'
+import type { AccountsStore } from './accounts'
 import type { LiveConnection } from './live-connection'
 import { roomKey, roomTitle, type RoomDto } from './room-list'
 import type { RoomsStore } from './rooms'
-import type { AccountsStore } from './accounts'
-
-export type SpaceChildDto = components['schemas']['SpaceChildDto']
+import {
+  projectSpaces,
+  reachableKeys,
+  type DiscoveredMembership,
+  type SpaceGraph,
+} from './space-graph'
+import {
+  readDiscoveredMemberships,
+  readSpaceGraph,
+  spaceLoadError,
+} from './space-graph-api'
 
 export interface SpacesStore {
   selected: Signal<string | null>
-  /**
-   * Browser-local account narrowing shared by the rail and the room list:
-   * `'all'` or an account id. The rail hides spaces the account has no rooms in.
-   */
+  /** Browser-local account narrowing shared by the rail and the room list. */
   accountFilter: Signal<string>
-  /** Temporary fallback while the saved account is unknown or unavailable. */
   effectiveAccountFilter: ReadonlySignal<string>
   visible: ReadonlySignal<readonly RoomDto[]>
-  /**
-   * Total unread notifications per space key, summed over the joined direct
-   * child rooms of the space's own account. Spaces with nothing unread are
-   * absent.
-   */
+  subspaces: ReadonlySignal<ReadonlyMap<string, readonly string[]>>
+  nested: ReadonlySignal<ReadonlySet<string>>
+  expanded: Signal<ReadonlySet<string>>
+  /** Total unread notifications across distinct reachable joined chat rooms. */
   unread: ReadonlySignal<ReadonlyMap<string, number>>
-  children: ReadonlySignal<ReadonlyMap<string, readonly SpaceChildDto[]>>
-  loading: ReadonlySignal<ReadonlySet<string>>
+  /** Joined chat room keys in the selected space, once its graph is known. */
+  selectedRooms: ReadonlySignal<ReadonlySet<string> | null>
+  parents: ReadonlySignal<
+    ReadonlyMap<string, ReadonlyMap<string, readonly string[]>>
+  >
   errors: ReadonlySignal<ReadonlyMap<string, string>>
-  /**
-   * Whether the picker shows its per-space move controls. Session-only and off
-   * by default: the rail is kept as narrow and short as possible, so this
-   * chrome appears only when the user asks for it (`KEYS.reorderSpaces`).
-   */
+  loading: ReadonlySignal<ReadonlySet<string>>
   reordering: Signal<boolean>
-  refresh(space: Pick<RoomDto, 'account_id' | 'room_id'>): void
+  refresh(space: Pick<RoomDto, 'account_id'>): void
+  resetSession(): void
 }
 
 /** Order the picker exactly as the user sees it: saved ranks, then title. */
@@ -63,10 +67,68 @@ export function orderedSpaces(
   })
 }
 
-/**
- * Joined spaces are ordinary RoomDto entries; this store adds their ordered
- * `m.space.child` projection without making the room list understand HTTP.
- */
+export interface SpacePickerEntry {
+  space: RoomDto
+  path: string
+  depth: number
+  expandable: boolean
+}
+
+/** Picker display and keyboard cycling use the same expanded branch order. */
+export function spacePickerEntries(
+  spaces: SpacesStore,
+  order: readonly string[],
+  titles: ReadonlyMap<string, string>,
+): SpacePickerEntry[] {
+  const visible = spaces.visible.value
+  const byKey = new Map(visible.map((space) => [roomKey(space), space]))
+  const roots = orderedSpaces(
+    visible.filter((space) => !spaces.nested.value.has(roomKey(space))),
+    order,
+    titles,
+  )
+  const subspaces = spaces.subspaces.value
+  const expanded = spaces.expanded.value
+  const pending = roots.reverse().map((space) => ({
+    space,
+    path: JSON.stringify(roomKey(space)),
+    depth: 0,
+    ancestors: new Set<string>(),
+  }))
+  const entries: SpacePickerEntry[] = []
+  while (pending.length > 0) {
+    const { space, path, depth, ancestors } = pending.pop()!
+    const key = roomKey(space)
+    const children = (subspaces.get(key) ?? []).filter(
+      (child) => !ancestors.has(child),
+    )
+    entries.push({ space, path, depth, expandable: children.length > 0 })
+    if (!expanded.has(path)) continue
+    const nextAncestors = new Set(ancestors).add(key)
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      const child = children[index]
+      const childSpace = byKey.get(child)
+      if (childSpace !== undefined) {
+        pending.push({
+          space: childSpace,
+          path: `${path}/${JSON.stringify(child)}`,
+          depth: depth + 1,
+          ancestors: nextAncestors,
+        })
+      }
+    }
+  }
+  return entries
+}
+
+type AccountRead = {
+  spaces: ReadonlyMap<string, string>
+  abort: AbortController | null
+}
+
+const MAX_ACCOUNT_READS = 3
+const MAX_TIMER_DELAY = 2_147_483_647
+
 export function createSpacesStore(
   api: ApiClient,
   rooms: RoomsStore,
@@ -75,6 +137,7 @@ export function createSpacesStore(
   accounts?: Pick<AccountsStore, 'accounts' | 'loading' | 'error'>,
 ): SpacesStore {
   const selected = signal<string | null>(null)
+  const expanded = signal<ReadonlySet<string>>(new Set())
   const reordering = signal(false)
   const effectiveAccountFilter = computed(() => {
     const saved = accountFilter.value
@@ -87,148 +150,240 @@ export function createSpacesStore(
       ? saved
       : 'all'
   })
-  const children = signal<ReadonlyMap<string, readonly SpaceChildDto[]>>(
-    new Map(),
-  )
+
+  const graphs = signal<ReadonlyMap<string, SpaceGraph>>(new Map())
+  const discovered = signal<
+    ReadonlyMap<string, readonly DiscoveredMembership[]>
+  >(new Map())
+  const accountErrors = signal<ReadonlyMap<string, string>>(new Map())
   const loading = signal<ReadonlySet<string>>(new Set())
-  const errors = signal<ReadonlyMap<string, string>>(new Map())
-  const requested = new Set<string>()
+  const reads = new Map<string, AccountRead>()
   const queued = new Set<string>()
-  const dirty = new Set<string>()
-  const queue: Array<Pick<RoomDto, 'account_id' | 'room_id'>> = []
-  let activeRequests = 0
+  let activeReads = 0
 
-  const joinedSpaces = () =>
-    rooms.rooms.value.filter((room) => room.room_type === 'm.space')
+  // Room DTOs also change on ordinary messages. Only membership and room
+  // type affect the graph, so leave its projection intact on those writes.
+  const catalog = signal<ReadonlyMap<string, RoomDto>>(new Map())
+  effect(() => {
+    const current = rooms.rooms.value
+    const previous = catalog.peek()
+    if (
+      current.length !== previous.size ||
+      current.some((room) => {
+        const entry = previous.get(roomKey(room))
+        return entry === undefined || entry.room_type !== room.room_type
+      })
+    ) {
+      catalog.value = new Map(current.map((room) => [roomKey(room), room]))
+    }
+  })
 
-  // Keep unknown/failed roots available. A cached successful projection stays
-  // authoritative during a background refetch, avoiding hidden-root flicker.
-  // Only a successful projection with no direct joined child room confirms emptiness.
-  // Filtering and room sort do not participate in this decision.
+  const now = signal(Date.now())
+  effect(() => {
+    const time = now.value
+    let nextExpiry = Infinity
+    for (const memberships of discovered.value.values()) {
+      for (const { expires_at } of memberships) {
+        if (expires_at > time) nextExpiry = Math.min(nextExpiry, expires_at)
+      }
+    }
+    if (nextExpiry === Infinity) return
+    const timer = setTimeout(
+      () => {
+        now.value = Date.now()
+      },
+      Math.min(MAX_TIMER_DELAY, Math.max(0, nextExpiry - Date.now())),
+    )
+    return () => clearTimeout(timer)
+  })
+
+  const projection = computed(() =>
+    projectSpaces(catalog.value, graphs.value, discovered.value, now.value),
+  )
+  const ready = (key: string, accountId: string) => {
+    const graph = graphs.value.get(accountId)
+    return (
+      graph !== undefined && (!('legacy' in graph) || graph.legacy.has(key))
+    )
+  }
+  const errors = computed(() => {
+    const next = new Map<string, string>()
+    for (const [key, room] of catalog.value) {
+      if (room.room_type !== 'm.space') continue
+      const graph = graphs.value.get(room.account_id)
+      const error =
+        accountErrors.value.get(room.account_id) ??
+        (graph !== undefined && 'legacy' in graph
+          ? graph.errors.get(key)
+          : undefined)
+      if (error !== undefined) next.set(key, error)
+    }
+    return next
+  })
   const visible = computed(() => {
-    // Unknown account availability must not hide cached rooms or spaces.
-    const scoped = joinedSpaces().filter(
-      (space) =>
-        effectiveAccountFilter.value === 'all' ||
-        space.account_id === effectiveAccountFilter.value,
-    )
-    // Cached/unconfirmed room summaries cannot establish joined membership.
-    if (rooms.stale.value || rooms.error.value !== null) return scoped
-    const joined = new Set(
-      rooms.rooms.value
-        .filter((room) => room.room_type !== 'm.space')
-        .map(roomKey),
-    )
-    return scoped.filter((space) => {
-      const key = roomKey(space)
-      const members = children.value.get(key)
+    const account = effectiveAccountFilter.value
+    const uncertain = rooms.stale.value || rooms.error.value !== null
+    const { members, subspaces, nested } = projection.value
+    return rooms.rooms.value.filter((room) => {
+      if (room.room_type !== 'm.space') return false
+      if (account !== 'all' && room.account_id !== account) return false
+      const key = roomKey(room)
       return (
-        members === undefined ||
+        uncertain ||
+        !ready(key, room.account_id) ||
         errors.value.has(key) ||
-        members.some((child) =>
-          joined.has(
-            roomKey({ account_id: space.account_id, room_id: child.room_id }),
-          ),
-        )
+        members.has(key) ||
+        subspaces.has(key) ||
+        nested.has(key)
       )
     })
   })
-
+  const selectedRooms = computed(() => {
+    const key = selected.value
+    const space = key === null ? undefined : catalog.value.get(key)
+    if (key === null || space === undefined || !ready(key, space.account_id)) {
+      return null
+    }
+    const joined = reachableKeys(key, projection.value.members)
+    for (const member of joined) {
+      if (catalog.value.get(member)?.room_type === 'm.space')
+        joined.delete(member)
+    }
+    return joined
+  })
   const unread = computed(() => {
     const totals = new Map<string, number>()
-    const joined = new Set(
-      rooms.rooms.value
-        .filter((room) => room.room_type !== 'm.space')
-        .map(roomKey),
-    )
-    for (const space of joinedSpaces()) {
-      const key = roomKey(space)
-      let total = 0
-      for (const child of children.value.get(key) ?? []) {
-        const childKey = roomKey({
-          account_id: space.account_id,
-          room_id: child.room_id,
-        })
-        if (joined.has(childKey)) total += rooms.unreadCount(childKey)
+    const { ancestors } = projection.value
+    for (const key of ancestors.keys()) {
+      if (catalog.value.get(key)?.room_type === 'm.space') continue
+      const count = rooms.unreadCount(key)
+      if (count === 0) continue
+      for (const space of reachableKeys(key, ancestors)) {
+        totals.set(space, (totals.get(space) ?? 0) + count)
       }
-      if (total > 0) totals.set(key, total)
     }
     return totals
   })
 
-  const runNext = () => {
-    if (activeRequests >= 6) return
-    const space = queue.shift()
-    if (space === undefined) return
-    activeRequests += 1
-    const key = roomKey(space)
-    void api
-      .GET('/v1/accounts/{account_id}/rooms/{room_id}/space/children', {
-        params: {
-          path: { account_id: space.account_id, room_id: space.room_id },
-        },
-      })
-      .then(({ data, error }) => {
-        const nextErrors = new Map(errors.value)
-        if (data === undefined) {
-          nextErrors.set(key, `Could not load space: ${apiErrorMessage(error)}`)
-        } else {
-          children.value = new Map(children.value).set(
-            key,
-            data.data.filter((child) => child.via.length > 0),
-          )
-          nextErrors.delete(key)
-        }
-        errors.value = nextErrors
-      })
-      .catch(() => {
-        errors.value = new Map(errors.value).set(key, 'Could not load space.')
-      })
-      .finally(() => {
-        queued.delete(key)
-        activeRequests -= 1
-        // A refresh that arrived mid-flight (an `m.space.child` frame, say) was
-        // coalesced into this request, which had already been sent and cannot
-        // reflect it. Re-queue rather than drop it, or the child list stays
-        // stale until the next reconnect.
-        if (dirty.delete(key)) {
-          refresh(space)
-        } else {
-          const next = new Set(loading.value)
-          next.delete(key)
-          loading.value = next
-        }
-        runNext()
-      })
-    runNext()
+  function runQueued(): void {
+    for (const accountId of queued) {
+      if (activeReads >= MAX_ACCOUNT_READS) return
+      const read = reads.get(accountId)
+      if (read === undefined || read.abort !== null) continue
+      queued.delete(accountId)
+      const abort = new AbortController()
+      read.abort = abort
+      activeReads += 1
+      void readAccount(accountId, read, abort)
+    }
   }
 
-  const refresh = (space: Pick<RoomDto, 'account_id' | 'room_id'>) => {
-    const key = roomKey(space)
-    if (queued.has(key)) {
-      // Already queued: if it is still waiting in `queue` it will pick up the
-      // change anyway; if it is in flight, mark it for a follow-up fetch.
-      if (!queue.some((pending) => roomKey(pending) === key)) dirty.add(key)
-      return
+  async function readAccount(
+    accountId: string,
+    read: AccountRead,
+    abort: AbortController,
+  ): Promise<void> {
+    const requestedSpaces = read.spaces
+    try {
+      const [graph, memberships] = await Promise.allSettled([
+        readSpaceGraph(api, accountId, requestedSpaces, abort.signal),
+        readDiscoveredMemberships(api, accountId, abort.signal),
+      ])
+      if (abort.signal.aborted) return
+      batch(() => {
+        const nextErrors = new Map(accountErrors.peek())
+        if (graph.status === 'fulfilled') {
+          let nextGraph = graph.value
+          if ('legacy' in nextGraph) {
+            if (requestedSpaces !== read.spaces) queued.add(accountId)
+            const previous = graphs.peek().get(accountId)
+            if (previous !== undefined && 'legacy' in previous) {
+              const legacy = new Map(nextGraph.legacy)
+              for (const key of nextGraph.errors.keys()) {
+                const cached = previous.legacy.get(key)
+                if (cached !== undefined) legacy.set(key, cached)
+              }
+              nextGraph = { ...nextGraph, legacy }
+            }
+          }
+          graphs.value = new Map(graphs.peek()).set(accountId, nextGraph)
+          nextErrors.delete(accountId)
+        } else {
+          nextErrors.set(accountId, spaceLoadError(graph.reason))
+        }
+        if (memberships.status === 'fulfilled') {
+          now.value = Date.now()
+          discovered.value = new Map(discovered.peek()).set(
+            accountId,
+            memberships.value,
+          )
+        } else if (!nextErrors.has(accountId)) {
+          nextErrors.set(accountId, spaceLoadError(memberships.reason))
+        }
+        accountErrors.value = nextErrors
+      })
+    } finally {
+      activeReads -= 1
+      read.abort = null
+      if (reads.get(accountId) === read && !queued.has(accountId)) {
+        const next = new Set(loading.peek())
+        next.delete(accountId)
+        loading.value = next
+      }
+      runQueued()
     }
-    queued.add(key)
-    queue.push(space)
-    loading.value = new Set(loading.value).add(key)
-    runNext()
+  }
+
+  function refreshAccount(accountId: string): void {
+    if (!reads.has(accountId)) return
+    queued.add(accountId)
+    if (!loading.peek().has(accountId)) {
+      loading.value = new Set(loading.peek()).add(accountId)
+    }
+    runQueued()
+  }
+
+  function removeAccount(accountId: string): void {
+    reads.get(accountId)?.abort?.abort()
+    reads.delete(accountId)
+    queued.delete(accountId)
+    const nextLoading = new Set(loading.peek())
+    const nextGraphs = new Map(graphs.peek())
+    const nextDiscovered = new Map(discovered.peek())
+    const nextErrors = new Map(accountErrors.peek())
+    if (nextLoading.delete(accountId)) loading.value = nextLoading
+    if (nextGraphs.delete(accountId)) graphs.value = nextGraphs
+    if (nextDiscovered.delete(accountId)) discovered.value = nextDiscovered
+    if (nextErrors.delete(accountId)) accountErrors.value = nextErrors
   }
 
   effect(() => {
-    const spaces = joinedSpaces()
-    const present = new Set(spaces.map(roomKey))
-    for (const space of spaces) {
-      const key = roomKey(space)
-      if (!requested.has(key)) {
-        requested.add(key)
-        refresh(space)
+    const byAccount = new Map<string, Map<string, string>>()
+    for (const [key, room] of catalog.value) {
+      if (room.room_type !== 'm.space') continue
+      const spaces = byAccount.get(room.account_id) ?? new Map()
+      spaces.set(key, room.room_id)
+      byAccount.set(room.account_id, spaces)
+    }
+    for (const accountId of reads.keys()) {
+      if (!byAccount.has(accountId)) removeAccount(accountId)
+    }
+    for (const [accountId, spaces] of byAccount) {
+      const read = reads.get(accountId)
+      if (read === undefined) {
+        reads.set(accountId, { spaces, abort: null })
+        refreshAccount(accountId)
+      } else if (
+        read.spaces.size !== spaces.size ||
+        [...spaces.keys()].some((key) => !read.spaces.has(key))
+      ) {
+        read.spaces = spaces
+        // The account-wide graph already includes links for a newly listed
+        // space. Only the legacy read needs to fetch it individually.
+        const graph = graphs.peek().get(accountId)
+        if (graph !== undefined && 'legacy' in graph) refreshAccount(accountId)
       }
     }
-    if (selected.value !== null && !present.has(selected.value))
-      selected.value = null
   })
 
   effect(() => {
@@ -242,26 +397,34 @@ export function createSpacesStore(
   })
 
   live.subscribe((frame) => {
+    const change = roomDetailsChange(frame)
+    if (
+      change?.sources.has('space_graph') ||
+      change?.sources.has('space_browse')
+    ) {
+      refreshAccount(frame.accountId)
+      return
+    }
+    // Servers predating the graph only announce child state in the timeline.
+    const graph = graphs.peek().get(frame.accountId)
+    if (graph !== undefined && 'links' in graph) return
     const event = timelineEvent(frame)
-    if (event === null || event.type !== 'm.space.child') return
-    const space = joinedSpaces().find(
-      (candidate) =>
-        candidate.account_id === event.account_id &&
-        candidate.room_id === event.room_id,
-    )
-    if (space !== undefined) refresh(space)
+    if (
+      event?.type === 'm.space.child' &&
+      reads.get(frame.accountId)?.spaces.has(roomKey(event))
+    ) {
+      refreshAccount(frame.accountId)
+    }
   })
-  // A reconnect means the socket missed frames, so every space is refetched.
-  // `joinedSpaces()` reads `rooms.rooms`, which changes on every incoming
-  // timeline event; reading it inside the effect body would subscribe this
-  // effect to it and turn each message into a refetch of every space. Track the
-  // reconnect count explicitly and read the room list untracked.
+
   let lastReconnects = live.reconnects.peek()
   effect(() => {
     const reconnects = live.reconnects.value
     if (reconnects === lastReconnects) return
     lastReconnects = reconnects
-    for (const space of untracked(joinedSpaces)) refresh(space)
+    untracked(() => {
+      for (const accountId of reads.keys()) refreshAccount(accountId)
+    })
   })
 
   return {
@@ -269,11 +432,20 @@ export function createSpacesStore(
     accountFilter,
     effectiveAccountFilter,
     visible,
+    subspaces: computed(() => projection.value.subspaces),
+    nested: computed(() => projection.value.nested),
+    expanded,
     unread,
-    children,
-    loading,
+    selectedRooms,
+    parents: computed(() => projection.value.parents),
     errors,
+    loading,
     reordering,
-    refresh,
+    refresh: ({ account_id }) => refreshAccount(account_id),
+    resetSession: () => {
+      for (const accountId of reads.keys()) removeAccount(accountId)
+      if (expanded.peek().size > 0) expanded.value = new Set()
+      if (selected.peek() !== null) selected.value = null
+    },
   }
 }
