@@ -164,10 +164,16 @@ pub async fn send_message(
 /// the original `media.upstream_upload_timeout_secs` (60 s by default); the
 /// thumbnail's upload, which is best-effort, 10 s; and building and sending
 /// the event, including any reply lookup, `sync.send_mutation_timeout_secs`
-/// (30 s by default). That is 105 s with the defaults, so a client should
-/// wait at least that long, and send a `txn_id`, before retrying. For images,
-/// Axon probes dimensions and can generate a thumbnail while the original
-/// uploads, within the original's step and a 5 s budget of its own.
+/// (30 s by default). A request with `url_previews` first waits up to 5 s
+/// for a preview slot. So Axon answers within 105 s with the defaults, or
+/// 110 s with `url_previews`, plus the time to read the staged files from
+/// disk. A client should wait longer than that, allowing for the network,
+/// and send a `txn_id`, so that a retry after it gives up joins the send
+/// instead of posting it again. For images, Axon probes dimensions and can
+/// generate a thumbnail while the original uploads, within a 5 s budget of
+/// its own and the original's step: inspection still running when that
+/// step's budget ends is given up, and the image goes without what it would
+/// have added.
 #[utoipa::path(
     post,
     path = "/v1/accounts/{account_id}/rooms/{room_id}/send-media",

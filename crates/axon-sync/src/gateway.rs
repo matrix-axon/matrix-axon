@@ -1106,17 +1106,21 @@ fn check_preview_content(room_id: &RoomId, content: &mut Value) -> Result<(), Ga
 ///
 /// 1. [`upload`](Self::upload): resolving the room, checking its encryption,
 ///    uploading any preview images, and uploading the original. Image
-///    inspection runs alongside the upload under its own 5 s, and the step
-///    ends when both have.
+///    inspection runs alongside the upload under its own 5 s, and is given up
+///    at this step's deadline (see [`upload_original`]).
 /// 2. [`thumbnail`](Self::thumbnail): the thumbnail's upload, best-effort.
 /// 3. [`event`](Self::event): looking up the replied-to event, a plaintext
 ///    room's second encryption check, and sending the event.
 ///
 /// With the defaults that is 60 s, 10 s and 30 s, and the API's 5 s for a
-/// client thumbnail comes before them all: 105 s, which the web client waits
-/// for, sending a `txn_id` so a retry joins the first send rather than
-/// posting twice (issue 24). Only an upload that starts within the last 5 s
-/// of its bound can let inspection end after it, by at most those 5 s.
+/// client thumbnail comes before them all: 105 s, plus up to 5 s waiting for
+/// a preview slot when the request carries `url_previews`. A client must wait
+/// longer than that, and send a `txn_id`, or a send that succeeds after it
+/// has given up is posted again by its retry. The web client does both from
+/// pull request 1281 (issue 24: 115 s, with a 5 s margin), which is why these
+/// bounds ship after it and not before. A client that gives up sooner, such
+/// as the TUI (issue 1212) or a web client from before 1281, can see a late
+/// success.
 ///
 /// A text send with link previews has no attachment and keeps one budget,
 /// [`upload`](Self::upload), for everything: the web client waits for that
@@ -1251,9 +1255,13 @@ async fn upload_thumbnail(
     }
 }
 
-/// Upload the original while the server inspects the staged image. Each has
-/// its own deadline: the upload the step's, inspection its own 5 s, so a slow
-/// decoder cannot fail the send. The step ends when both have.
+/// Upload the original while the server inspects the staged image, both
+/// within the upload step's bound. Inspection also has its own 5 s, so a slow
+/// decoder cannot fail the send: when the upload has finished and inspection
+/// is still running at the step's deadline, the send goes on without what
+/// inspection would have added (dimensions, a generated thumbnail). That can
+/// happen only when the upload began in the last 5 s of the bound, and it
+/// keeps the step, and so the whole send, inside ADR 0142 section 8's sum.
 async fn upload_original(
     room: &Room,
     send: MediaSend,
@@ -1273,7 +1281,16 @@ async fn upload_original(
         encrypted,
     ));
     let source = if let Some(image) = image {
-        let (metadata, source) = tokio::try_join!(async { Ok(image.await) }, upload)?;
+        let deadline = clock.deadline;
+        let inspect = async move {
+            Ok(tokio::time::timeout_at(deadline, image)
+                .await
+                .unwrap_or_else(|_| {
+                    tracing::warn!(room_id = %room.room_id(), error_kind = "inspection_past_upload_bound", "image inspection outlasted the upload step; sending without its metadata");
+                    axon_core::SendImageMetadata::default()
+                }))
+        };
+        let (metadata, source) = tokio::try_join!(inspect, upload)?;
         metadata.apply(&mut attachment);
         source
     } else {
@@ -4137,6 +4154,69 @@ mod tests {
         assert_eq!(seen.sent[0].1["info"]["w"], 1200);
         assert_eq!(seen.sent[0].1["info"]["h"], 900);
         assert!(seen.sent[0].1["info"].get("thumbnail_info").is_none());
+        server.abort();
+    }
+
+    /// Inspection that is still running at the upload step's deadline, after
+    /// the original has uploaded, is given up: the send goes on without its
+    /// metadata, so inspection can never carry the send past section 8's sum.
+    #[tokio::test]
+    async fn image_inspection_ends_at_the_upload_steps_bound() {
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        let seen = Arc::new(Mutex::new(ThumbSeen::default()));
+        let (room, server) = preview_test_room(
+            axum::Router::new()
+                .fallback(thumb_handler)
+                .with_state(seen.clone()),
+        )
+        .await;
+        room.update_room_info(|mut info| {
+            info.set_encryption_event(None);
+            info.mark_encryption_state_synced();
+            (info, matrix_sdk_base::RoomInfoNotableUpdateReasons::empty())
+        })
+        .await;
+        let mut attachment = with_thumbnail(MediaSendKind::Image, "image/png");
+        attachment.thumbnail = None;
+        let mut send = axon_core::MediaSend::from(attachment);
+        send.image = Some(Box::pin(async {
+            // Inside inspection's own 5 s, but past the upload step's bound.
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            axon_core::SendImageMetadata {
+                dimensions: Some((1200, 900)),
+                thumbnail: None,
+            }
+        }));
+        let bounds = super::MediaSendBounds {
+            upload: Duration::from_millis(500),
+            ..TEST_BOUNDS
+        };
+        let started = std::time::Instant::now();
+        super::send_media_in_room(
+            (&room, uuid::Uuid::nil()),
+            send,
+            None,
+            None,
+            Relation::default(),
+            None,
+            super::MediaClock::start(bounds),
+        )
+        .await
+        .expect("slow inspection does not fail the send");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the send waited for inspection past the upload bound: {elapsed:?}"
+        );
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.uploads, [("image/png".into(), 3)]);
+        assert!(
+            seen.sent[0].1["info"].get("w").is_none(),
+            "{}",
+            seen.sent[0].1
+        );
         server.abort();
     }
 
