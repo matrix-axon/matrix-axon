@@ -8,7 +8,7 @@ import {
   useRef,
   useState,
 } from 'preact/hooks'
-import { layoutMode } from '../layout'
+import { SINGLE_PANE_QUERY, layoutMode } from '../layout'
 import { localRoomHref } from '../matrix-to'
 import { useServices } from '../services'
 import { ErrorBanner } from './ErrorBanner'
@@ -634,6 +634,20 @@ export function RoomList() {
     composerFocus.value += 1
   }
 
+  /**
+   * A mouse click on a row. In the single-pane layout the clicked link goes
+   * away with the list, and `RoomPage` lands focus on the room title instead
+   * (ADR 0062, WCR-17) — so the composer must not take it, as it must not on a
+   * touch tap. Where the list stays beside the room it does take it.
+   */
+  const activateRoomByPointer = (room: RoomDto, href: string) => {
+    if (window.matchMedia(SINGLE_PANE_QUERY).matches) {
+      navigateToRoom(room, href)
+      return
+    }
+    activateRoom(room, href)
+  }
+
   const activateRoom = (room: RoomDto, href?: string) => {
     navigateToRoom(
       room,
@@ -1168,7 +1182,7 @@ export function RoomList() {
                     : undefined
                 }
                 onNavigate={navigateToRoom}
-                onPointerActivate={activateRoom}
+                onPointerActivate={activateRoomByPointer}
               />
             )
           })}

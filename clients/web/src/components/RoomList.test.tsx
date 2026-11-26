@@ -13,6 +13,7 @@ import {
   onTestFinished,
   vi,
 } from 'vitest'
+import { SINGLE_PANE_QUERY } from '../layout'
 import { ServicesContext } from '../services'
 import { roomKey } from '../stores/room-list'
 import { TEST_BASE_URL, testServices } from '../test/services'
@@ -1268,6 +1269,40 @@ describe('RoomList keyboard shortcuts (ADR 0078)', () => {
     expect(window.location.pathname).toBe(
       `/${ACCOUNT}/rooms/${encodeURIComponent('!ops:hs')}`,
     )
+  })
+
+  it('a mouse click leaves focus to the room title in the single-pane layout', async () => {
+    const matchMedia = vi.spyOn(window, 'matchMedia').mockImplementation(
+      (query: string) =>
+        ({
+          media: query,
+          matches: query === SINGLE_PANE_QUERY,
+          onchange: null,
+          addListener: () => {},
+          removeListener: () => {},
+          addEventListener: () => {},
+          removeEventListener: () => {},
+          dispatchEvent: () => false,
+        }) as MediaQueryList,
+    )
+    try {
+      const { services, findByText } = renderPage()
+      const rowText = await findByText('Ops')
+      const row = rowText.closest<HTMLAnchorElement>('a.room-link')!
+      const before = services.composerFocus.value
+
+      fireEvent.click(row)
+
+      await waitFor(() =>
+        expect(window.location.pathname).toBe(
+          `/${ACCOUNT}/rooms/${encodeURIComponent('!ops:hs')}`,
+        ),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(services.composerFocus.value).toBe(before)
+    } finally {
+      matchMedia.mockRestore()
+    }
   })
 })
 
