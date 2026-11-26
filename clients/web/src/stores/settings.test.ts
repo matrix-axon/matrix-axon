@@ -81,6 +81,7 @@ describe('createSettingsStore', () => {
       spaceOrder: [],
       spacesPaneCollapsed: false,
       spacesPaneAutoHide: true,
+      showSpaceNames: false,
       sidebarWidth: 420,
       roomSort: 'recent',
       roomFilter: 'all',
@@ -187,6 +188,7 @@ describe('room-list settings (ADRs 0038/0042)', () => {
     expect(store.spaceOrder.value).toEqual([])
     expect(store.spacesPaneCollapsed.value).toBe(false)
     expect(store.spacesPaneAutoHide.value).toBe(true)
+    expect(store.showSpaceNames.value).toBe(false)
     expect(store.sidebarWidth.value).toBe(420)
     expect(store.roomSort.value).toBe('recent')
     expect(store.roomFilter.value).toBe('all')
@@ -202,6 +204,7 @@ describe('room-list settings (ADRs 0038/0042)', () => {
     store.moveSpace('account/!two:hs', 0, shown)
     store.spacesPaneCollapsed.value = true
     store.spacesPaneAutoHide.value = false
+    store.showSpaceNames.value = true
     store.sidebarWidth.value = 480
     expect(store.spaceOrder.value).toEqual([
       'account/!two:hs',
@@ -213,6 +216,7 @@ describe('room-list settings (ADRs 0038/0042)', () => {
     ])
     expect(createSettingsStore(storage).spacesPaneCollapsed.value).toBe(true)
     expect(createSettingsStore(storage).spacesPaneAutoHide.value).toBe(false)
+    expect(createSettingsStore(storage).showSpaceNames.value).toBe(true)
     expect(createSettingsStore(storage).sidebarWidth.value).toBe(480)
   })
 

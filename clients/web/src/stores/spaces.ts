@@ -70,6 +70,7 @@ export function orderedSpaces(
 export interface SpacePickerEntry {
   space: RoomDto
   path: string
+  parentPath: string | null
   depth: number
   expandable: boolean
 }
@@ -92,17 +93,24 @@ export function spacePickerEntries(
   const pending = roots.reverse().map((space) => ({
     space,
     path: JSON.stringify(roomKey(space)),
+    parentPath: null as string | null,
     depth: 0,
     ancestors: new Set<string>(),
   }))
   const entries: SpacePickerEntry[] = []
   while (pending.length > 0) {
-    const { space, path, depth, ancestors } = pending.pop()!
+    const { space, path, parentPath, depth, ancestors } = pending.pop()!
     const key = roomKey(space)
     const children = (subspaces.get(key) ?? []).filter(
       (child) => !ancestors.has(child),
     )
-    entries.push({ space, path, depth, expandable: children.length > 0 })
+    entries.push({
+      space,
+      path,
+      parentPath,
+      depth,
+      expandable: children.length > 0,
+    })
     if (!expanded.has(path)) continue
     const nextAncestors = new Set(ancestors).add(key)
     for (let index = children.length - 1; index >= 0; index -= 1) {
@@ -112,6 +120,7 @@ export function spacePickerEntries(
         pending.push({
           space: childSpace,
           path: `${path}/${JSON.stringify(child)}`,
+          parentPath: path,
           depth: depth + 1,
           ancestors: nextAncestors,
         })

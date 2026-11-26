@@ -82,6 +82,8 @@ export interface SettingsV1 {
   spacesPaneCollapsed: boolean
   /** Keep the rail hidden while there is no meaningful space choice. */
   spacesPaneAutoHide: boolean
+  /** Show names in the Spaces picker on wider displays. */
+  showSpaceNames: boolean
   /** Browser-local desktop sidebar width in CSS pixels. */
   sidebarWidth: number
   /** Persisted room-list sort mode (ADR 0042). */
@@ -241,6 +243,7 @@ const DEFAULTS: SettingsV1 = {
   spaceOrder: [],
   spacesPaneCollapsed: false,
   spacesPaneAutoHide: true,
+  showSpaceNames: false,
   sidebarWidth: 420,
   roomSort: 'recent',
   roomFilter: 'all',
@@ -381,6 +384,10 @@ function parse(
       typeof v1.spacesPaneAutoHide === 'boolean'
         ? v1.spacesPaneAutoHide
         : DEFAULTS.spacesPaneAutoHide,
+    showSpaceNames:
+      typeof v1.showSpaceNames === 'boolean'
+        ? v1.showSpaceNames
+        : DEFAULTS.showSpaceNames,
     sidebarWidth:
       typeof v1.sidebarWidth === 'number' &&
       Number.isFinite(v1.sidebarWidth) &&
@@ -504,6 +511,7 @@ export interface SettingsStore {
   spaceOrder: Signal<string[]>
   spacesPaneCollapsed: Signal<boolean>
   spacesPaneAutoHide: Signal<boolean>
+  showSpaceNames: Signal<boolean>
   sidebarWidth: Signal<number>
   roomSort: Signal<RoomSort>
   roomFilter: Signal<RoomFilter>
@@ -577,6 +585,7 @@ export function createSettingsStore(
   const spaceOrder = signal<string[]>(initial.spaceOrder)
   const spacesPaneCollapsed = signal<boolean>(initial.spacesPaneCollapsed)
   const spacesPaneAutoHide = signal<boolean>(initial.spacesPaneAutoHide)
+  const showSpaceNames = signal(initial.showSpaceNames)
   const sidebarWidth = signal<number>(initial.sidebarWidth)
   const roomSort = signal<RoomSort>(initial.roomSort)
   const roomFilter = signal<RoomFilter>(initial.roomFilter)
@@ -636,6 +645,7 @@ export function createSettingsStore(
       spaceOrder: spaceOrder.value,
       spacesPaneCollapsed: spacesPaneCollapsed.value,
       spacesPaneAutoHide: spacesPaneAutoHide.value,
+      showSpaceNames: showSpaceNames.value,
       sidebarWidth: sidebarWidth.value,
       roomSort: roomSort.value,
       roomFilter: roomFilter.value,
@@ -686,6 +696,7 @@ export function createSettingsStore(
     spaceOrder,
     spacesPaneCollapsed,
     spacesPaneAutoHide,
+    showSpaceNames,
     sidebarWidth,
     roomSort,
     roomFilter,

@@ -8,6 +8,7 @@
   --fg: #1a1a20;
   --muted: #6a6a74;
   --border: #d9d9e0;
+  --space-line-lightness: 39%;
   --accent: #3556c4;
   --accent-strong: #2444a8;
   /* The open room's row. Hover is `--bg-raised`, a neutral lightness shift, so
@@ -32,6 +33,7 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
     --bg: #16161c;
+    --space-line-lightness: 70%;
     --bg-raised: #1f1f28;
     --panel: #1f1f28;
     --fg: #e6e6ec;
@@ -59,6 +61,7 @@
 
 :root[data-theme='dark'] {
   --bg: #16161c;
+  --space-line-lightness: 70%;
   --bg-raised: #1f1f28;
   --panel: #1f1f28;
   --fg: #e6e6ec;
@@ -623,12 +626,24 @@ body {
   color: inherit;
 }
 .space-picker-nested {
-  margin-inline-start: calc(var(--space-depth) * 0.15rem);
-  border-inline-start: 1px solid var(--border);
+  margin-inline-start: calc(var(--space-depth) * var(--space-indent));
 }
 
 .space-picker-nested .space-picker-entry {
-  width: 2.35rem;
+  width: 2.25rem;
+}
+
+.space-picker-children {
+  position: relative;
+}
+
+.space-picker-connector {
+  position: absolute;
+  inset-block: -0.2rem 0;
+  inset-inline-start: calc((var(--space-depth) - 0.7) * var(--space-indent));
+  inline-size: min(2px, var(--space-indent));
+  background: hsl(var(--space-line-hue) 70% var(--space-line-lightness));
+  pointer-events: none;
 }
 
 .space-picker-expand {
@@ -688,11 +703,20 @@ body {
 }
 /* Reordering chrome is opt-in — the rail is deliberately narrow and short, so
    nothing here costs a row until the user turns it on. */
-.space-picker-reorder-toggle {
+.space-picker-tools {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 0.125rem;
+  margin-block-end: 0.5rem;
+}
+
+.space-picker-reorder-toggle,
+.space-picker-names-toggle {
   display: grid;
   width: 1.6rem;
   height: 1.6rem;
-  margin: 0 auto 0.5rem;
+  margin: 0;
   padding: 0;
   place-items: center;
   border: 0;
@@ -703,19 +727,64 @@ body {
   line-height: 1;
 }
 
-.space-picker-reorder-toggle:hover:not(:disabled) {
+.space-picker-reorder-toggle:hover:not(:disabled),
+.space-picker-names-toggle:hover:not(:disabled) {
   background: var(--bg-raised);
   color: var(--accent);
 }
 
-.space-picker-reorder-toggle:focus-visible {
+.space-picker-reorder-toggle:focus-visible,
+.space-picker-names-toggle:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
 }
 
-.space-picker-reorder-toggle.active {
+.space-picker-reorder-toggle.active,
+.space-picker-names-toggle[aria-pressed='true'] {
   background: var(--bg-raised);
   color: var(--accent-strong);
+}
+
+.space-picker-names-toggle,
+.space-picker-name {
+  display: none;
+}
+
+@media (min-width: 44rem) {
+  .space-picker-names-toggle {
+    display: grid;
+  }
+
+  .show-space-names .space-picker-row .space-picker-entry {
+    display: grid;
+    grid-template-columns: 2rem minmax(0, 1fr);
+    align-items: center;
+    justify-items: start;
+    width: 100%;
+    padding-inline: 0.25rem;
+    gap: 0.4rem;
+  }
+
+  .show-space-names .space-picker-name {
+    display: block;
+    width: 100%;
+    overflow: hidden;
+    color: var(--fg);
+    font-size: 0.85rem;
+    text-align: start;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .show-space-names .badge.space-unread {
+    inset-inline: 1.75rem auto;
+  }
+}
+
+@media (min-width: 48rem) {
+  .space-picker.show-space-names {
+    flex-basis: 10rem;
+  }
 }
 
 .space-picker-reorder {
@@ -953,6 +1022,14 @@ body {
     border-bottom: 1px solid var(--border);
   }
 
+  .space-picker-branch,
+  .space-picker-children {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: flex-start;
+    gap: 0.25rem;
+  }
+
   .space-picker-row,
   .space-picker-entry {
     flex: 0 0 auto;
@@ -960,9 +1037,14 @@ body {
 
   .space-picker-nested {
     margin-inline-start: 0;
-    margin-block-start: calc(var(--space-depth) * 0.15rem);
-    border-inline-start: 0;
-    border-block-start: 1px solid var(--border);
+    margin-block-start: calc(var(--space-depth) * var(--space-indent));
+  }
+
+  .space-picker-connector {
+    inset-block: calc((var(--space-depth) - 0.7) * var(--space-indent)) auto;
+    inset-inline: -0.25rem 0;
+    inline-size: auto;
+    block-size: min(2px, var(--space-indent));
   }
 
   .space-picker-nested .space-picker-entry {
@@ -994,7 +1076,7 @@ body {
      long press, Chrome for Android fires no drag events for touch at all. Even
      where it works it is undiscoverable. It sits at the head of the strip and
      does not scroll away with the spaces. */
-  .space-picker-reorder-toggle {
+  .space-picker-tools {
     position: sticky;
     left: 0;
     z-index: 1;
@@ -1002,6 +1084,12 @@ body {
     align-self: center;
     margin: 0;
     background: var(--bg);
+  }
+
+  @media (min-width: 44rem) {
+    .show-space-names .space-picker-row .space-picker-entry {
+      width: 10rem;
+    }
   }
 
   /* No collapse control exists at this width — `.pane-collapse-tab` is hidden

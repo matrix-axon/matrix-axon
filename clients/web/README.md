@@ -170,6 +170,9 @@ The Spaces picker lets you expand joined subspaces and select any space to see i
 The room list keeps its usual filters and sort, including when it includes cached rooms reached through unjoined branches.
 Each room contributes once to a selected list and once to each containing space's unread badge.
 Subspaces follow Matrix sibling order, and top-level spaces keep their saved order.
+Colored lines connect each expanded space to its subspaces, with a different color at each depth.
+On tablet and desktop widths, use the **Aa** button in the Spaces picker to show or hide names.
+The browser remembers your choice.
 The picker hides isolated spaces with confirmed empty membership and keeps unknown or failed roots available.
 Retry is available for failed reads.
 If the selected space becomes empty and disappears from the picker, the room list returns to All rooms.
