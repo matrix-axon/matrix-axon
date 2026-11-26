@@ -26,6 +26,10 @@ interface Script {
   seeks?: boolean
   /** Whether the element has `requestVideoFrameCallback` (Safari 15.4+). */
   frameCallbacks?: boolean
+  /** Seekable ranges; with none, a seek fires no `seeked` (HTML seek step 8). */
+  seekable?: number
+  /** Fire `loadeddata` a moment after `loadedmetadata`. */
+  loadedData?: boolean
 }
 
 /** A media element that plays back `script` asynchronously, as browsers do. */
@@ -42,6 +46,7 @@ class FakeMedia extends EventTarget {
   loads = 0
   plays = 0
   paused = true
+  seekable: { length: number }
   requestVideoFrameCallback?: (callback: () => void) => number
   #src = ''
 
@@ -53,6 +58,7 @@ class FakeMedia extends EventTarget {
     this.videoWidth = script.videoWidth ?? 1920
     this.videoHeight = script.videoHeight ?? 1080
     this.duration = script.duration ?? 31.2501
+    this.seekable = { length: script.seekable ?? 1 }
     if (script.frameCallbacks !== false)
       this.requestVideoFrameCallback = (callback) => {
         queueMicrotask(callback)
@@ -84,12 +90,17 @@ class FakeMedia extends EventTarget {
       }
       this.readyState = 1
       this.dispatchEvent(new Event('loadedmetadata'))
+      if (this.script.loadedData)
+        setTimeout(() => {
+          this.readyState = 2
+          this.dispatchEvent(new Event('loadeddata'))
+        }, 0)
     })
   }
 
   set currentTime(time: number) {
     this.seekedTo = time
-    if (this.script.seeks === false) return
+    if (this.script.seeks === false || this.seekable.length === 0) return
     queueMicrotask(() => {
       this.readyState = this.script.readyAfterSeek ?? 4
       this.dispatchEvent(new Event('seeked'))
@@ -383,6 +394,25 @@ describe('probeVideo', () => {
     expect(canvas.drawn).toHaveLength(3)
     expect(canvas.encoded).toBeNull()
     expect(element.paused).toBe(true)
+  })
+
+  it('draws the loaded frame, without waiting for a seek, when nothing is seekable', async () => {
+    // A recording whose duration is not known: the seek would end silently.
+    const { element, createVideo } = video({
+      duration: Infinity,
+      seekable: 0,
+      loadedData: true,
+    })
+
+    const probe = await probeVideo(file(), {
+      createVideo,
+      createCanvas: () => new FakeCanvas() as unknown as HTMLCanvasElement,
+      timeoutMs: 1_000,
+    })
+
+    expect(probe?.info).toEqual({ width: 1920, height: 1080 })
+    expect(probe?.poster).not.toBeNull()
+    expect(element.seekedTo).toBeNull()
   })
 
   it('draws anyway when the browser never says a frame was presented', async () => {

@@ -14,6 +14,7 @@ import {
   uploadKind,
   type MediaService,
   type UploadKind,
+  type UploadResult,
 } from '../media/media-service'
 import {
   probeAudio,
@@ -1700,20 +1701,19 @@ export function createTimelineStore(
   }
 
   /**
-   * Stage a video's poster as an `image` upload (ADR 0142 § 7). `null` when
-   * there is none or staging failed: the media is then sent without one.
+   * Stage a video's poster as an `image` upload (ADR 0142 § 7), or `null`
+   * when the probe made none.
    */
   async function stagePoster(
     probe: Promise<MediaProbe | null>,
-  ): Promise<string | null> {
+  ): Promise<UploadResult | null> {
     const poster = (await probe)?.poster ?? null
     if (poster === null) return null
-    const staged = await media.upload(
+    return media.upload(
       accountId,
       new File([poster], 'poster.jpg', { type: poster.type || 'image/jpeg' }),
       'image',
     )
-    return staged.ok ? staged.uploadId : null
   }
 
   /**
@@ -1815,6 +1815,20 @@ export function createTimelineStore(
       sent === undefined || sent.thumbnail
         ? stagePoster(probe)
         : Promise.resolve(null)
+    if (sent?.thumbnail === true) {
+      // Without the poster this retry would differ from the request the
+      // server may remember, and be answered 409 on every attempt. So it
+      // fails here, before the original is uploaded again, and the next
+      // Retry tries the poster again. A fresh upload id is fine: the server
+      // compares whether a thumbnail is sent, not which.
+      const staged = await poster
+      if (staged === null || !staged.ok) {
+        error.value =
+          staged === null ? 'Upload failed' : uploadFailureMessage(staged.error)
+        failEcho(localId)
+        return false
+      }
+    }
 
     const staged = await media.upload(accountId, file, kind)
     if (!staged.ok) {
@@ -1824,7 +1838,10 @@ export function createTimelineStore(
     }
 
     const info = sent === undefined ? ((await probe)?.info ?? null) : sent.info
-    const thumbnailUploadId = (await poster) ?? undefined
+    const posterStaged = await poster
+    const thumbnailUploadId = posterStaged?.ok
+      ? posterStaged.uploadId
+      : undefined
     patchMediaPlan(localId, {
       sent: { info, thumbnail: thumbnailUploadId !== undefined },
     })

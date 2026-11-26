@@ -378,9 +378,15 @@ export function probeVideo(
       // loads with no picture.
       if (!dimension(width) || !dimension(height)) return null
       const duration = durationMs(element.duration)
-      const seeked = once(element, ['seeked'], signal)
-      element.currentTime = posterFrameTime(element.duration)
-      await seeked
+      // With nothing seekable, the HTML seek algorithm ends without firing
+      // `seeked` (steps 4-5 and 8), so waiting for it would spend the whole
+      // budget. Such a file, typically one whose duration is unknown, is
+      // drawn at the frame it loaded on.
+      if (element.seekable.length > 0) {
+        const seeked = once(element, ['seeked'], signal)
+        element.currentTime = posterFrameTime(element.duration)
+        await seeked
+      }
       if (element.readyState < HAVE_CURRENT_DATA)
         await once(element, ['loadeddata', 'canplay'], signal)
       const poster = await encodePoster(

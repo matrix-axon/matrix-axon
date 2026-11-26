@@ -760,6 +760,38 @@ describe('video and audio sends', () => {
     expect(seen.sends[1].txn_id).toBe(seen.sends[0].txn_id)
   })
 
+  it('fails a retry that cannot re-stage the poster its first request carried', async () => {
+    let posterStatus: number | undefined
+    const seen = serve({
+      sendStatus: () => 504,
+      get posterStatus() {
+        return posterStatus
+      },
+    })
+    const store = makeStore(undefined, supporting())
+
+    // The first request carried a poster, and its outcome is unknown.
+    expect(await store.sendMedia(mov())).toBe(false)
+    expect(seen.sends).toHaveLength(1)
+
+    // Without the poster, the retry would differ from what the server may
+    // remember and be answered 409 forever; it fails before any send.
+    posterStatus = 502
+    expect(await store.retrySend(store.events.value[0].event_id)).toBe(false)
+    expect(seen.sends).toHaveLength(1)
+    expect(seen.staged.filter((s) => s.kind === 'video')).toHaveLength(1)
+
+    // The next Retry tries the poster again, and sends it.
+    posterStatus = undefined
+    await store.retrySend(store.events.value[0].event_id)
+    expect(seen.sends).toHaveLength(2)
+    expect(seen.sends[1]).toMatchObject({
+      thumbnail_upload_id: POSTER_ID,
+      txn_id: seen.sends[0].txn_id,
+      info: VIDEO_INFO,
+    })
+  })
+
   it('retries bare after the server refuses the info or poster', async () => {
     let attempt = 0
     const seen = serve({ sendStatus: () => (++attempt === 1 ? 400 : 200) })
