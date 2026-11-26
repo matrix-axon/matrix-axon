@@ -713,6 +713,12 @@ impl App {
         redaction_event_id: &str,
         arrival_order: i64,
     ) {
+        // Asked before the row is borrowed: `selected_room` borrows all of
+        // `self`, and the gate below only needs it as a yes or no.
+        let live_view = self.last_jump_ts.is_none()
+            && self
+                .selected_room()
+                .is_some_and(|selected| RoomKey::from(selected) == *room);
         let Some(target) = self
             .messages
             .events
@@ -730,16 +736,16 @@ impl App {
         }
         target.redaction_event_id = Some(redaction_event_id.to_owned());
         target.redaction_arrival_order = Some(arrival_order);
-        let target = target.clone();
-        let target = &target;
-        // The same gate as a live event's own read below: the room is on
-        // screen at the live end, and the message is one the main timeline
-        // shows. A history jump is looking at the past and claims nothing.
-        let on_screen = self.last_jump_ts.is_none()
-            && self
-                .selected_room()
-                .is_some_and(|selected| RoomKey::from(selected) == *room)
+        // The same gate as a live event's own read below, narrowed to the
+        // main timeline: the room is on screen at the live end, and the main
+        // timeline shows the message. A history jump is looking at the past
+        // and claims nothing. The open thread panel showing a reply is not
+        // enough: this is an unthreaded room receipt, so it may only name what
+        // `read_targets_for` would, which asks `thread_visible` with no panel
+        // (review).
+        let on_screen = live_view
             && should_show_event(target, &self.display)
+            && thread_visible(target, None, &self.promoted_thread_events)
             && thread_visible(
                 target,
                 self.thread_panel.as_deref(),
@@ -748,15 +754,18 @@ impl App {
         if !on_screen {
             return;
         }
+        let (target_event_id, target_origin_ts) = (target.event_id.clone(), target.origin_ts);
         // Only the receipt moves. The cross-device marker is a display-order
         // position, and a redaction adds nothing to display, so it is handed
         // the marker it already has (or, with none yet, the message itself).
-        let marker = self.read_markers.get(room).cloned().unwrap_or_else(|| {
-            super::read_markers::ReadMarker {
-                event_id: target.event_id.clone(),
-                origin_ts: target.origin_ts,
-            }
-        });
+        let marker =
+            self.read_markers
+                .get(room)
+                .cloned()
+                .unwrap_or(super::read_markers::ReadMarker {
+                    event_id: target_event_id,
+                    origin_ts: target_origin_ts,
+                });
         self.note_room_read(
             room.clone(),
             marker,

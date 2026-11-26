@@ -879,6 +879,62 @@ fn live_redaction_of_a_displayed_message_moves_only_the_receipt() {
 
 /// The live receipt for a redaction has the same gate as any live read: a
 /// history jump is looking at the past and claims nothing (#1273).
+/// A reply shown only by the open thread panel is not the room view's to
+/// claim. The receipt here is unthreaded, so naming the reply's redaction would
+/// acknowledge the whole room up to it (review on #1278). The position is still
+/// recorded, for whenever the main timeline does show the reply.
+#[test]
+fn live_redaction_of_a_reply_in_the_open_thread_panel_does_not_receipt_it() {
+    let (mut app, key) = selected_room_app();
+    let mut reply = text_message("$reply:example.com", "in thread");
+    reply.arrival_order = 10;
+    reply.relates_to = Some(serde_json::json!({
+        "rel_type": "m.thread",
+        "event_id": "$root:example.com",
+    }));
+    app.messages.events.insert(key.clone(), vec![reply]);
+    app.thread_panel = Some("$root:example.com".to_owned());
+    let mut redaction = redaction_frame("$redact:example.com", "$reply:example.com");
+    redaction.arrival_order = 11;
+
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction)));
+
+    assert_eq!(
+        app.messages.events[&key][0].redaction_arrival_order,
+        Some(11)
+    );
+    assert!(!app.receipt_targets.contains_key(&key));
+}
+
+/// The latest redaction wins, as on a timeline read: a second frame that
+/// arrived earlier replaces neither the recorded redaction nor the receipt.
+#[test]
+fn an_older_live_redaction_does_not_replace_a_newer_one() {
+    let (mut app, key) = selected_room_app();
+    let mut message = text_message("$msg:example.com", "hello");
+    message.arrival_order = 5;
+    app.messages.events.insert(key.clone(), vec![message]);
+    for (id, arrival_order) in [("$newer:example.com", 20), ("$older:example.com", 10)] {
+        let mut redaction = redaction_frame(id, "$msg:example.com");
+        redaction.arrival_order = arrival_order;
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction)));
+    }
+
+    let masked = &app.messages.events[&key][0];
+    assert_eq!(
+        masked.redaction_event_id.as_deref(),
+        Some("$newer:example.com")
+    );
+    assert_eq!(masked.redaction_arrival_order, Some(20));
+    assert_eq!(
+        app.receipt_targets[&key],
+        read_markers::ReceiptTarget {
+            event_id: "$newer:example.com".to_owned(),
+            arrival_order: 20,
+        }
+    );
+}
+
 #[test]
 fn live_redaction_during_a_history_jump_does_not_receipt_it() {
     let (mut app, key) = selected_room_app();
