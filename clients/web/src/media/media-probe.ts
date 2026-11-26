@@ -200,6 +200,39 @@ async function withLoaded<E extends HTMLMediaElement, T>(
 }
 
 /**
+ * How the probe's video sits in the document: one CSS pixel in the corner,
+ * all but transparent, and out of the way of input.
+ *
+ * WebKit draws nothing from a video it does not render: off the DOM, the
+ * canvas comes back fully transparent even after seeking and playing, and
+ * JPEG encodes that as solid black, which is the poster iPhone Safari sent.
+ * Measured in Playwright's WebKit: positioned off-screen, `visibility:
+ * hidden` or `display: none` draw nothing either, while a 1 px element in the
+ * viewport draws the frame, even on a scrolled page. Chromium and Firefox
+ * draw in every case. The opacity is not 0, so no engine can treat the
+ * element as invisible and stop rendering it.
+ */
+const PROBE_VIDEO_STYLE =
+  'position:fixed;left:0;top:0;width:1px;height:1px;opacity:0.01;' +
+  'pointer-events:none;z-index:2147483647'
+
+/**
+ * Put the probe's video in the document (see [`PROBE_VIDEO_STYLE`]), and
+ * return how to take it out again. A test double is not a DOM node and is
+ * left alone.
+ */
+function attachHidden(video: HTMLVideoElement): () => void {
+  if (typeof Node === 'undefined' || !(video instanceof Node)) return () => {}
+  const parent = document.body ?? document.documentElement
+  video.setAttribute('style', PROBE_VIDEO_STYLE)
+  video.setAttribute('aria-hidden', 'true')
+  video.tabIndex = -1
+  video.disablePictureInPicture = true
+  parent.append(video)
+  return () => video.remove()
+}
+
+/**
  * Whether RGBA pixels are one flat colour: solid black, or an undrawn
  * (transparent) canvas, which JPEG would paint black. Samples at most
  * [`BLANK_SAMPLES`] pixels, so a full 800 × 600 frame costs little.
@@ -365,8 +398,9 @@ export function probeVideo(
   deps: ProbeDeps = {},
 ): Promise<MediaProbe | null> {
   const video = (deps.createVideo ?? (() => document.createElement('video')))()
-  // iOS Safari loads an off-DOM video only when it may play inline.
+  // iOS Safari loads a video only when it may play inline.
   video.playsInline = true
+  const detach = attachHidden(video)
   return withLoaded(
     video,
     file,
@@ -406,7 +440,7 @@ export function probeVideo(
         poster,
       }
     },
-  )
+  ).finally(detach)
 }
 
 /** An audio file's duration, or `null` when the browser could not read it. */

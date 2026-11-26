@@ -415,6 +415,27 @@ describe('probeVideo', () => {
     expect(element.seekedTo).toBeNull()
   })
 
+  it('renders the video in the document while probing, invisibly, and removes it', async () => {
+    // WebKit draws nothing from a video it does not render (the black
+    // iPhone poster). jsdom loads nothing, so this probe times out.
+    const element = document.createElement('video')
+    const pending = probeVideo(file(), {
+      createVideo: () => element,
+      timeoutMs: 20,
+    })
+
+    expect(element.parentNode).toBe(document.body)
+    expect(element.style.position).toBe('fixed')
+    expect(element.style.width).toBe('1px')
+    expect(Number(element.style.opacity)).toBeGreaterThan(0)
+    expect(Number(element.style.opacity)).toBeLessThan(0.05)
+    expect(element.style.pointerEvents).toBe('none')
+    expect(element.getAttribute('aria-hidden')).toBe('true')
+
+    expect(await pending).toBeNull()
+    expect(element.isConnected).toBe(false)
+  })
+
   it('draws anyway when the browser never says a frame was presented', async () => {
     const { createVideo } = video({ frameCallbacks: false })
 

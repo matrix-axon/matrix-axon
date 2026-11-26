@@ -319,6 +319,33 @@ test('sends a video as its own kind, with a poster, dimensions and duration', as
   // 320 × 240 test pattern is a few KiB.
   expect(poster).toMatchObject({ kind: 'image', content_type: 'image/jpeg' })
   expect(poster!.size_bytes).toBeGreaterThan(0)
+  // A picture, not solid black: WebKit draws nothing from a video outside
+  // the document, which JPEG encodes as black (the iPhone Safari poster).
+  const posterBytes = await (
+    await page.request.get('/__e2e/upload-bytes?filename=poster.jpg')
+  ).body()
+  const decoded = await page.evaluate(async (base64) => {
+    const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
+    const bitmap = await createImageBitmap(
+      new Blob([bytes], { type: 'image/jpeg' }),
+    )
+    const canvas = document.createElement('canvas')
+    canvas.width = bitmap.width
+    canvas.height = bitmap.height
+    const context = canvas.getContext('2d')!
+    context.drawImage(bitmap, 0, 0)
+    const data = context.getImageData(0, 0, bitmap.width, bitmap.height).data
+    let min = 255
+    let max = 0
+    for (let i = 0; i < data.length; i += 4) {
+      const luma = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
+      min = Math.min(min, luma)
+      max = Math.max(max, luma)
+    }
+    return { width: bitmap.width, height: bitmap.height, spread: max - min }
+  }, posterBytes.toString('base64'))
+  expect(decoded).toMatchObject({ width: 320, height: 240 })
+  expect(decoded.spread).toBeGreaterThan(64)
   expect(sends[0]).toMatchObject({
     upload_id: expect.any(String),
     info: { width: 320, height: 240, duration_ms: 3000 },
