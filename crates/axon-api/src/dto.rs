@@ -481,16 +481,12 @@ pub struct EventDto {
     /// The `event_id` of the redaction that masked this event, if redacted.
     /// When several redactions match, the one that arrived last.
     pub redaction_event_id: Option<String>,
-    /// The [`arrival_order`](Self::arrival_order) of
-    /// [`redaction_event_id`](Self::redaction_event_id), set exactly when it is.
-    ///
-    /// Timeline reads strip bare `m.room.redaction` events and fold each onto the
-    /// event it redacted, so this is the only place a client learns where a
-    /// redaction arrived. A client that may name this event in a read receipt
-    /// may name its redaction too: everything the redaction did is visible on
-    /// this event. Without that, a trailing redaction that the homeserver counts
-    /// as a notification (a room rule set to notify on every event counts
-    /// redactions) can never be acknowledged (#1273, ADR 0089).
+    /// The arrival order of the redaction named by `redaction_event_id`, on the
+    /// same scale as `arrival_order`. Set exactly when `redaction_event_id` is
+    /// set; when several redactions match, it is the one that arrived last.
+    /// Timeline reads never return a redaction as an event of its own, so this
+    /// is the only place its position appears. See ADR 0089 for when a client
+    /// may name it in a read receipt.
     pub redaction_arrival_order: Option<i64>,
     /// Sender-device trust snapshot at decrypt time (M7c): `verified`,
     /// `unverified`, `unknown`, `verification_violation`, or

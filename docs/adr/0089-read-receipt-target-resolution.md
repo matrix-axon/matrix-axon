@@ -144,26 +144,24 @@ arrival order.
 
 ## Amendment — folded redactions are receipt candidates (2026-11-25, #1273)
 
-"The events it has displayed" includes the redactions folded onto them. Timeline
-reads strip bare `m.room.redaction` events and report each one on the event it
-redacted (`redaction_event_id`), so until this amendment no client could name a
-redaction. Usually that does not matter, because default push rules do not
-count redactions. A room rule set to notify on every event does count them, and
-there a redaction that is the room's newest event pins the homeserver's
-notification count for good. Unlike #337, the receipt already reached the
-redacted message there, and stopped one event short.
+A redaction folded onto a displayed event can be a receipt target too.
+Timeline reads strip bare `m.room.redaction` events and report each one on the event it redacted (`redaction_event_id`), so until this amendment no client could name a redaction.
+Usually that does not matter, because default push rules do not count redactions.
+A room rule set to notify on every event does count them, and there a redaction that is the room's newest event pins the homeserver's notification count for good.
+Unlike #337, the receipt already reached the redacted message there, and stopped one event short.
 
-`EventDto.redaction_arrival_order` carries the arrival order of
-`redaction_event_id`. A client that may name an event may also name that
-event's redaction, on the same terms: everything the redaction did is visible
-on the row it redacted, so acknowledging it claims nothing unseen. When an event
-was redacted more than once, the read reports the redaction that arrived last,
-so a single receipt covers all of them.
+`EventDto.redaction_arrival_order` carries the arrival order of `redaction_event_id`.
+When an event was redacted more than once, the read reports the redaction that arrived last, so a single receipt covers all of them.
 
-The rule is still the client's to apply, and the server still sends the id it
-is given unchanged. The server now supplies one more fact, as it already does
-with `arrival_order`. It still does not infer what the client displayed.
+The redaction's own content is visible on the row it redacted, but its position is not that row's.
+A redaction usually arrives well after its message, and naming it acknowledges everything that arrived in between.
+So a displayed target is necessary and not sufficient: a client names a folded redaction only where it could name any event at that arrival position.
+The web client treats it like the read-thread extension of ADR 0096: never while anything in the room is unread or unknown, and only below the first unread reply from another thread.
+The TUI has no thread bound, and applies the same rule to a folded redaction as to a displayed live event at the live end.
 
-Not covered: a redaction whose target is not loaded, other folded relations
-(edits, reactions, and redactions of those), and redactions of thread replies,
-which the room view does not display. These are recorded in #1273.
+The rule is still the client's to apply, and the server still sends the id it is given unchanged.
+The server now supplies one more fact, as it already does with `arrival_order`.
+It still does not infer what the client displayed.
+
+Not covered: a redaction whose target is not loaded, other folded relations (edits, reactions, and redactions of those), and redactions of thread replies, which the room view does not display.
+These are recorded in #1273.
