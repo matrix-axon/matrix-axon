@@ -172,7 +172,8 @@ Each room contributes once to a selected list and once to each containing space'
 Subspaces follow Matrix sibling order, and top-level spaces keep their saved order.
 Colored lines connect each expanded space to its subspaces, with a different color at each depth.
 On tablet and desktop widths, use the **Aa** button in the Spaces picker to show or hide names.
-The browser remembers your choice.
+When names are shown beside the room list, drag the Spaces divider or focus it and use the arrow keys to resize the pane.
+The browser remembers the names setting and the pane width.
 The picker hides isolated spaces with confirmed empty membership and keeps unknown or failed roots available.
 Retry is available for failed reads.
 If the selected space becomes empty and disappears from the picker, the room list returns to All rooms.

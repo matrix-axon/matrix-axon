@@ -92,6 +92,8 @@ import {
   connectSettingsPersistence,
   SIDEBAR_WIDTH_MAX,
   SIDEBAR_WIDTH_MIN,
+  SPACES_PANE_WIDTH_MAX,
+  SPACES_PANE_WIDTH_MIN,
 } from './stores/settings'
 import { roomKey } from './stores/room-list'
 import { spacePickerEntries } from './stores/spaces'
@@ -732,6 +734,7 @@ function Shell() {
 }
 
 const MIN_TIMELINE_WIDTH = 320
+const MIN_ROOM_LIST_WIDTH = 192
 
 function availableSidebarWidthMaximum(): number {
   return Math.max(
@@ -740,95 +743,94 @@ function availableSidebarWidthMaximum(): number {
   )
 }
 
-function clampSidebarWidth(width: number): number {
-  return Math.round(
-    Math.max(
-      SIDEBAR_WIDTH_MIN,
-      Math.min(availableSidebarWidthMaximum(), width),
-    ),
-  )
+interface PaneResize {
+  width: number
+  minimum: number
+  maximum: () => number
+  onResize: (width: number) => void
 }
 
 /** One pane-edge control: click to collapse, drag or arrow-key to resize. */
-function SidebarPaneHandle({
-  width,
-  onResize,
+function PaneHandle({
+  pane,
   collapsed,
+  resize,
   onToggle,
 }: {
-  width: number
-  onResize: (width: number) => void
+  pane: 'rooms' | 'spaces'
   collapsed: boolean
+  resize?: PaneResize
   onToggle: () => void
 }) {
   const drag = useRef<{
+    pointerId: number
     startX: number
     startWidth: number
     moved: boolean
   } | null>(null)
   const suppressClick = useRef(false)
-  const maximum = availableSidebarWidthMaximum()
+  const isRooms = pane === 'rooms'
+  const shortcut = isRooms ? KEYS.toggleSidebar : KEYS.toggleSpaces
+  const label = `${collapsed ? 'Show' : 'Hide'} ${pane}`
+  const resizable = !collapsed && resize !== undefined
+  const clamp = (width: number, bounds: PaneResize) =>
+    Math.round(Math.max(bounds.minimum, Math.min(bounds.maximum(), width)))
 
   return (
     <button
       type="button"
-      class="pane-collapse-tab sidebar-collapse-tab"
+      class={`pane-collapse-tab ${isRooms ? 'sidebar-collapse-tab' : 'space-pane-collapse-tab'}${resizable ? ' pane-resize-tab' : ''}`}
       aria-expanded={!collapsed}
-      aria-controls="room-sidebar"
-      aria-label={collapsed ? 'Show rooms' : 'Hide rooms'}
-      title={`${hint(
-        collapsed ? 'Show rooms' : 'Hide rooms',
-        KEYS.toggleSidebar,
-      )}${collapsed ? '' : '; drag or use arrow keys to resize'}`}
-      aria-keyshortcuts={keyAria(KEYS.toggleSidebar)}
+      aria-controls={isRooms ? 'room-sidebar' : 'spaces-pane'}
+      aria-label={label}
+      title={`${hint(label, shortcut)}${resizable ? '; drag or use arrow keys to resize' : ''}`}
+      aria-keyshortcuts={keyAria(shortcut)}
       onPointerDown={(event) => {
-        if (event.button !== 0 || collapsed) return
+        if (event.button !== 0 || drag.current !== null) return
+        suppressClick.current = false
+        if (!resizable) return
         drag.current = {
+          pointerId: event.pointerId,
           startX: event.clientX,
-          startWidth: width,
+          startWidth: clamp(resize.width, resize),
           moved: false,
         }
         event.currentTarget.setPointerCapture(event.pointerId)
       }}
       onPointerMove={(event) => {
         const start = drag.current
-        if (start === null) return
+        if (!resizable || start?.pointerId !== event.pointerId) return
         const distance = event.clientX - start.startX
-        if (Math.abs(distance) > 2) start.moved = true
-        onResize(clampSidebarWidth(start.startWidth + distance))
+        if (!start.moved && Math.abs(distance) <= 2) return
+        start.moved = true
+        resize.onResize(clamp(start.startWidth + distance, resize))
       }}
       onPointerUp={(event) => {
-        const activeDrag = drag.current
-        suppressClick.current = activeDrag?.moved ?? false
+        const start = drag.current
+        if (start?.pointerId !== event.pointerId) return
+        suppressClick.current = start.moved
         drag.current = null
-        if (activeDrag !== null) {
-          event.currentTarget.releasePointerCapture(event.pointerId)
-        }
+        event.currentTarget.releasePointerCapture(event.pointerId)
       }}
-      onPointerCancel={(event) => {
-        const activeDrag = drag.current
-        drag.current = null
-        if (activeDrag !== null) {
-          event.currentTarget.releasePointerCapture(event.pointerId)
-        }
+      onLostPointerCapture={(event) => {
+        if (drag.current?.pointerId === event.pointerId) drag.current = null
       }}
       onKeyDown={(event) => {
-        if (collapsed) return
+        if (!resizable) return
+        const width = clamp(resize.width, resize)
         let next: number | null = null
         if (event.key === 'ArrowLeft') next = width - 16
         if (event.key === 'ArrowRight') next = width + 16
-        if (event.key === 'Home') next = SIDEBAR_WIDTH_MIN
-        if (event.key === 'End') next = maximum
+        if (event.key === 'Home') next = resize.minimum
+        if (event.key === 'End') next = resize.maximum()
         if (next === null) return
         event.preventDefault()
-        onResize(clampSidebarWidth(next))
+        resize.onResize(clamp(next, resize))
       }}
-      onClick={() => {
-        if (suppressClick.current) {
-          suppressClick.current = false
-          return
-        }
-        onToggle()
+      onClick={(event) => {
+        const dragged = suppressClick.current
+        suppressClick.current = false
+        if (!dragged || event.detail === 0) onToggle()
       }}
     >
       <span aria-hidden="true">{collapsed ? '›' : '‹'}</span>
@@ -884,6 +886,8 @@ function ShellChrome() {
   perfMark('shell:render', { path, mode })
   const collapsed = settings.sidebarCollapsed.value
   const sidebarWidth = settings.sidebarWidth.value
+  const spacesPaneWidth = settings.spacesPaneWidth.value
+  const roomSidebar = useRef<HTMLElement>(null)
   const [helpOpen, setHelpOpen] = useState(false)
   const [unreadThreadsOpen, setUnreadThreadsOpen] = useState(false)
   const [verificationInboxOpen, setVerificationInboxOpen] = useState(false)
@@ -1645,30 +1649,41 @@ function ShellChrome() {
             id="room-sidebar"
             class="sidebar"
             aria-label="Rooms"
-            style={{ flexBasis: `${sidebarWidth}px` }}
+            ref={roomSidebar}
+            style={{
+              flexBasis: `${sidebarWidth}px`,
+              '--spaces-pane-width': `${spacesPaneWidth}px`,
+              '--spaces-pane-min-width': `${SPACES_PANE_WIDTH_MIN}px`,
+              '--room-list-min-width': `${MIN_ROOM_LIST_WIDTH}px`,
+            }}
           >
             {hasSpaces && (
               <>
                 <SpaceList />
-                <button
-                  type="button"
-                  class="pane-collapse-tab space-pane-collapse-tab"
-                  aria-expanded={!spacesPaneCollapsed}
-                  aria-controls="spaces-pane"
-                  aria-label={
-                    spacesPaneCollapsed ? 'Show spaces' : 'Hide spaces'
+                <PaneHandle
+                  pane="spaces"
+                  collapsed={spacesPaneCollapsed}
+                  onToggle={toggleSpacesPane}
+                  resize={
+                    !singlePane && settings.showSpaceNames.value
+                      ? {
+                          width: spacesPaneWidth,
+                          minimum: SPACES_PANE_WIDTH_MIN,
+                          maximum: () =>
+                            Math.max(
+                              SPACES_PANE_WIDTH_MIN,
+                              Math.min(
+                                SPACES_PANE_WIDTH_MAX,
+                                (roomSidebar.current?.clientWidth ??
+                                  sidebarWidth) - MIN_ROOM_LIST_WIDTH,
+                              ),
+                            ),
+                          onResize: (width) =>
+                            (settings.spacesPaneWidth.value = width),
+                        }
+                      : undefined
                   }
-                  title={hint(
-                    spacesPaneCollapsed ? 'Show spaces' : 'Hide spaces',
-                    KEYS.toggleSpaces,
-                  )}
-                  aria-keyshortcuts={keyAria(KEYS.toggleSpaces)}
-                  onClick={toggleSpacesPane}
-                >
-                  <span aria-hidden="true">
-                    {spacesPaneCollapsed ? '›' : '‹'}
-                  </span>
-                </button>
+                />
               </>
             )}
             <div class="room-list-pane">
@@ -1676,11 +1691,16 @@ function ShellChrome() {
             </div>
           </nav>
           {mode !== 'utility' && !singlePane && (
-            <SidebarPaneHandle
-              width={sidebarWidth}
+            <PaneHandle
+              pane="rooms"
               collapsed={collapsed}
               onToggle={() => (settings.sidebarCollapsed.value = !collapsed)}
-              onResize={(width) => (settings.sidebarWidth.value = width)}
+              resize={{
+                width: sidebarWidth,
+                minimum: SIDEBAR_WIDTH_MIN,
+                maximum: availableSidebarWidthMaximum,
+                onResize: (width) => (settings.sidebarWidth.value = width),
+              }}
             />
           )}
           <main>

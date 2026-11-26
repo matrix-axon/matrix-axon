@@ -55,6 +55,8 @@ export const LINK_PREVIEW_SETTINGS: readonly LinkPreviewSetting[] = [
 ]
 
 /** Desktop sidebar bounds in CSS pixels. Keep the room list readable. */
+export const SPACES_PANE_WIDTH_MIN = 128
+export const SPACES_PANE_WIDTH_MAX = 320
 export const SIDEBAR_WIDTH_MIN = 360
 export const SIDEBAR_WIDTH_MAX = 640
 
@@ -84,6 +86,8 @@ export interface SettingsV1 {
   spacesPaneAutoHide: boolean
   /** Show names in the Spaces picker on wider displays. */
   showSpaceNames: boolean
+  /** Preferred width of the named Spaces pane, in CSS pixels. */
+  spacesPaneWidth: number
   /** Browser-local desktop sidebar width in CSS pixels. */
   sidebarWidth: number
   /** Persisted room-list sort mode (ADR 0042). */
@@ -244,6 +248,7 @@ const DEFAULTS: SettingsV1 = {
   spacesPaneCollapsed: false,
   spacesPaneAutoHide: true,
   showSpaceNames: false,
+  spacesPaneWidth: 160,
   sidebarWidth: 420,
   roomSort: 'recent',
   roomFilter: 'all',
@@ -344,6 +349,20 @@ export function writeStoredZoom(storage: Storage, zoom: number): void {
   }
 }
 
+function parsePaneWidth(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  fallback: number,
+): number {
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= minimum &&
+    value <= maximum
+    ? Math.round(value)
+    : fallback
+}
+
 function parse(
   raw: string | null,
   defaults: SettingsV1 = DEFAULTS,
@@ -388,13 +407,18 @@ function parse(
       typeof v1.showSpaceNames === 'boolean'
         ? v1.showSpaceNames
         : DEFAULTS.showSpaceNames,
-    sidebarWidth:
-      typeof v1.sidebarWidth === 'number' &&
-      Number.isFinite(v1.sidebarWidth) &&
-      v1.sidebarWidth >= SIDEBAR_WIDTH_MIN &&
-      v1.sidebarWidth <= SIDEBAR_WIDTH_MAX
-        ? Math.round(v1.sidebarWidth)
-        : DEFAULTS.sidebarWidth,
+    spacesPaneWidth: parsePaneWidth(
+      v1.spacesPaneWidth,
+      SPACES_PANE_WIDTH_MIN,
+      SPACES_PANE_WIDTH_MAX,
+      DEFAULTS.spacesPaneWidth,
+    ),
+    sidebarWidth: parsePaneWidth(
+      v1.sidebarWidth,
+      SIDEBAR_WIDTH_MIN,
+      SIDEBAR_WIDTH_MAX,
+      DEFAULTS.sidebarWidth,
+    ),
     roomSort: oneOf(ROOM_SORTS, v1.roomSort, DEFAULTS.roomSort),
     roomFilter: oneOf(ROOM_FILTERS, v1.roomFilter, DEFAULTS.roomFilter),
     // The legacy favorites-only category becomes All with promotion enabled
@@ -512,6 +536,7 @@ export interface SettingsStore {
   spacesPaneCollapsed: Signal<boolean>
   spacesPaneAutoHide: Signal<boolean>
   showSpaceNames: Signal<boolean>
+  spacesPaneWidth: Signal<number>
   sidebarWidth: Signal<number>
   roomSort: Signal<RoomSort>
   roomFilter: Signal<RoomFilter>
@@ -586,6 +611,7 @@ export function createSettingsStore(
   const spacesPaneCollapsed = signal<boolean>(initial.spacesPaneCollapsed)
   const spacesPaneAutoHide = signal<boolean>(initial.spacesPaneAutoHide)
   const showSpaceNames = signal(initial.showSpaceNames)
+  const spacesPaneWidth = signal(initial.spacesPaneWidth)
   const sidebarWidth = signal<number>(initial.sidebarWidth)
   const roomSort = signal<RoomSort>(initial.roomSort)
   const roomFilter = signal<RoomFilter>(initial.roomFilter)
@@ -646,6 +672,7 @@ export function createSettingsStore(
       spacesPaneCollapsed: spacesPaneCollapsed.value,
       spacesPaneAutoHide: spacesPaneAutoHide.value,
       showSpaceNames: showSpaceNames.value,
+      spacesPaneWidth: spacesPaneWidth.value,
       sidebarWidth: sidebarWidth.value,
       roomSort: roomSort.value,
       roomFilter: roomFilter.value,
@@ -697,6 +724,7 @@ export function createSettingsStore(
     spacesPaneCollapsed,
     spacesPaneAutoHide,
     showSpaceNames,
+    spacesPaneWidth,
     sidebarWidth,
     roomSort,
     roomFilter,

@@ -509,6 +509,9 @@ body {
   border: 0;
   border-radius: 0;
   background: transparent;
+}
+
+.pane-collapse-tab.pane-resize-tab {
   cursor: col-resize;
   touch-action: none;
 }
@@ -783,7 +786,10 @@ body {
 
 @media (min-width: 48rem) {
   .space-picker.show-space-names {
-    flex-basis: 10rem;
+    flex-basis: min(
+      var(--spaces-pane-width),
+      max(var(--spaces-pane-min-width), calc(100% - var(--room-list-min-width)))
+    );
   }
 }
 

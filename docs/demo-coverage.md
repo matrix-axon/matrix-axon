@@ -131,7 +131,7 @@ shows it.
 - **Nested spaces in the web picker.**
   The `spaces` scene selects populated top-level spaces.
   Expand a branch and select a nested space in a future recording to show the colored connectors, descendant membership, and shared-room unread counts.
-  Toggle the space names on a wider display.
+  Toggle the space names and resize the named pane on a wider display.
 - **Empty spaces in the web picker.**
   Confirmed empty roots stay hidden during background refreshes, while unknown and failed roots remain available.
   The `spaces` scene demonstrates populated spaces but does not exercise empty-root hiding or restoration after a membership update.

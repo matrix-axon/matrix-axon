@@ -205,3 +205,66 @@ test('space names are optional and remembered on desktop and tablet widths', asy
   await expect(toggle).toHaveAttribute('aria-pressed', 'false')
   await expect(label).toBeHidden()
 })
+
+test('resizes the named Spaces pane and remembers its width', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.goto('/')
+
+  const picker = page.getByRole('region', { name: 'Spaces' })
+  const names = picker.getByRole('button', { name: 'Show space names' })
+  const handle = page.getByRole('button', { name: 'Hide spaces' })
+  const rooms = page.getByRole('navigation', { name: 'Rooms' })
+  const roomList = rooms.locator('.room-list-pane')
+  const width = async (locator: typeof picker) =>
+    (await locator.boundingBox())!.width
+
+  await expect(picker).toBeVisible()
+  const compactWidth = await width(picker)
+  const sidebarWidth = await width(rooms)
+  await names.click()
+  const namedWidth = await width(picker)
+
+  await handle.press('ArrowRight')
+  await expect.poll(() => width(picker)).toBe(namedWidth + 16)
+  const box = (await handle.boundingBox())!
+  const x = box.x + box.width / 2
+  const y = box.y + box.height / 2
+  await page.mouse.move(x, y)
+  await page.mouse.down()
+  await page.mouse.move(x + 24, y, { steps: 4 })
+  await page.mouse.up()
+  const chosenWidth = namedWidth + 40
+  await expect.poll(() => width(picker)).toBe(chosenWidth)
+  await expect(handle).toHaveAttribute('aria-expanded', 'true')
+  expect(await width(rooms)).toBe(sidebarWidth)
+
+  await handle.click()
+  await expect(picker).toBeHidden()
+  await page.getByRole('button', { name: 'Show spaces' }).click()
+  await expect.poll(() => width(picker)).toBe(chosenWidth)
+  await names.click()
+  await expect.poll(() => width(picker)).toBe(compactWidth)
+  await handle.press('End')
+  expect(await width(picker)).toBe(compactWidth)
+  await names.click()
+  await page.reload()
+  await expect.poll(() => width(picker)).toBe(chosenWidth)
+
+  await page.setViewportSize({ width: 820, height: 1180 })
+  const roomsHandle = page.getByRole('button', { name: 'Hide rooms' })
+  await roomsHandle.press('Home')
+  await expect.poll(() => width(roomList)).toBeGreaterThanOrEqual(192)
+  expect(await width(picker)).toBeLessThan(chosenWidth)
+  await roomsHandle.press('End')
+  await expect.poll(() => width(picker)).toBe(chosenWidth)
+  await handle.press('End')
+  await expect.poll(() => width(roomList)).toBeGreaterThanOrEqual(192)
+  expect(await width(picker)).toBeGreaterThan(chosenWidth)
+
+  await page.setViewportSize({ width: 744, height: 1133 })
+  await expect(handle).toBeHidden()
+  await expect(picker.locator('.space-picker-name').first()).toBeVisible()
+})
