@@ -20,20 +20,38 @@ final class ActivationUITests: XCTestCase {
     app.descendants(matching: .any).matching(NSPredicate(format: "label == 'AxonShareTest'"))
       .firstMatch
   }
+  /// Polls until `format` holds for `element`. The share sheet and the extension
+  /// are other processes that animate in and out, so one read of the AX tree can
+  /// land mid-transition.
+  private func waitFor(
+    _ element: XCUIElement, _ format: String, timeout: TimeInterval? = nil
+  ) -> Bool {
+    let condition = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: format), object: element)
+    return XCTWaiter.wait(for: [condition], timeout: timeout ?? uiTimeout) == .completed
+  }
   private func showAllActivities(_ app: XCUIApplication) {
     let more = app.descendants(matching: .any)
       .matching(NSPredicate(format: "label == 'More' OR label == 'More Apps'")).firstMatch
     let cell = app.cells.matching(identifier: "shareCell").firstMatch
     XCTAssertTrue(cell.waitForExistence(timeout: uiTimeout))
-    let y = cell.frame.midY
+    // The first cell exists while the sheet is still sliding up. On a standard
+    // iPhone, More is in the first row once the sheet settles, so wait for that
+    // before swiping; only a narrow phone pushes it off the end of the row.
+    let hittable = "exists == true AND hittable == true"
     for _ in 0..<8 {
-      if more.exists && more.isHittable { break }
+      if waitFor(more, hittable, timeout: 5) { break }
+      // Read the row's position before every swipe, not once: a read taken
+      // during the slide-up gave midY 55.9, so every swipe hit the status bar.
+      let y = cell.frame.midY
       let origin = app.coordinate(withNormalizedOffset: .zero)
       origin.withOffset(CGVector(dx: app.frame.width * 0.85, dy: y)).press(
         forDuration: 0.05,
         thenDragTo: origin.withOffset(CGVector(dx: app.frame.width * 0.15, dy: y)))
     }
-    XCTAssertTrue(more.exists && more.isHittable)
+    XCTAssertTrue(
+      more.exists && more.isHittable,
+      "More never became hittable; first shareCell at \(cell.frame)\n\(app.debugDescription)")
     more.tap()
     XCTAssertTrue(app.navigationBars.firstMatch.waitForExistence(timeout: uiTimeout))
   }
@@ -62,7 +80,9 @@ final class ActivationUITests: XCTestCase {
       XCTAssertFalse(app.buttons["Keep draft in Axon"].exists)
       XCTAssertTrue(app.staticTexts["share-status"].label.contains("No draft was saved"))
       cancel(app)
-      XCTAssertFalse(composer.exists)
+      // The extension is still tearing down when Cancel's tap returns; a single
+      // read here failed with kAXErrorServerNotFound while the bar was on screen.
+      XCTAssertTrue(waitFor(composer, "exists == false"), "Composer stayed open for \(name)")
     }
     app.terminate()
   }
@@ -181,15 +201,29 @@ final class ActivationUITests: XCTestCase {
     if handles.count < 2 { app.swipeUp() }
     XCTAssertEqual(handles.count, 2, app.debugDescription)
     reveal(handles.element(boundBy: 1), app: app)
-    let first = handles.element(boundBy: 0)
-    let last = handles.element(boundBy: 1)
-    first.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.5, thenDragTo: last.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9)))
+    // Both handles have the same label, so only their position tells them apart,
+    // and XCTest looks up an element's coordinate again while the drag runs. Once
+    // the first row lifts, "index 1" is no longer the second row: on CI it came
+    // back with an infinite frame (an exception inside XCTest) or as a row that
+    // made the drop a no-op. Read both frames now and drag between fixed points.
+    let from = handles.element(boundBy: 0).frame
+    let to = handles.element(boundBy: 1).frame
+    XCTAssertFalse(
+      from.isInfinite || from.isEmpty || to.isInfinite || to.isEmpty,
+      "Handle frames \(from) and \(to)\n\(app.debugDescription)")
+    let origin = app.coordinate(withNormalizedOffset: .zero)
+    origin.withOffset(CGVector(dx: from.midX, dy: from.midY)).press(
+      forDuration: 0.5,
+      thenDragTo: origin.withOffset(CGVector(dx: to.midX, dy: to.minY + to.height * 0.9)),
+      withVelocity: .default, thenHoldForDuration: 0.3)
     // The status row is virtualized above the viewport here. Verify the saved
     // photo IDs after ending edit mode instead of polling an absent AX row.
     reveal(reorder, app: app, down: true)
     reorder.tap()
     reveal(fields.firstMatch, app: app)
-    XCTAssertNotEqual(fields.firstMatch.identifier, firstID)
+    XCTAssertTrue(
+      waitFor(fields.firstMatch, "identifier != '\(firstID)'", timeout: 10),
+      "The drag left \(firstID) first")
     XCTAssertEqual(fields.firstMatch.value as? String, "Together")
     reveal(reorder, app: app, down: true)
     reorder.tap()
