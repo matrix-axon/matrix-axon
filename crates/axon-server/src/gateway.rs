@@ -127,7 +127,7 @@ impl GatewayAdapter {
     /// gateway bounds itself under [`media_bounds`](Self::media_bounds). No
     /// outer timeout: one here would also run while the thumbnail uploads,
     /// and could cancel the send during the step that must never fail it
-    /// (ADR 0142 section 6). The gateway's clock covers the whole call,
+    /// (ADR 0142 section 6). The gateway bounds every step of the call,
     /// resolving the room included, so nothing here waits unbounded.
     fn with_media_bounds<'a, T: 'a>(
         &self,
@@ -145,13 +145,16 @@ impl GatewayAdapter {
         )
     }
 
-    /// A media send's budget: the upload timeout for the whole send, as it
-    /// was before ADR 0142, and the thumbnail upload's own 10 s outside it
-    /// (see [`MediaSendBounds`]).
+    /// A media send's per-step bounds (ADR 0142 section 8, see
+    /// [`MediaSendBounds`]): the upload timeout for the original's upload,
+    /// the thumbnail upload's own 10 s, and the send-mutation timeout for the
+    /// event, as a text send has. A text send with previews runs under the
+    /// upload timeout alone.
     fn media_bounds(&self) -> MediaSendBounds {
         MediaSendBounds {
-            send: self.upstream_upload_timeout,
+            upload: self.upstream_upload_timeout,
             thumbnail: MediaSendBounds::THUMBNAIL_UPLOAD,
+            event: self.send_mutation_timeout,
         }
     }
 }

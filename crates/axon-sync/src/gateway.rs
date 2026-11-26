@@ -955,10 +955,11 @@ async fn media_content_with_relation(
 /// request can get wrong, the attachment's kind and type included, is checked
 /// before the first upload.
 ///
-/// Everything runs against `clock`'s budget except an attachment's
-/// thumbnail upload, which is best-effort and outside it, as in
-/// [`send_media_in_room`]. A text send has no thumbnail, so its whole send is
-/// one budget, as before.
+/// With an attachment, each step has its own bound, as in
+/// [`send_media_in_room`]: the preview images and the original under the
+/// upload bound, the thumbnail under its own, then the event under the event
+/// bound. A text send has no attachment, so its whole send, preview images
+/// included, is one upload budget, as before (see [`MediaSendBounds`]).
 async fn send_with_previews_in_room(
     room: &Room,
     account_id: Uuid,
@@ -1020,8 +1021,7 @@ async fn send_with_previews_in_room(
         )
         .await?;
     let media = if let Some((send, mime)) = attachment {
-        let (attachment, source) =
-            upload_original(room, send, &mime, encrypted, &mut clock).await?;
+        let (attachment, source) = upload_original(room, send, &mime, encrypted, &clock).await?;
         validate_preview_media_source(&source)?;
         let info = attachment_info(&attachment)?;
         let MediaAttachment {
@@ -1030,8 +1030,8 @@ async fn send_with_previews_in_room(
             thumbnail,
             ..
         } = attachment;
-        let thumbnail =
-            upload_attachment_thumbnail(room, kind, thumbnail, encrypted, &mut clock).await;
+        let thumbnail = upload_attachment_thumbnail(room, kind, thumbnail, encrypted, &clock).await;
+        clock.start_event();
         let caption = (!message.body.is_empty()).then(|| match message.formatted {
             Some(f) => TextMessageEventContent::html(message.body, f.body),
             None => TextMessageEventContent::plain(message.body),
@@ -1100,25 +1100,37 @@ fn check_preview_content(room_id: &RoomId, content: &mut Value) -> Result<(), Ga
     check_content(content).map_err(preview_validation_error)
 }
 
-/// How long a media send may take.
+/// How long each step of a media send may take (ADR 0142 section 8).
 ///
-/// ADR 0142 section 8 gives each step its own bound (60 s, 10 s and 30 s),
-/// but the shipped web client gives up on `send-media` after 65 s and sends
-/// no `txn_id`, so a send that succeeded later than that would be retried and
-/// posted twice. Until clients wait for the longer sum (issue 24; the
-/// per-step bounds return with issue 1243), the room and encryption state
-/// lookups, preview images, original upload, reply lookup and event share
-/// one network budget. Thumbnail upload and any image inspection
-/// still pending after original upload run under their own bounds, so they
-/// cannot exhaust the send budget (sections 5 and 6).
+/// A send with an attachment runs three steps, each under its own bound:
+///
+/// 1. [`upload`](Self::upload): resolving the room, checking its encryption,
+///    uploading any preview images, and uploading the original. Image
+///    inspection runs alongside the upload under its own 5 s, and the step
+///    ends when both have.
+/// 2. [`thumbnail`](Self::thumbnail): the thumbnail's upload, best-effort.
+/// 3. [`event`](Self::event): looking up the replied-to event, a plaintext
+///    room's second encryption check, and sending the event.
+///
+/// With the defaults that is 60 s, 10 s and 30 s, and the API's 5 s for a
+/// client thumbnail comes before them all: 105 s, which the web client waits
+/// for, sending a `txn_id` so a retry joins the first send rather than
+/// posting twice (issue 24). Only an upload that starts within the last 5 s
+/// of its bound can let inspection end after it, by at most those 5 s.
+///
+/// A text send with link previews has no attachment and keeps one budget,
+/// [`upload`](Self::upload), for everything: the web client waits for that
+/// alone, and sends no `txn_id` with a text send (issue 1223).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MediaSendBounds {
-    /// Network budget for the original send (`media.upstream_upload_timeout_secs`),
-    /// paused while waiting only for thumbnail work.
-    pub send: std::time::Duration,
-    /// The thumbnail upload. When it runs out, the event goes without one,
-    /// and the time it took is not charged to `send`.
+    /// Everything up to and including the original's upload
+    /// (`media.upstream_upload_timeout_secs`), or a text send's whole send.
+    pub upload: std::time::Duration,
+    /// The thumbnail upload. When it runs out, the event goes without one.
     pub thumbnail: std::time::Duration,
+    /// Building and sending an attachment's event
+    /// (`sync.send_mutation_timeout_secs`), as for a text send.
+    pub event: std::time::Duration,
 }
 
 impl MediaSendBounds {
@@ -1127,23 +1139,37 @@ impl MediaSendBounds {
     pub const THUMBNAIL_UPLOAD: std::time::Duration = std::time::Duration::from_secs(10);
 }
 
-/// The clock one media send runs against: [`MediaSendBounds::send`] from the
-/// start, paused while waiting only for thumbnail preparation or upload.
+/// The clock one media send runs against: [`MediaSendBounds::upload`] from
+/// the start, then, for an attachment, [`MediaSendBounds::event`] from
+/// [`start_event`](Self::start_event). The thumbnail upload between them
+/// runs under its own bound and is charged to neither.
 pub(crate) struct MediaClock {
     deadline: tokio::time::Instant,
+    /// The bound `deadline` was set from, for the timeout's message.
+    limit: std::time::Duration,
     bounds: MediaSendBounds,
 }
 
 impl MediaClock {
     pub(crate) fn start(bounds: MediaSendBounds) -> Self {
         Self {
-            deadline: tokio::time::Instant::now() + bounds.send,
+            deadline: tokio::time::Instant::now() + bounds.upload,
+            limit: bounds.upload,
             bounds,
         }
     }
 
-    /// Run part of the send against the budget. Running out is a
-    /// [`GatewayError::Timeout`], a `504`: the homeserver may still finish it.
+    /// Start the event step's own bound, once the original and any
+    /// thumbnail have uploaded. What is left of the upload step's bound does
+    /// not carry over: each step gets exactly its own.
+    fn start_event(&mut self) {
+        self.deadline = tokio::time::Instant::now() + self.bounds.event;
+        self.limit = self.bounds.event;
+    }
+
+    /// Run part of the send against the current step's bound. Running out is
+    /// a [`GatewayError::Timeout`], a `504`: the homeserver may still finish
+    /// it.
     async fn run<T>(
         &self,
         fut: impl std::future::Future<Output = Result<T, GatewayError>>,
@@ -1153,23 +1179,20 @@ impl MediaClock {
             .map_err(|_| {
                 GatewayError::Timeout(format!(
                     "media send timed out after {}s",
-                    self.bounds.send.as_secs()
+                    self.limit.as_secs()
                 ))
             })?
     }
 
-    /// Upload a thumbnail outside the budget: the deadline moves back by
-    /// however long it took, so a slow thumbnail costs only itself.
+    /// Upload a thumbnail under its own bound, between the upload and event
+    /// steps, so a slow thumbnail costs only itself.
     async fn thumbnail(
-        &mut self,
+        &self,
         room: &Room,
         thumbnail: axon_core::MediaThumbnail,
         encrypted: bool,
     ) -> Option<(MediaSource, Box<ThumbnailInfo>)> {
-        let started = tokio::time::Instant::now();
-        let uploaded = upload_thumbnail(room, thumbnail, encrypted, self.bounds.thumbnail).await;
-        self.deadline += started.elapsed();
-        uploaded
+        upload_thumbnail(room, thumbnail, encrypted, self.bounds.thumbnail).await
     }
 }
 
@@ -1229,14 +1252,14 @@ async fn upload_thumbnail(
 }
 
 /// Upload the original while the server inspects the staged image. Each has
-/// its own deadline. Only the time spent waiting for inspection after the
-/// upload pauses the network budget, so a slow decoder cannot fail the send.
+/// its own deadline: the upload the step's, inspection its own 5 s, so a slow
+/// decoder cannot fail the send. The step ends when both have.
 async fn upload_original(
     room: &Room,
     send: MediaSend,
     content_type: &mime::Mime,
     encrypted: bool,
-    clock: &mut MediaClock,
+    clock: &MediaClock,
 ) -> Result<(MediaAttachment, MediaSource), GatewayError> {
     let MediaSend {
         mut attachment,
@@ -1250,12 +1273,7 @@ async fn upload_original(
         encrypted,
     ));
     let source = if let Some(image) = image {
-        use tokio::time::Instant;
-        let (metadata, (source, uploaded_at)) =
-            tokio::try_join!(async { Ok(image.await) }, async {
-                upload.await.map(|source| (source, Instant::now()))
-            },)?;
-        clock.deadline += uploaded_at.elapsed();
+        let (metadata, source) = tokio::try_join!(async { Ok(image.await) }, upload)?;
         metadata.apply(&mut attachment);
         source
     } else {
@@ -1269,7 +1287,7 @@ async fn upload_attachment_thumbnail(
     kind: MediaSendKind,
     thumbnail: Option<axon_core::MediaThumbnail>,
     encrypted: bool,
-    clock: &mut MediaClock,
+    clock: &MediaClock,
 ) -> Option<(MediaSource, Box<ThumbnailInfo>)> {
     // The API refuses thumbnails for audio. An unusual MXC URI from the
     // homeserver costs only the thumbnail, including on preview-aware sends.
@@ -1314,7 +1332,7 @@ async fn send_media_in_room(
     ensure_joined(room)?;
     let encrypted = clock.run(fresh_room_encryption(room, account_id)).await?;
     let (attachment, source) =
-        upload_original(room, send, &content_type, encrypted, &mut clock).await?;
+        upload_original(room, send, &content_type, encrypted, &clock).await?;
     let info = attachment_info(&attachment)?;
     let MediaAttachment {
         kind,
@@ -1322,7 +1340,8 @@ async fn send_media_in_room(
         thumbnail,
         ..
     } = attachment;
-    let thumbnail = upload_attachment_thumbnail(room, kind, thumbnail, encrypted, &mut clock).await;
+    let thumbnail = upload_attachment_thumbnail(room, kind, thumbnail, encrypted, &clock).await;
+    clock.start_event();
     let msg_type = media_message_type(
         kind,
         filename,
@@ -1670,8 +1689,8 @@ impl SdkGateway {
         bounds: MediaSendBounds,
     ) -> Result<String, GatewayError> {
         use futures_util::FutureExt;
-        // The budget starts before the room is resolved, as the adapter's
-        // single timeout did.
+        // The upload step's bound starts before the room is resolved, as the
+        // adapter's single timeout did.
         let clock = MediaClock::start(bounds);
         let room = clock.run(self.room(account_id, room_id)).await?;
         // Boxed as a trait object: the send future is deep enough that,
@@ -1738,8 +1757,8 @@ impl SdkGateway {
     /// dimensions, duration and thumbnail (section 4).
     ///
     /// Every relation shape goes through one hand-built send
-    /// ([`send_media_in_room`]) under `bounds` (see [`MediaSendBounds`]): one
-    /// budget for the whole send, with the thumbnail upload outside it.
+    /// ([`send_media_in_room`]) under `bounds` (see [`MediaSendBounds`]): the
+    /// original's upload, the thumbnail's and the event each under its own.
     /// `txn_id`, when present, is the client's id for this send;
     /// it becomes the Matrix transaction id, so a retry the homeserver has
     /// already seen returns the first event instead of posting another.
@@ -3292,8 +3311,9 @@ mod tests {
 
     /// Bounds long enough that no test step runs out.
     const TEST_BOUNDS: super::MediaSendBounds = super::MediaSendBounds {
-        send: std::time::Duration::from_secs(30),
+        upload: std::time::Duration::from_secs(30),
         thumbnail: std::time::Duration::from_secs(30),
+        event: std::time::Duration::from_secs(30),
     };
 
     fn plain_media_source() -> MediaSource {
@@ -4318,9 +4338,9 @@ mod tests {
             let attachment = with_thumbnail(MediaSendKind::Image, "image/png");
             let mime =
                 super::effective_mime(attachment.kind, attachment.content_type.as_deref()).unwrap();
-            let mut clock = super::MediaClock::start(TEST_BOUNDS);
+            let clock = super::MediaClock::start(TEST_BOUNDS);
             let (attachment, source) =
-                super::upload_original(&room, attachment.into(), &mime, true, &mut clock)
+                super::upload_original(&room, attachment.into(), &mime, true, &clock)
                     .await
                     .unwrap();
             let info = super::attachment_info(&attachment).unwrap();
@@ -4329,7 +4349,7 @@ mod tests {
                 attachment.kind,
                 attachment.thumbnail,
                 true,
-                &mut clock,
+                &clock,
             )
             .await;
             let msg_type = super::media_message_type(
@@ -4369,14 +4389,14 @@ mod tests {
         server.abort();
     }
 
-    /// The #1241 review's budget: everything but the thumbnail upload shares
-    /// one `send` budget, as the single upload timeout did before ADR 0142,
-    /// so a send never succeeds later than shipped clients wait; and the
-    /// clock stops while the thumbnail uploads, so a slow thumbnail can never
-    /// time out the send it is optional for. A text send with previews has
-    /// the same single budget.
+    /// ADR 0142 section 8's per-step bounds (issue 1243): with an attachment,
+    /// the original's upload, the thumbnail's and the event each run under
+    /// their own bound, so a send can take longer than any one of them, and a
+    /// slow thumbnail can never time out the send it is optional for. Each
+    /// network step still fails when it overruns its own. A text send with
+    /// previews has no attachment and keeps one upload budget for everything.
     #[tokio::test]
-    async fn one_send_budget_covers_everything_but_the_thumbnail_upload() {
+    async fn each_media_send_step_has_its_own_bound() {
         use std::time::Duration;
         let seen = std::sync::Arc::new(std::sync::Mutex::new(ThumbSeen::default()));
         let (room, server) = preview_test_room(
@@ -4391,9 +4411,12 @@ mod tests {
             (info, matrix_sdk_base::RoomInfoNotableUpdateReasons::empty())
         })
         .await;
+        // The event's bound is the longer, so a text send that got it (it
+        // must not) would be told apart from one that keeps the upload's.
         let bounds = super::MediaSendBounds {
-            send: Duration::from_millis(2000),
-            thumbnail: Duration::from_millis(1200),
+            upload: Duration::from_millis(1000),
+            thumbnail: Duration::from_millis(600),
+            event: Duration::from_millis(2000),
         };
         let set = |original: u64, send: u64, mode: ThumbUpload| {
             let mut seen = seen.lock().unwrap();
@@ -4403,43 +4426,50 @@ mod tests {
             seen.sent.clear();
             seen.uploads.clear();
         };
+        let bare = || {
+            let mut attachment = with_thumbnail(MediaSendKind::Image, "image/png");
+            attachment.thumbnail = None;
+            attachment
+        };
+        let send = |attachment: axon_core::MediaAttachment| {
+            super::send_media_in_room(
+                (&room, uuid::Uuid::nil()),
+                attachment.into(),
+                None,
+                None,
+                Relation::default(),
+                None,
+                super::MediaClock::start(bounds),
+            )
+        };
 
-        // 1.2 s original + 1.2 s thumbnail (timed out) + 0.3 s event: 2.7 s
-        // in all, but only 1.5 s of it is charged to the 2 s budget.
-        set(1200, 300, ThumbUpload::Slow);
-        super::send_media_in_room(
-            (&room, uuid::Uuid::nil()),
-            with_thumbnail(MediaSendKind::Image, "image/png").into(),
-            None,
-            None,
-            Relation::default(),
-            None,
-            super::MediaClock::start(bounds),
-        )
-        .await
-        .expect("a slow thumbnail does not use up the send's budget");
+        // 0.8 s original + 0.6 s thumbnail (timed out) + 1.5 s event: 2.9 s
+        // in all, longer than any one bound, and each step inside its own.
+        set(800, 1500, ThumbUpload::Slow);
+        send(with_thumbnail(MediaSendKind::Image, "image/png"))
+            .await
+            .expect("each step fits its own bound");
         let content = seen.lock().unwrap().sent.pop().expect("sent").1;
         assert!(content["info"].get("thumbnail_url").is_none());
 
-        // No thumbnail: a 1.2 s original and a 1.2 s event overrun the 2 s
-        // budget together, as they did the single upload timeout.
-        set(1200, 1200, ThumbUpload::Accept);
-        let mut attachment = with_thumbnail(MediaSendKind::Image, "image/png");
-        attachment.thumbnail = None;
-        let err = super::send_media_in_room(
-            (&room, uuid::Uuid::nil()),
-            attachment.into(),
-            None,
-            None,
-            Relation::default(),
-            None,
-            super::MediaClock::start(bounds),
-        )
-        .await
-        .expect_err("the original and the event share one budget");
+        // An original that overruns the upload bound fails the send.
+        set(1300, 0, ThumbUpload::Accept);
+        let err = send(bare())
+            .await
+            .expect_err("the original has its own bound");
+        assert!(matches!(err, GatewayError::Timeout(_)), "{err:?}");
+        assert!(
+            seen.lock().unwrap().sent.is_empty(),
+            "no event after a timed-out upload"
+        );
+
+        // A quick original leaves nothing over for the event: it gets
+        // exactly its own bound, so a 2.5 s event fails.
+        set(0, 2500, ThumbUpload::Accept);
+        let err = send(bare()).await.expect_err("the event has its own bound");
         assert!(matches!(err, GatewayError::Timeout(_)), "{err:?}");
 
-        // A text send with previews: one budget for the whole send.
+        // A caption with a preview, sent with the attachment: the same steps.
         let message = || axon_core::link_preview::PreviewSend {
             body: "see https://example.org",
             formatted: None,
@@ -4452,7 +4482,21 @@ mod tests {
                 image: None,
             }],
         };
-        set(0, 1500, ThumbUpload::Accept);
+        set(800, 1500, ThumbUpload::Accept);
+        super::send_with_previews_in_room(
+            &room,
+            uuid::Uuid::nil(),
+            message(),
+            Some(bare().into()),
+            None,
+            super::MediaClock::start(bounds),
+        )
+        .await
+        .expect("a preview send with an attachment has per-step bounds too");
+
+        // A text send with previews: one upload budget for the whole send,
+        // so the 1.5 s event that fit an attachment's event bound does not.
+        set(0, 800, ThumbUpload::Accept);
         super::send_with_previews_in_room(
             &room,
             uuid::Uuid::nil(),
@@ -4462,8 +4506,8 @@ mod tests {
             super::MediaClock::start(bounds),
         )
         .await
-        .expect("a 1.5 s event fits the text send's 2 s budget");
-        set(0, 2500, ThumbUpload::Accept);
+        .expect("a 0.8 s event fits the text send's 1 s budget");
+        set(0, 1500, ThumbUpload::Accept);
         let err = super::send_with_previews_in_room(
             &room,
             uuid::Uuid::nil(),
@@ -4473,7 +4517,7 @@ mod tests {
             super::MediaClock::start(bounds),
         )
         .await
-        .expect_err("but not a 2.5 s one");
+        .expect_err("but not a 1.5 s one");
         assert!(matches!(err, GatewayError::Timeout(_)), "{err:?}");
         server.abort();
     }
