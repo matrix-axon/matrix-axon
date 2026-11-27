@@ -1192,13 +1192,8 @@ impl MatrixOAuthAcquireEngine {
             MatrixOAuthAcquirePresentation::Display => {
                 let user_id = OwnedUserId::try_from(flow.expected_user_id.as_str())
                     .map_err(|_| DriverFailure::InvalidQr)?;
-                build_matrix_oauth_acquire_client(
-                    &self.inner.config,
-                    &flow.staging_dir_name,
-                    user_id.server_name().as_str(),
-                )
-                .await
-                .map_err(classify_client_build_error)?
+                self.build_qr_staging_client(&flow, user_id.server_name().as_str())
+                    .await?
             }
             MatrixOAuthAcquirePresentation::Scan => {
                 let qr = tokio::select! {
@@ -1207,13 +1202,7 @@ impl MatrixOAuthAcquireEngine {
                     qr = scan_rx => qr.map_err(|_| DriverFailure::Cancelled)?,
                 };
                 let server = qr_server(&qr)?;
-                let client = build_matrix_oauth_acquire_client(
-                    &self.inner.config,
-                    &flow.staging_dir_name,
-                    &server,
-                )
-                .await
-                .map_err(classify_client_build_error)?;
+                let client = self.build_qr_staging_client(&flow, &server).await?;
                 self.inner
                     .registrations
                     .prepare(&client)
@@ -1246,6 +1235,34 @@ impl MatrixOAuthAcquireEngine {
         self.validate_completed_client(&flow, client, None).await
     }
 
+    async fn retained_account(
+        &self,
+        flow: &Flow,
+    ) -> Result<Option<axon_store::Account>, DriverFailure> {
+        self.inner
+            .store
+            .find_account_by_user_id(&flow.expected_user_id)
+            .await
+            .map_err(|err| {
+                tracing::error!(
+                    phase = "staging",
+                    error_class = %store_error_class(&err),
+                    "Matrix OAuth login could not read the retained account"
+                );
+                DriverFailure::Internal
+            })
+    }
+
+    async fn build_qr_staging_client(
+        &self,
+        flow: &Flow,
+        endpoint: &str,
+    ) -> Result<Client, DriverFailure> {
+        build_matrix_oauth_acquire_client(&self.inner.config, &flow.staging_dir_name, endpoint)
+            .await
+            .map_err(classify_client_build_error)
+    }
+
     /// Browser sign-in: the device authorization grant, driven directly
     /// because the SDK keeps its own implementation private to QR login.
     async fn drive_browser(
@@ -1258,19 +1275,7 @@ impl MatrixOAuthAcquireEngine {
         // A retained account keeps its stored endpoint, as it does for
         // password login: one reached only through an explicit URL would
         // otherwise be unreachable here, or have its URL replaced at commit.
-        let retained = self
-            .inner
-            .store
-            .find_account_by_user_id(&flow.expected_user_id)
-            .await
-            .map_err(|err| {
-                tracing::error!(
-                    phase = "homeserver_discovery",
-                    error_class = %store_error_class(&err),
-                    "Matrix OAuth login could not read the retained account"
-                );
-                DriverFailure::Internal
-            })?;
+        let retained = self.retained_account(&flow).await?;
         let homeserver = match retained {
             Some(account) => account.homeserver_url,
             // The same resolution password login uses: the server name's

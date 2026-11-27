@@ -1897,6 +1897,23 @@ impl VerificationService for StubVerification {
 
 #[async_trait]
 impl AccountLifecycle for StubLifecycle {
+    async fn insecure_devices_impact(
+        &self,
+        _account_id: Uuid,
+    ) -> Result<axon_core::insecure_devices::InsecureDeviceImpact, axon_api::InsecureDevicesError>
+    {
+        Err(axon_api::InsecureDevicesError::Unavailable)
+    }
+
+    async fn set_exclude_insecure_devices(
+        &self,
+        _account_id: Uuid,
+        _enabled: bool,
+        _acknowledgement_token: Option<&str>,
+    ) -> Result<(), axon_api::InsecureDevicesError> {
+        Err(axon_api::InsecureDevicesError::Unavailable)
+    }
+
     async fn login(
         &self,
         homeserver_url: Option<&str>,

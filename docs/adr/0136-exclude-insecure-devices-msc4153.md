@@ -165,7 +165,9 @@ There are no separate sending and receiving settings.
 Both values are builder settings in matrix-sdk, separate from `EncryptionSettings`.
 `configure_client_builder` keeps its `with_encryption_settings(production_encryption_settings())` call, which carries the backup download strategy, and adds `with_room_key_recipient_strategy` and `with_decryption_settings` beside it.
 The new calls compose with the existing one and do not replace it.
-`configure_client_builder` takes the account's value, every production client path applies it (including the restore path and the OAuth staging client), and its tests cover both values.
+`configure_client_builder` applies the persisted value when restoring a session, and its tests cover both values.
+A fresh device starts with the setting off, including token import and Matrix OAuth acquisition.
+Axon resets the setting atomically when it installs the new session, so the previous device's opt-in does not carry over even when the archived history is retained.
 Changing the setting rebuilds that account's client through the same stop-and-restart path the lifecycle verbs use, so a change never applies to half a sync cycle.
 
 Any valid bearer may turn the setting off.
@@ -181,6 +183,9 @@ It does not need step-up, because it changes no credential.
 
 The server refuses to turn the setting on (409) while Axon's own device is not cross-signed.
 With it on, every encrypted send would otherwise fail with `SendingFromUnverifiedDevice`.
+
+The SDK must also mark Axon's own cross-signing identity verified locally.
+A device signature alone can leave that identity unverified, which also triggers `SendingFromUnverifiedDevice`.
 
 Before the user confirms, an impact read lists, from the account's crypto store, the encrypted rooms that have members with devices that are not cross-signed, and those members.
 Bots and bridges, which make up most of production's list, are named in it.

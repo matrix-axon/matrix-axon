@@ -39,6 +39,7 @@ pub mod devices;
 pub mod ephemeral;
 pub mod events;
 pub mod image_packs;
+pub mod insecure_devices;
 pub mod invites;
 pub mod management;
 pub mod matrix_oauth_acquire;

@@ -92,6 +92,32 @@ fn saturating_i64(value: u64) -> i64 {
 pub(crate) struct AccountTask {
     pub(crate) cancel: CancellationToken,
     pub(crate) handle: tokio::task::JoinHandle<()>,
+    // A failed lifecycle drain may arrange one restart after this task exits.
+    stopped: Option<CancellationToken>,
+}
+
+impl AccountTask {
+    pub(crate) fn spawn(
+        tracker: &TaskTracker,
+        cancel: CancellationToken,
+        run: impl Future<Output = ()> + Send + 'static,
+    ) -> Self {
+        let stopped = CancellationToken::new();
+        let notify = stopped.clone().drop_guard();
+        let handle = tracker.spawn(async move {
+            let _notify = notify;
+            run.await;
+        });
+        Self {
+            cancel,
+            handle,
+            stopped: Some(stopped),
+        }
+    }
+
+    pub(crate) fn take_stop_signal(&mut self) -> Option<CancellationToken> {
+        self.stopped.take()
+    }
 }
 
 /// `account_id → stop handles` for the per-account supervised tasks.
@@ -582,30 +608,32 @@ pub(crate) fn spawn_supervised(
 ) {
     let task_cancel = cancel.child_token();
     let account_id = account.account_id;
-    let handle = tracker.spawn(supervise_account(
-        store,
-        config,
-        account,
+    let task = AccountTask::spawn(
+        tracker,
         task_cancel.clone(),
-        live_tx,
-        manager,
-        locks,
-        tracker.clone(),
-        verifications,
-        verification_rooms,
-        index,
-        backfill_health,
-        sync_health,
-        matrix_oauth_grants,
-        push,
-    ));
-    if let Some(stale) = tasks.lock().expect("task registry poisoned").insert(
-        account_id,
-        AccountTask {
-            cancel: task_cancel,
-            handle,
-        },
-    ) {
+        supervise_account(
+            store,
+            config,
+            account,
+            task_cancel,
+            live_tx,
+            manager,
+            locks,
+            tracker.clone(),
+            verifications,
+            verification_rooms,
+            index,
+            backfill_health,
+            sync_health,
+            matrix_oauth_grants,
+            push,
+        ),
+    );
+    if let Some(stale) = tasks
+        .lock()
+        .expect("task registry poisoned")
+        .insert(account_id, task)
+    {
         stale.cancel.cancel();
     }
 }
@@ -2182,7 +2210,7 @@ async fn run_account(
     // The manager owns client construction + caching (and single-flight with the
     // gateway, which may have connected this account already). A connect failure
     // surfaces as a SyncError so the supervisor's backoff/retry is unchanged.
-    let client = manager.get_or_connect(account.account_id).await?;
+    let client = manager.get_or_connect_unleased(account.account_id).await?;
     // Every background request below takes a permit from this (ADR 0122).
     let gate = manager.homeserver_gate(&client);
     // Subscribe before sync can make an authenticated request and trigger token

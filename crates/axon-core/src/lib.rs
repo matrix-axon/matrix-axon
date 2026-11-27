@@ -10,6 +10,7 @@ pub mod config;
 pub mod edit_preview;
 pub mod error;
 pub mod image_pack;
+pub mod insecure_devices;
 pub mod link_preview;
 pub mod live;
 pub mod matrix_link;
