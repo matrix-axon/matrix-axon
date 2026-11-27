@@ -122,6 +122,26 @@ pub(crate) struct Queue {
     changes: Option<RoomDetailsChanges>,
 }
 
+/// Sweep expired browse payloads at boot and every five minutes.
+pub(crate) async fn prune_expired_space_browse(store: Store, cancel: CancellationToken) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(5 * 60));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = ticker.tick() => {}
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            result = store.prune_expired_space_browse() => match result {
+                Ok(removed) if removed > 0 => tracing::debug!(removed, "pruned expired space browse roots"),
+                Ok(_) => {}
+                Err(error) => tracing::warn!(reason = error.diagnostic_reason(), "expired space browse cleanup will retry"),
+            }
+        }
+    }
+}
+
 /// The frame source a client re-reads for `job`.
 fn frame_source(job: RoomDetailJob) -> RoomDetailSource {
     match job {
@@ -130,6 +150,7 @@ fn frame_source(job: RoomDetailJob) -> RoomDetailSource {
             RoomDetailSource::HomeserverDetails
         }
         RoomDetailJob::Hierarchy => RoomDetailSource::SpaceHierarchy,
+        RoomDetailJob::BrowseHierarchy => RoomDetailSource::SpaceBrowse,
         RoomDetailJob::Summary => RoomDetailSource::Discovery,
     }
 }
@@ -800,7 +821,14 @@ impl<U: Upstream> Worker<U> {
             }
         };
         match job {
-            RoomDetailJob::Hierarchy => self.run_hierarchy(room_id, epoch).await,
+            RoomDetailJob::Hierarchy | RoomDetailJob::BrowseHierarchy => {
+                let depth = if job == RoomDetailJob::Hierarchy {
+                    axon_store::HierarchyDepth::Direct
+                } else {
+                    axon_store::HierarchyDepth::Nested
+                };
+                self.run_hierarchy(room_id, epoch, depth).await
+            }
             // Returned above, before any membership read.
             RoomDetailJob::Summary => ran,
             RoomDetailJob::LocalAliases | RoomDetailJob::DirectoryVisibility => {

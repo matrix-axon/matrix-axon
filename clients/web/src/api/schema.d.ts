@@ -1427,6 +1427,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/accounts/{account_id}/rooms/{room_id}/space/browse": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read cached nested browse results
+         * @description Pages a joined root's fresh browse cache by parent and child room ID.
+         *     Use the synced room list for joined room details. Restart from the first
+         *     page on a `room_details.changed` frame with source `space_browse` for
+         *     this root or `space_graph` for this account. This read is local only.
+         */
+        get: operations["space_browse"];
+        put?: never;
+        /**
+         * Request nested discovery for a joined space
+         * @description Explicit browsing can queue a bounded background crawl. Axon returns
+         *     immediately. Poll the local GET or re-read on a live invalidation. A fresh
+         *     crawl, queued work, or backoff suppresses a duplicate request.
+         */
+        post: operations["request_space_browse"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/accounts/{account_id}/rooms/{room_id}/space/children": {
         parameters: {
             query?: never;
@@ -1705,6 +1734,30 @@ export interface paths {
          *     why.
          */
         get: operations["room_upgrade"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/accounts/{account_id}/spaces/discovered": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read cached space memberships for the sidebar
+         * @description Lists joined descendants reached through fresh browsed unjoined paths.
+         *     Combine this with the joined graph and room list. Use `expires_at` to
+         *     remove stale memberships and restart paging on reconnect or on account
+         *     invalidations with source `space_graph` or `space_browse`. This read is
+         *     local only, including when the cache is empty or expired.
+         */
+        get: operations["discovered_space_memberships"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3000,6 +3053,13 @@ export interface components {
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_DiscoveredSpaceMembershipPageDto: {
+            data: {
+                memberships: components["schemas"]["DiscoveredSpaceMembershipDto"][];
+                next_cursor?: string | null;
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
         ApiResponse_EnableBackupResponseDto: {
             /** @description Flattened enable-backup 200 body: `AccountDto` plus what this request did. */
             data: components["schemas"]["AccountDto"] & {
@@ -3673,6 +3733,65 @@ export interface components {
             data: {
                 /** @description The created Matrix event id. */
                 event_id: string;
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_SpaceBrowsePageDto: {
+            data: {
+                discovery: components["schemas"]["SpaceDiscoveryDto"];
+                links: components["schemas"]["SpaceBrowseLinkDto"][];
+                next_cursor?: string | null;
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_SpaceDiscoveryDto: {
+            /**
+             * @description A space's discovery crawl (ADR 0128 decision 3). `state` lives in memory
+             *     only, so after a restart it is `idle`; everything else persists.
+             */
+            data: {
+                /**
+                 * Format: int64
+                 * @description Unix ms when the crawl ended `complete` or `truncated`.
+                 */
+                completed_at?: number | null;
+                /**
+                 * Format: int64
+                 * @description Unix ms until which an ended crawl, a denial, or `unsupported` stands;
+                 *     an `enrich` read after it starts a new crawl.
+                 */
+                expires_at?: number | null;
+                failure?: null | components["schemas"]["CrawlFailure"];
+                /**
+                 * Format: int64
+                 * @description Unix ms before which a failed crawl is not resumed.
+                 */
+                next_attempt_at?: number | null;
+                outcome?: null | components["schemas"]["CrawlOutcome"];
+                /**
+                 * Format: int32
+                 * @description The rooms the crawl asks for per page; halved for the rest of a crawl
+                 *     after a page over Axon's size limit. `null` before the first crawl.
+                 */
+                page_limit?: number | null;
+                /**
+                 * Format: int32
+                 * @description Pages the current crawl has committed.
+                 */
+                pages: number;
+                /**
+                 * Format: int32
+                 * @description Children the current crawl has returned so far.
+                 */
+                rooms_cached: number;
+                /**
+                 * Format: int64
+                 * @description Unix ms when the current crawl started from its first page.
+                 */
+                started_at?: number | null;
+                /** @description Whether a page is waiting for, or using, the account's worker. */
+                state: components["schemas"]["RefreshState"];
+                support: components["schemas"]["CrawlSupport"];
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -5046,6 +5165,21 @@ export interface components {
              */
             withheld: string[];
             world_readable?: boolean | null;
+        };
+        DiscoveredSpaceMembershipDto: {
+            /**
+             * Format: int64
+             * @description Unix milliseconds when the sidebar should stop using this membership.
+             */
+            expires_at: number;
+            /** @description A currently joined room reached through at least one unjoined space. */
+            room_id: string;
+            /** @description The joined space where browsing started. */
+            space_id: string;
+        };
+        DiscoveredSpaceMembershipPageDto: {
+            memberships: components["schemas"]["DiscoveredSpaceMembershipDto"][];
+            next_cursor?: string | null;
         };
         /**
          * @description Which homeserver read produced a discovery row.
@@ -7017,6 +7151,22 @@ export interface components {
          */
         SetRoomTopicRequest: {
             topic: string;
+        };
+        SpaceBrowseLinkDto: {
+            child_room_id: string;
+            discovered?: null | components["schemas"]["DiscoveredRoomDto"];
+            /** @description Whether the account has joined the child. Use the synced room list for its display fields. */
+            joined: boolean;
+            order?: string | null;
+            /** Format: int64 */
+            origin_ts: number;
+            parent_room_id: string;
+            suggested: boolean;
+        };
+        SpaceBrowsePageDto: {
+            discovery: components["schemas"]["SpaceDiscoveryDto"];
+            links: components["schemas"]["SpaceBrowseLinkDto"][];
+            next_cursor?: string | null;
         };
         /**
          * @description One space-child entry (`GET …/rooms/{room_id}/space/children`, issue #404,
@@ -12117,6 +12267,110 @@ export interface operations {
             };
         };
     };
+    space_browse: {
+        parameters: {
+            query?: {
+                /** @description Page size (default 50, maximum 100). */
+                limit?: number;
+                /** @description Opaque continuation from the preceding page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+                /** @description Joined root space id */
+                room_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cached nested browse links and crawl progress */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_SpaceBrowsePageDto"];
+                };
+            };
+            /** @description Malformed room id or cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    request_space_browse: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+                /** @description Joined root space id */
+                room_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Nested browse crawl status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_SpaceDiscoveryDto"];
+                };
+            };
+            /** @description Malformed room id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No visible joined space at this root */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     space_children: {
         parameters: {
             query?: never;
@@ -12876,6 +13130,54 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ApiResponse_RoomUpgradeDto"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    discovered_space_memberships: {
+        parameters: {
+            query?: {
+                /** @description Page size (default 50, maximum 100). */
+                limit?: number;
+                /** @description Opaque continuation from the preceding page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cached joined room memberships via unjoined spaces */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_DiscoveredSpaceMembershipPageDto"];
+                };
+            };
+            /** @description Malformed cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
             /** @description Missing, malformed, or revoked bearer token */

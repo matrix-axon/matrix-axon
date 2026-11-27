@@ -5,8 +5,8 @@ use uuid::Uuid;
 
 use crate::space_discovery::joined_child;
 use crate::spaces::{
-    MAX_ROOM_ID_BYTES, NORMALIZED_ORDER, SPACE_LINK_IS_CURRENT, SPACE_PARENT_AUTHORIZED,
-    SPACE_PARENT_POWER,
+    synced_space, MAX_ROOM_ID_BYTES, NORMALIZED_ORDER, SPACE_LINK_IS_CURRENT,
+    SPACE_PARENT_AUTHORIZED, SPACE_PARENT_POWER,
 };
 use crate::{Store, StoreError};
 
@@ -37,7 +37,7 @@ pub struct SpaceGraphPage {
 
 // Scalar lookups keep eligibility checks off the graph scan's join tree so the
 // ordered, limited scan can stop as soon as it has a page of eligible links.
-fn visible_joined_room(room_id: &str) -> String {
+pub(crate) fn visible_joined_room(room_id: &str) -> String {
     let joined = joined_child("summary.room_id");
     format!(
         "(SELECT NOT summary.hidden_left AND NOT summary.hidden_tombstoned AND {joined}
@@ -71,12 +71,7 @@ impl Store {
               AND {SPACE_LINK_IS_CURRENT}
               AND EXISTS (SELECT 1 FROM accounts WHERE account_id = $1 AND state = 'active')
               AND {source_joined} AND {target_joined}
-              AND (SELECT creation.content->>'type' = 'm.space'
-                   FROM room_state creation
-                   WHERE creation.account_id = $1
-                     AND creation.room_id = CASE WHEN sc.event_type = 'm.space.child'
-                         THEN sc.room_id ELSE sc.state_key END
-                     AND creation.event_type = 'm.room.create' AND creation.state_key = '')
+              AND {synced_parent}
               AND CASE WHEN sc.event_type = 'm.space.child' THEN true ELSE
                   EXISTS (SELECT 1 FROM room_state reciprocal
                           WHERE reciprocal.account_id = $1 AND reciprocal.room_id = sc.state_key
@@ -97,6 +92,9 @@ impl Store {
               END
             ORDER BY sc.room_id, sc.event_type, sc.state_key
             LIMIT $5"#,
+            synced_parent = synced_space(
+                "CASE WHEN sc.event_type = 'm.space.child' THEN sc.room_id ELSE sc.state_key END"
+            ),
             source_joined = visible_joined_room("sc.room_id"),
             target_joined = visible_joined_room("sc.state_key"),
         );

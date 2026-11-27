@@ -33,6 +33,7 @@ mod room_previews;
 mod room_summary_discovery;
 mod rooms;
 mod search;
+mod space_browse;
 mod space_discovery;
 mod space_graph;
 mod spaces;
@@ -90,9 +91,13 @@ pub use search::{
     room_purge_sentinel, IndexableEvent, SearchOutboxEntry, SEARCH_OUTBOX_PURGE,
     SEARCH_OUTBOX_ROOM_PURGE_PREFIX,
 };
+pub use space_browse::{
+    DiscoveredSpaceMembership, SpaceBrowseLink, SPACE_BROWSE_MAX_DEPTH, SPACE_BROWSE_MAX_PAGE,
+    SPACE_BROWSE_TTL,
+};
 pub use space_discovery::{
     CrawlBegin, CrawlLimits, CrawlPosition, CrawlStep, CrawlWrite, DiscoveredEntry, DiscoveredRow,
-    SpaceCrawlRow, SpaceCrawlSnapshot,
+    HierarchyDepth, SpaceCrawlRow, SpaceCrawlSnapshot,
 };
 pub use space_graph::{SpaceGraphKey, SpaceGraphLink, SpaceGraphPage, SPACE_GRAPH_MAX_PAGE};
 pub use spaces::{

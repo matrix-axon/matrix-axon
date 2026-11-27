@@ -1157,3 +1157,58 @@ async fn joined_space_graph_pages_multiple_bridge_sized_branches() {
     assert!(cursor.is_none());
     assert_eq!(children.len(), 3 * 4864);
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn nested_space_browse_only_queues_for_an_explicit_joined_root_request() {
+    let f = joined_room().await;
+    let base = format!("/v1/accounts/{}", f.account_id);
+    let browse = format!("{base}/rooms/{}/space/browse", f.room_id);
+    let sidebar = format!("{base}/spaces/discovered");
+    let token = bearer();
+    let post = async |path: &str| request(&f.app, "POST", path, None, Some(&token)).await;
+    assert_eq!(post(&browse).await.0, StatusCode::NOT_FOUND);
+    f.state(&f.room_id, "m.room.create", "", json!({"type":"m.space"}))
+        .await;
+    for path in [&browse, &sidebar] {
+        assert_eq!(get(&f.app, path).await.0, StatusCode::OK);
+    }
+    assert!(f.acquirer.take().is_empty());
+    assert_eq!(
+        post(&format!("{base}/rooms/!unknown:localhost/space/browse"))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    f.store
+        .flag_room_upstream_suspect(f.account_id, &f.room_id, "test")
+        .await
+        .unwrap();
+    assert!(f
+        .store
+        .mark_room_upstream_gone(f.account_id, &f.room_id, "test")
+        .await
+        .unwrap());
+    assert_eq!(post(&browse).await.0, StatusCode::NOT_FOUND);
+    assert!(f.acquirer.take().is_empty());
+    f.store
+        .clear_room_upstream_reconcile(f.account_id, &f.room_id)
+        .await
+        .unwrap();
+
+    let (status, body) = post(&browse).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["state"], "queued");
+    assert_eq!(post(&browse).await.0, StatusCode::OK);
+    assert_eq!(
+        get(&f.app, &sidebar).await.1["data"]["memberships"],
+        json!([])
+    );
+    assert_eq!(get(&f.app, &browse).await.1["data"]["links"], json!([]));
+    assert_eq!(f.acquirer.take(), [RoomDetailJob::BrowseHierarchy]);
+    assert_eq!(
+        get(&f.app, &format!("{sidebar}?cursor=malformed")).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    f.store.delete_account_row(f.account_id).await.unwrap();
+}

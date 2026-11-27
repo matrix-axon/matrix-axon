@@ -257,16 +257,51 @@ The worker logs crawls and summary jobs under `axon_sync::acquisition` with `acc
 It logs at debug per page and at warn for repeated failures, `pagination_loop`, and `too_large`.
 It never logs names, topics, aliases, response bodies, or tokens.
 
+### 12. Explicit browsing through unjoined spaces
+
+A client explicitly starts or resumes nested discovery with `POST /v1/accounts/{account_id}/rooms/{room_id}/space/browse` at a visible, joined space.
+`GET` on the same path reads cached links and crawl status only.
+Direct-child Room Information enrichment still uses depth one and keeps its own cursor and status.
+
+Nested discovery uses the same account worker, homeserver gate, page-size retries, token-loop detection, and backoff.
+The fixed upstream depth is three, and a generation can commit at most 12 pages, with at most 50 retained entries and 2 MiB per reply.
+If a reply exceeds the current requested room count, Axon commits the entries within that limit and ends the crawl as `truncated`.
+An expired cursor can restart the walk once.
+A transient failure can resume after backoff on another explicit request.
+
+A nested crawl caches validated summaries and stripped `m.space.child` links under its account and joined root.
+A link must lead to a room returned by that crawl, and every path must reach the root through current links.
+Axon uses synced child links and synced room details for joined rooms.
+A joined room can appear below an unjoined space when the homeserver returns both rooms and a validated link between them.
+Shared and cyclic links are represented as edges, and the walk is depth-bounded.
+The account's homeserver provides the access-filtered view documented by the [Matrix hierarchy API](https://spec.matrix.org/latest/client-server-api/#get_matrixclientv1roomsroomidhierarchy).
+
+A fresh generation can expose reachable paths as pages commit.
+Its cache expires six hours from the first page request.
+A restarted walk clears the previous generation, and a conclusive denial or unsupported hierarchy response clears the joined root's cached branches immediately.
+Every read rechecks the current synced links and membership.
+Membership epochs fence in-flight requests, and profile changes for a still-joined account preserve committed browse results.
+A synced membership loss clears the root's crawl and its candidates, and a local purge removes the root's crawl.
+A database-only sweep clears expired candidates in bounded batches at startup and periodically, preserving crawl status and retry backoff.
+
+`GET /v1/accounts/{account_id}/spaces/discovered` pages pairs of joined roots and joined descendants reached through at least one unjoined space.
+Clients can combine these pairs with `spaces/graph` and the synced room list to group joined rooms in the sidebar.
+The root browse GET samples its links and crawl status independently, so they can reflect different commits during an active crawl.
+After a browse invalidation during an in-flight read, repeat the read from the first page when it finishes.
+The pair's `expires_at` tells clients when to remove it locally.
+Clients re-read on reconnect or on an account invalidation from `room_details.changed` with source `space_browse` or `space_graph`.
+Opening or reconnecting the sidebar does not schedule upstream work.
+
 ## Alternatives considered
 
 - **Add a cursor and truncation flag to `space/children`.** The bare-array response cannot carry them without breaking every existing decoder; decision 7.
 - **Signal truncation with a response header on `space/children`.** Additive, but clients would still need changes to act on it, and they move to the paged route anyway.
 - **Crawl every joined space in the background.** Keeps every panel warm, but turns room-list loading into federation load on spaces nobody opened, which is the failure mode ADR 0121 and ADR 0122 exist to prevent.
-- **Discover nested subspaces now (`max_depth` above 1).** Multiplies federation cost, and the client presentation is undecided (issue 808).
+- **Increase depth for every direct-child enrichment.** This multiplies federation cost for Room Information reads. Decision 12 confines deeper work to explicit browsing.
 - **Fetch a room summary per child.** One request per child, where one hierarchy page covers fifty; issue 622 rules it out.
 - **Run a whole crawl as one job.** Simpler, but a 40-page crawl would hold the account's worker for minutes and starve panel jobs behind it.
 - **Merge discovered fields into the synced fields server-side.** Fewer client branches, but clients could no longer tell discovered data from synced state, which ADR 0111 requires.
-- **Cache rooms the homeserver returns without a local link.** More names, but the hierarchy would then decide membership, and a stale or hostile response could add children the space's state does not list.
+- **Cache direct previews for rooms with no local link.** More names, but the hierarchy would then decide membership, and a stale or hostile response could add children the space's state does not list.
 - **Keep the last known summary when a complete crawl omits a child.** Survives a federation hiccup, but keeps showing a room the homeserver no longer vouches for after access is lost.
 - **Allow summaries for any room ID or alias.** Useful for previews before joining, but turns the endpoint into a probe of arbitrary rooms through the account's homeserver.
 - **Store discovery results in `room_state`.** Rejected by ADR 0111: discovered summaries have different access, completeness, and freshness semantics and no event provenance.

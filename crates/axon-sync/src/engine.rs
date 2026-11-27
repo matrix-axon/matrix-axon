@@ -354,6 +354,11 @@ impl SyncEngine {
                 }
             }
         });
+        // Drop expired remote browse payloads independently of client reads.
+        tracker.spawn(crate::acquisition::prune_expired_space_browse(
+            store.clone(),
+            cancel.child_token(),
+        ));
         // Reap terminal verification flows under the same shutdown tracker.
         tracker.spawn(reap_expired_flows(
             verifications.clone(),

@@ -110,7 +110,7 @@ pub struct SummaryWrite {
 
 /// SQL selecting `(space_id, via)` for each joined space of account `$1` that
 /// links room `$2` with a current `m.space.child`, in space id order.
-/// "Joined" is ADR 0126's acquisition rule (`JOINED_EPOCH`): an active
+/// "Joined" is ADR 0126's acquisition rule (`joined_epoch_sql`): an active
 /// account, a summary row that is not `hidden_left`, an own `join` member
 /// event, and no `gone` reconcile. `suffix` follows the `ORDER BY`, such as
 /// a row lock.
