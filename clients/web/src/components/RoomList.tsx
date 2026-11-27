@@ -8,7 +8,7 @@ import {
   useRef,
   useState,
 } from 'preact/hooks'
-import { layoutMode } from '../layout'
+import { SINGLE_PANE_QUERY, layoutMode } from '../layout'
 import { localRoomHref } from '../matrix-to'
 import { useServices } from '../services'
 import { ErrorBanner } from './ErrorBanner'
@@ -634,6 +634,24 @@ export function RoomList() {
     composerFocus.value += 1
   }
 
+  /**
+   * A mouse click on a row. In the single-pane layout the clicked link goes
+   * away with the list, and the shell lands focus on the room title instead
+   * (ADR 0062, WCR-17) — so the composer must not take it, as it must not on a
+   * touch tap. Where the list stays beside the room it does take it.
+   *
+   * Enter (`activateRoom`) is deliberately not gated on the layout: whoever
+   * pressed it is already typing, so the composer is where they carry on, and
+   * it takes focus back from the title.
+   */
+  const activateRoomByPointer = (room: RoomDto, href: string) => {
+    if (window.matchMedia(SINGLE_PANE_QUERY).matches) {
+      navigateToRoom(room, href)
+      return
+    }
+    activateRoom(room, href)
+  }
+
   const activateRoom = (room: RoomDto, href?: string) => {
     navigateToRoom(
       room,
@@ -782,7 +800,9 @@ export function RoomList() {
       }
       focusComposer()
     } else if (event.key === 'Enter') {
-      if (event.target === filterInput.current && visible.length === 1) {
+      // Return in the filter opens the top match (the only one, when the query
+      // is narrow) and hands its composer the keyboard.
+      if (event.target === filterInput.current && visible.length > 0) {
         event.preventDefault()
         activateRoom(visible[0])
         return
@@ -1166,6 +1186,7 @@ export function RoomList() {
                     : undefined
                 }
                 onNavigate={navigateToRoom}
+                onPointerActivate={activateRoomByPointer}
               />
             )
           })}
@@ -1270,6 +1291,7 @@ function RoomRow({
   onDragKey,
   onMoved,
   onNavigate,
+  onPointerActivate,
 }: {
   room: RoomDto
   /** The account to attribute this row to, or `undefined` to omit it. */
@@ -1289,6 +1311,12 @@ function RoomRow({
   onMoved: (key: string) => void
   /** Navigate on touch taps, but leave touch scroll gestures to the browser. */
   onNavigate: (room: RoomDto, href: string) => void
+  /**
+   * A mouse click on the row: navigate, then hand the keyboard to the new
+   * room's composer. Touch taps keep `onNavigate`, which leaves focus alone so
+   * the soft keyboard does not open over a room the user only meant to read.
+   */
+  onPointerActivate: (room: RoomDto, href: string) => void
 }) {
   const { rooms, settings, favourites, activeRoom } = useServices()
   const key = roomKey(room)
@@ -1478,7 +1506,7 @@ function RoomRow({
           if (!hasModifier(click)) {
             click.preventDefault()
             click.stopPropagation()
-            onNavigate(room, href)
+            onPointerActivate(room, href)
             return
           }
           rooms.noteUnreadCounts(room.account_id, room.room_id, 0, 0)

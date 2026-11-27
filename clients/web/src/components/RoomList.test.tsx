@@ -13,6 +13,7 @@ import {
   onTestFinished,
   vi,
 } from 'vitest'
+import { SINGLE_PANE_QUERY } from '../layout'
 import { ServicesContext } from '../services'
 import { roomKey } from '../stores/room-list'
 import { TEST_BASE_URL, testServices } from '../test/services'
@@ -1242,6 +1243,90 @@ describe('RoomList keyboard shortcuts (ADR 0078)', () => {
     expect(window.location.pathname).toBe(
       `/${ACCOUNT}/rooms/${encodeURIComponent('!lounge:hs')}`,
     )
+  })
+
+  it('Enter in the name filter opens the top match when several rooms match', async () => {
+    // The older room comes first in the response, so only the recent-first
+    // sort can make Ops the top match.
+    const { services, findByText, getByLabelText } = renderPage([LOUNGE, OPS])
+    await findByText('Ops')
+    const filter = getByLabelText('Filter by name') as HTMLInputElement
+    const before = services.composerFocus.value
+
+    fireEvent.input(filter, { target: { value: 'o' } })
+    expect(await findByText('#lounge:hs')).toBeTruthy()
+    expect(await findByText('Ops')).toBeTruthy()
+    fireEvent.keyDown(filter, { key: 'Enter' })
+
+    await waitFor(() => expect(services.composerFocus.value).toBe(before + 1))
+    expect(window.location.pathname).toBe(
+      `/${ACCOUNT}/rooms/${encodeURIComponent('!ops:hs')}`,
+    )
+  })
+
+  it('Enter in the name filter does nothing when no room matches', async () => {
+    const { services, findByText, getByLabelText, queryByText } = renderPage()
+    await findByText('Ops')
+    const filter = getByLabelText('Filter by name') as HTMLInputElement
+    const before = services.composerFocus.value
+    const path = window.location.pathname
+
+    fireEvent.input(filter, { target: { value: 'no such room' } })
+    await waitFor(() => expect(queryByText('Ops')).toBeNull())
+    fireEvent.keyDown(filter, { key: 'Enter' })
+    // Past the deferral the focus bump would take.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(services.composerFocus.value).toBe(before)
+    expect(window.location.pathname).toBe(path)
+  })
+
+  it('a mouse click on a room row asks the new room composer for focus', async () => {
+    const { services, findByText } = renderPage()
+    const rowText = await findByText('Ops')
+    const row = rowText.closest<HTMLAnchorElement>('a.room-link')!
+    const before = services.composerFocus.value
+
+    fireEvent.click(row)
+
+    await waitFor(() => expect(services.composerFocus.value).toBe(before + 1))
+    expect(window.location.pathname).toBe(
+      `/${ACCOUNT}/rooms/${encodeURIComponent('!ops:hs')}`,
+    )
+  })
+
+  it('a mouse click leaves focus to the room title in the single-pane layout', async () => {
+    const matchMedia = vi.spyOn(window, 'matchMedia').mockImplementation(
+      (query: string) =>
+        ({
+          media: query,
+          matches: query === SINGLE_PANE_QUERY,
+          onchange: null,
+          addListener: () => {},
+          removeListener: () => {},
+          addEventListener: () => {},
+          removeEventListener: () => {},
+          dispatchEvent: () => false,
+        }) as MediaQueryList,
+    )
+    try {
+      const { services, findByText } = renderPage()
+      const rowText = await findByText('Ops')
+      const row = rowText.closest<HTMLAnchorElement>('a.room-link')!
+      const before = services.composerFocus.value
+
+      fireEvent.click(row)
+
+      await waitFor(() =>
+        expect(window.location.pathname).toBe(
+          `/${ACCOUNT}/rooms/${encodeURIComponent('!ops:hs')}`,
+        ),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(services.composerFocus.value).toBe(before)
+    } finally {
+      matchMedia.mockRestore()
+    }
   })
 })
 
