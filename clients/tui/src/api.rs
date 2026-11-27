@@ -2853,6 +2853,11 @@ impl EventDto {
     /// `content`. `relates_to` stays: a read keeps it, so a redacted reply or
     /// thread member is still that relation. This DTO has no edit or
     /// `thread_id` fields for a read to clear.
+    ///
+    /// The first redaction id is kept. A live redaction's receipt position is
+    /// recorded by `App::note_live_redaction_position` (`app/timeline.rs`),
+    /// which replaces the id with the latest-arriving one, matching the
+    /// server's timeline read (#1273). Change neither to match the other.
     pub(crate) fn mask_as_redacted(&mut self, redaction_event_id: &str) {
         self.redacted = true;
         if self.redaction_event_id.is_none() && !redaction_event_id.is_empty() {

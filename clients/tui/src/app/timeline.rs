@@ -734,6 +734,10 @@ impl App {
         {
             return;
         }
+        // Latest wins, as on a timeline read. `EventDto::mask_as_redacted`
+        // keeps the first id instead, and that is deliberate: it only masks,
+        // and this is the one place that also records where a redaction
+        // arrived, so the two fields always describe the same redaction.
         target.redaction_event_id = Some(redaction_event_id.to_owned());
         target.redaction_arrival_order = Some(arrival_order);
         // The same gate as a live event's own read below, narrowed to the
@@ -754,18 +758,15 @@ impl App {
         if !on_screen {
             return;
         }
-        let (target_event_id, target_origin_ts) = (target.event_id.clone(), target.origin_ts);
         // Only the receipt moves. The cross-device marker is a display-order
         // position, and a redaction adds nothing to display, so it is handed
-        // the marker it already has (or, with none yet, the message itself).
-        let marker =
-            self.read_markers
-                .get(room)
-                .cloned()
-                .unwrap_or(super::read_markers::ReadMarker {
-                    event_id: target_event_id,
-                    origin_ts: target_origin_ts,
-                });
+        // the marker it already has. A room with no marker yet is left alone
+        // rather than given one at the redacted message, which may be old: the
+        // marker and receipt are sent together, and opening the room writes
+        // both (review on #1278).
+        let Some(marker) = self.read_markers.get(room).cloned() else {
+            return;
+        };
         self.note_room_read(
             room.clone(),
             marker,

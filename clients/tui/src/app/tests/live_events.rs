@@ -877,8 +877,29 @@ fn live_redaction_of_a_displayed_message_moves_only_the_receipt() {
     );
 }
 
-/// The live receipt for a redaction has the same gate as any live read: a
-/// history jump is looking at the past and claims nothing (#1273).
+/// A room with no cross-device marker yet gets none at the redacted message,
+/// which may be old. The marker and receipt go out together, and opening the
+/// room writes both (review on #1278).
+#[test]
+fn live_redaction_in_a_room_with_no_marker_writes_nothing() {
+    let (mut app, key) = selected_room_app();
+    let mut message = text_message("$msg:example.com", "hello");
+    message.arrival_order = 10;
+    app.messages.events.insert(key.clone(), vec![message]);
+    let mut redaction = redaction_frame("$redact:example.com", "$msg:example.com");
+    redaction.arrival_order = 11;
+
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction)));
+
+    assert_eq!(
+        app.messages.events[&key][0].redaction_arrival_order,
+        Some(11)
+    );
+    assert!(!app.read_markers.contains_key(&key));
+    assert!(!app.receipt_targets.contains_key(&key));
+    assert!(app.pending_marker_put.is_none());
+}
+
 /// A reply shown only by the open thread panel is not the room view's to
 /// claim. The receipt here is unthreaded, so naming the reply's redaction would
 /// acknowledge the whole room up to it (review on #1278). The position is still
@@ -914,6 +935,13 @@ fn an_older_live_redaction_does_not_replace_a_newer_one() {
     let mut message = text_message("$msg:example.com", "hello");
     message.arrival_order = 5;
     app.messages.events.insert(key.clone(), vec![message]);
+    app.read_markers.insert(
+        key.clone(),
+        read_markers::ReadMarker {
+            event_id: "$msg:example.com".to_owned(),
+            origin_ts: 0,
+        },
+    );
     for (id, arrival_order) in [("$newer:example.com", 20), ("$older:example.com", 10)] {
         let mut redaction = redaction_frame(id, "$msg:example.com");
         redaction.arrival_order = arrival_order;
@@ -935,6 +963,8 @@ fn an_older_live_redaction_does_not_replace_a_newer_one() {
     );
 }
 
+/// The live receipt for a redaction has the same gate as any live read: a
+/// history jump is looking at the past and claims nothing (#1273).
 #[test]
 fn live_redaction_during_a_history_jump_does_not_receipt_it() {
     let (mut app, key) = selected_room_app();
