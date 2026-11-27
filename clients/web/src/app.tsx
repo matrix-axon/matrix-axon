@@ -95,8 +95,7 @@ import {
   SPACES_PANE_WIDTH_MAX,
   SPACES_PANE_WIDTH_MIN,
 } from './stores/settings'
-import { roomKey } from './stores/room-list'
-import { spacePickerEntries } from './stores/spaces'
+import { adjacentSpace } from './stores/spaces'
 import { hasActiveAccount, type Account } from './stores/accounts'
 import { flowKey } from './stores/verification'
 import type { RoomEntryResult, RoomsStore } from './stores/rooms'
@@ -1028,27 +1027,16 @@ function ShellChrome() {
   }, [settings, spacesPaneCollapsed])
   const stepSpace = useCallback(
     (direction: -1 | 1) => {
-      const ordered = [
-        ...new Set(
-          spacePickerEntries(
-            spaces,
-            settings.spaceOrder.value,
-            rooms.titles.value,
-          ).map(({ space }) => roomKey(space)),
-        ),
-      ]
-      if (ordered.length === 0) return
-      const current = spaces.selected.value
-      const index = current === null ? -1 : ordered.indexOf(current)
-      const next =
-        index === -1
-          ? direction === 1
-            ? 0
-            : ordered.length - 1
-          : (index + direction + ordered.length) % ordered.length
+      const next = adjacentSpace(
+        spaces,
+        settings.spaceOrder.value,
+        rooms.titles.value,
+        direction,
+      )
+      if (next === undefined) return
       settings.spacesPaneAutoHide.value = false
       settings.spacesPaneCollapsed.value = false
-      spaces.selected.value = ordered[next]
+      spaces.selected.value = next
     },
     [rooms, settings, spaces],
   )

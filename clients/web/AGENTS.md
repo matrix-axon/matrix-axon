@@ -43,7 +43,8 @@ before starting a milestone.
   The picker uses the joined graph and cached browse memberships, scoped to the account.
   Keep joined branches, including parents whose only children are subspaces.
   Hide only isolated spaces with confirmed empty membership, and keep unknown or failed roots available.
-  Refresh the account projection after graph or browse invalidations and after reconnect.
+  Refresh both account reads on reconnect and on graph invalidation.
+  Browse invalidations refresh cached browse memberships.
   Cached browse memberships expire locally, and the picker never requests homeserver discovery.
   The legacy children read supplies the shallow picker on servers without the graph route.
 - **State is @preact/signals** in plain store factories

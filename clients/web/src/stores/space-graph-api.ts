@@ -2,7 +2,6 @@ import { apiErrorMessage, type ApiClient } from '../api/client'
 import type {
   DiscoveredMembership,
   SpaceChildDto,
-  SpaceGraph,
   SpaceGraphLink,
 } from './space-graph'
 
@@ -35,18 +34,15 @@ function unsupported(response: Response): boolean {
 export async function readSpaceGraph(
   api: ApiClient,
   accountId: string,
-  spaces: ReadonlyMap<string, string>,
   signal: AbortSignal,
-): Promise<SpaceGraph> {
+): Promise<SpaceGraphLink[] | null> {
   const path = { account_id: accountId }
   const first = await api.GET('/v1/accounts/{account_id}/spaces/graph', {
     params: { path, query: { limit: 1000 } },
     signal,
   })
-  if (unsupported(first.response)) {
-    return readLegacyChildren(api, accountId, spaces, signal)
-  }
-  const links = await readPages<SpaceGraphLink>(async (cursor) => {
+  if (unsupported(first.response)) return null
+  return readPages<SpaceGraphLink>(async (cursor) => {
     const { data, error } =
       cursor === undefined
         ? first
@@ -57,7 +53,6 @@ export async function readSpaceGraph(
     if (data === undefined) throw new Error(apiErrorMessage(error))
     return { rows: data.data.links, next_cursor: data.data.next_cursor }
   })
-  return { links }
 }
 
 export function readDiscoveredMemberships(
@@ -85,40 +80,21 @@ export function readDiscoveredMemberships(
   })
 }
 
-async function readLegacyChildren(
+export async function readLegacyChildren(
   api: ApiClient,
   accountId: string,
-  spaces: ReadonlyMap<string, string>,
+  roomId: string,
   signal: AbortSignal,
-): Promise<SpaceGraph> {
-  const legacy = new Map<string, readonly SpaceChildDto[]>()
-  const errors = new Map<string, string>()
-  // Older servers have only a per-space read. Bound their request fan-out.
-  const entries = [...spaces]
-  for (let start = 0; start < entries.length; start += 2) {
-    signal.throwIfAborted()
-    await Promise.all(
-      entries.slice(start, start + 2).map(async ([key, roomId]) => {
-        try {
-          const { data, error } = await api.GET(
-            '/v1/accounts/{account_id}/rooms/{room_id}/space/children',
-            {
-              params: { path: { account_id: accountId, room_id: roomId } },
-              signal,
-            },
-          )
-          if (data === undefined) throw new Error(apiErrorMessage(error))
-          legacy.set(
-            key,
-            data.data.filter((child) => child.via.length > 0),
-          )
-        } catch (error) {
-          errors.set(key, spaceLoadError(error))
-        }
-      }),
-    )
-  }
-  return { legacy, errors }
+): Promise<SpaceChildDto[]> {
+  const { data, error } = await api.GET(
+    '/v1/accounts/{account_id}/rooms/{room_id}/space/children',
+    {
+      params: { path: { account_id: accountId, room_id: roomId } },
+      signal,
+    },
+  )
+  if (data === undefined) throw new Error(apiErrorMessage(error))
+  return data.data.filter((child) => child.via.length > 0)
 }
 
 export function spaceLoadError(error: unknown): string {

@@ -23,6 +23,7 @@ import {
   type MemberDto,
   type RoomDto,
 } from '../stores/room-list'
+import type { ParentRoutes } from '../stores/space-graph'
 import {
   emptyRoomDetails,
   roomDetailsKey,
@@ -71,6 +72,7 @@ import { UserAvatar } from './UserAvatar'
 
 type RoomUpgradeDto = components['schemas']['RoomUpgradeDto']
 type SpaceParentDto = components['schemas']['SpaceParentDto']
+type SpaceParentLink = Omit<SpaceParentDto, 'via'> & { via: ParentRoutes }
 type PowerLevelsDto = components['schemas']['PowerLevelsDto']
 type EventDto = components['schemas']['EventDto']
 
@@ -889,6 +891,10 @@ export function RoomInfoPanel({
               onClose()
               return
             }
+            if (via === null) {
+              setJoinLinkStatus('You are no longer joined to this space.')
+              return
+            }
             // Opening an unjoined relation means joining it — a membership
             // change the button label does not imply, so it is confirmed
             // first.
@@ -1304,12 +1310,12 @@ function CancelInviteDialog({
  */
 function relatedSpaceParents(
   directParents: readonly SpaceParentDto[] | null,
-  advertisedParents: ReadonlyMap<string, readonly string[]> | undefined,
+  advertisedParents: ReadonlyMap<string, ParentRoutes> | undefined,
   rooms: readonly RoomDto[],
   accountId: string,
   roomTitles: ReadonlyMap<string, string>,
-): readonly SpaceParentDto[] | null {
-  const parents = new Map(
+): readonly SpaceParentLink[] | null {
+  const parents = new Map<string, SpaceParentLink>(
     (directParents ?? []).map((parent) => [parent.room_id, parent]),
   )
   for (const space of rooms) {
@@ -1322,7 +1328,7 @@ function relatedSpaceParents(
         room_type: space.room_type,
         name: roomTitle(space, roomTitles),
         canonical: false,
-        via: [...via],
+        via,
       })
     }
   }
@@ -1357,7 +1363,7 @@ function RoomStateLinks({
   /** Whether the room is a space, whose children `hierarchy` holds. */
   space: boolean
   hierarchy: HierarchySlot
-  parents: readonly SpaceParentDto[] | null
+  parents: readonly SpaceParentLink[] | null
   upgrade: RoomUpgradeDto | null
   errors: Partial<Record<RoomStateKey, string>>
   status: string | null
@@ -1366,7 +1372,7 @@ function RoomStateLinks({
   onRetry: () => void
   onOpen: (
     roomId: string,
-    via: readonly string[],
+    via: ParentRoutes,
     label: string,
     child?: SpaceHierarchyChildDto,
   ) => void

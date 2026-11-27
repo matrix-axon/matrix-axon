@@ -17,10 +17,13 @@ import {
   projectSpaces,
   reachableKeys,
   type DiscoveredMembership,
-  type SpaceGraph,
+  type ParentRoutes,
+  type SpaceChildDto,
+  type SpaceGraphLink,
 } from './space-graph'
 import {
   readDiscoveredMemberships,
+  readLegacyChildren,
   readSpaceGraph,
   spaceLoadError,
 } from './space-graph-api'
@@ -39,12 +42,12 @@ export interface SpacesStore {
   /** Joined chat room keys in the selected space, once its graph is known. */
   selectedRooms: ReadonlySignal<ReadonlySet<string> | null>
   parents: ReadonlySignal<
-    ReadonlyMap<string, ReadonlyMap<string, readonly string[]>>
+    ReadonlyMap<string, ReadonlyMap<string, ParentRoutes>>
   >
   errors: ReadonlySignal<ReadonlyMap<string, string>>
   loading: ReadonlySignal<ReadonlySet<string>>
   reordering: Signal<boolean>
-  refresh(space: Pick<RoomDto, 'account_id'>): void
+  refresh(space: Pick<RoomDto, 'account_id' | 'room_id'>): void
   resetSession(): void
 }
 
@@ -130,12 +133,56 @@ export function spacePickerEntries(
   return entries
 }
 
-type AccountRead = {
-  spaces: ReadonlyMap<string, string>
-  abort: AbortController | null
+/** Step from the selected row, or from its position below a collapsed ancestor. */
+export function adjacentSpace(
+  spaces: SpacesStore,
+  order: readonly string[],
+  titles: ReadonlyMap<string, string>,
+  direction: -1 | 1,
+): string | undefined {
+  const entries = spacePickerEntries(spaces, order, titles)
+  const ordered = [...new Set(entries.map(({ space }) => roomKey(space)))]
+  if (ordered.length === 0) return undefined
+  const current = spaces.selected.value
+  const index = current === null ? -1 : ordered.indexOf(current)
+  if (index !== -1) {
+    return ordered[(index + direction + ordered.length) % ordered.length]
+  }
+  if (current !== null) {
+    const byPath = new Map(entries.map((entry) => [entry.path, entry]))
+    const children = spaces.subspaces.value
+    const expanded = spaces.expanded.value
+    const branch = entries.find((entry) => {
+      if (!entry.expandable || expanded.has(entry.path)) return false
+      const blocked = new Set<string>()
+      for (let path = entry.parentPath; path !== null;) {
+        const parent = byPath.get(path)!
+        blocked.add(roomKey(parent.space))
+        path = parent.parentPath
+      }
+      const reachable = new Set([roomKey(entry.space)])
+      for (const key of reachable) {
+        if (key === current) return true
+        for (const child of children.get(key) ?? []) {
+          if (!blocked.has(child)) reachable.add(child)
+        }
+      }
+      return false
+    })
+    if (branch !== undefined) {
+      const anchor = ordered.indexOf(roomKey(branch.space))
+      // A collapsed branch's descendants would follow its own row.
+      return ordered[(anchor + (direction === 1 ? 1 : 0)) % ordered.length]
+    }
+  }
+  return ordered[direction === 1 ? 0 : ordered.length - 1]
 }
 
-const MAX_ACCOUNT_READS = 3
+type SpaceRead =
+  | { kind: 'graph' | 'discovered'; accountId: string }
+  | { kind: 'legacy'; accountId: string; spaceKey: string; roomId: string }
+
+const MAX_SPACE_READS = 6
 const MAX_TIMER_DELAY = 2_147_483_647
 
 export function createSpacesStore(
@@ -160,15 +207,22 @@ export function createSpacesStore(
       : 'all'
   })
 
-  const graphs = signal<ReadonlyMap<string, SpaceGraph>>(new Map())
+  // A null graph records a server that requires per-space legacy reads.
+  const graphs = signal<ReadonlyMap<string, readonly SpaceGraphLink[] | null>>(
+    new Map(),
+  )
+  const legacy = signal<ReadonlyMap<string, readonly SpaceChildDto[]>>(
+    new Map(),
+  )
+  const legacyErrors = signal<ReadonlyMap<string, string>>(new Map())
   const discovered = signal<
     ReadonlyMap<string, readonly DiscoveredMembership[]>
   >(new Map())
   const accountErrors = signal<ReadonlyMap<string, string>>(new Map())
   const loading = signal<ReadonlySet<string>>(new Set())
-  const reads = new Map<string, AccountRead>()
-  const queued = new Set<string>()
-  let activeReads = 0
+  const knownSpaces = new Map<string, ReadonlyMap<string, string>>()
+  const queued = new Map<string, SpaceRead>()
+  const running = new Map<string, AbortController>()
 
   // Room DTOs also change on ordinary messages. Only membership and room
   // type affect the graph, so leave its projection intact on those writes.
@@ -207,24 +261,24 @@ export function createSpacesStore(
   })
 
   const projection = computed(() =>
-    projectSpaces(catalog.value, graphs.value, discovered.value, now.value),
+    projectSpaces(
+      catalog.value,
+      graphs.value,
+      legacy.value,
+      discovered.value,
+      now.value,
+    ),
   )
   const ready = (key: string, accountId: string) => {
     const graph = graphs.value.get(accountId)
-    return (
-      graph !== undefined && (!('legacy' in graph) || graph.legacy.has(key))
-    )
+    return graph === null ? legacy.value.has(key) : graph !== undefined
   }
   const errors = computed(() => {
     const next = new Map<string, string>()
     for (const [key, room] of catalog.value) {
       if (room.room_type !== 'm.space') continue
-      const graph = graphs.value.get(room.account_id)
       const error =
-        accountErrors.value.get(room.account_id) ??
-        (graph !== undefined && 'legacy' in graph
-          ? graph.errors.get(key)
-          : undefined)
+        legacyErrors.value.get(key) ?? accountErrors.value.get(room.account_id)
       if (error !== undefined) next.set(key, error)
     }
     return next
@@ -241,6 +295,8 @@ export function createSpacesStore(
         uncertain ||
         !ready(key, room.account_id) ||
         errors.value.has(key) ||
+        (graphs.value.get(room.account_id) !== null &&
+          !discovered.value.has(room.account_id)) ||
         members.has(key) ||
         subspaces.has(key) ||
         nested.has(key)
@@ -275,95 +331,152 @@ export function createSpacesStore(
   })
 
   function runQueued(): void {
-    for (const accountId of queued) {
-      if (activeReads >= MAX_ACCOUNT_READS) return
-      const read = reads.get(accountId)
-      if (read === undefined || read.abort !== null) continue
-      queued.delete(accountId)
+    for (const [id, read] of queued) {
+      if (running.size >= MAX_SPACE_READS) return
+      if (running.has(id)) continue
+      queued.delete(id)
       const abort = new AbortController()
-      read.abort = abort
-      activeReads += 1
-      void readAccount(accountId, read, abort)
+      running.set(id, abort)
+      void runRead(id, read, abort.signal)
     }
   }
 
-  async function readAccount(
-    accountId: string,
-    read: AccountRead,
-    abort: AbortController,
-  ): Promise<void> {
-    const requestedSpaces = read.spaces
+  async function runRead(id: string, read: SpaceRead, signal: AbortSignal) {
+    const { accountId } = read
     try {
-      const [graph, memberships] = await Promise.allSettled([
-        readSpaceGraph(api, accountId, requestedSpaces, abort.signal),
-        readDiscoveredMemberships(api, accountId, abort.signal),
-      ])
-      if (abort.signal.aborted) return
-      batch(() => {
-        const nextErrors = new Map(accountErrors.peek())
-        if (graph.status === 'fulfilled') {
-          let nextGraph = graph.value
-          if ('legacy' in nextGraph) {
-            if (requestedSpaces !== read.spaces) queued.add(accountId)
+      switch (read.kind) {
+        case 'graph': {
+          const graph = await readSpaceGraph(api, accountId, signal)
+          if (signal.aborted) break
+          batch(() => {
             const previous = graphs.peek().get(accountId)
-            if (previous !== undefined && 'legacy' in previous) {
-              const legacy = new Map(nextGraph.legacy)
-              for (const key of nextGraph.errors.keys()) {
-                const cached = previous.legacy.get(key)
-                if (cached !== undefined) legacy.set(key, cached)
-              }
-              nextGraph = { ...nextGraph, legacy }
+            graphs.value = new Map(graphs.peek()).set(accountId, graph)
+            deleteEntry(accountErrors, accountId)
+            if (graph === null) refreshLegacyAccount(accountId)
+            else if (previous === null) {
+              for (const key of knownSpaces.get(accountId)?.keys() ?? [])
+                dropLegacy(key)
             }
-          }
-          graphs.value = new Map(graphs.peek()).set(accountId, nextGraph)
-          nextErrors.delete(accountId)
-        } else {
-          nextErrors.set(accountId, spaceLoadError(graph.reason))
+          })
+          break
         }
-        if (memberships.status === 'fulfilled') {
-          now.value = Date.now()
-          discovered.value = new Map(discovered.peek()).set(
+        case 'discovered': {
+          const memberships = await readDiscoveredMemberships(
+            api,
             accountId,
-            memberships.value,
+            signal,
           )
-        } else if (!nextErrors.has(accountId)) {
-          nextErrors.set(accountId, spaceLoadError(memberships.reason))
+          if (signal.aborted) break
+          batch(() => {
+            now.value = Date.now()
+            discovered.value = new Map(discovered.peek()).set(
+              accountId,
+              memberships,
+            )
+          })
+          break
         }
-        accountErrors.value = nextErrors
-      })
-    } finally {
-      activeReads -= 1
-      read.abort = null
-      if (reads.get(accountId) === read && !queued.has(accountId)) {
-        const next = new Set(loading.peek())
-        next.delete(accountId)
-        loading.value = next
+        case 'legacy': {
+          const children = await readLegacyChildren(
+            api,
+            accountId,
+            read.roomId,
+            signal,
+          )
+          if (signal.aborted) break
+          batch(() => {
+            legacy.value = new Map(legacy.peek()).set(read.spaceKey, children)
+            deleteEntry(legacyErrors, read.spaceKey)
+          })
+          break
+        }
       }
+    } catch (error) {
+      if (!signal.aborted) {
+        if (read.kind === 'graph') {
+          if (graphs.peek().get(accountId) === null)
+            refreshLegacyAccount(accountId)
+          else
+            accountErrors.value = new Map(accountErrors.peek()).set(
+              accountId,
+              spaceLoadError(error),
+            )
+        } else if (read.kind === 'legacy') {
+          legacyErrors.value = new Map(legacyErrors.peek()).set(
+            read.spaceKey,
+            spaceLoadError(error),
+          )
+        } else if (!discovered.peek().has(accountId)) {
+          // Settle the first read even on failure so the graph can confirm
+          // emptiness. A failed refresh keeps memberships until they expire.
+          discovered.value = new Map(discovered.peek()).set(accountId, [])
+        }
+      }
+    } finally {
+      running.delete(id)
+      if (!queued.has(id)) stopLoading(id)
       runQueued()
     }
   }
 
-  function refreshAccount(accountId: string): void {
-    if (!reads.has(accountId)) return
-    queued.add(accountId)
-    if (!loading.peek().has(accountId)) {
-      loading.value = new Set(loading.peek()).add(accountId)
-    }
+  function queueRead(read: SpaceRead) {
+    const id =
+      read.kind === 'legacy'
+        ? `legacy/${read.spaceKey}`
+        : `${read.kind}/${read.accountId}`
+    queued.set(id, read)
+    if (!loading.peek().has(id)) loading.value = new Set(loading.peek()).add(id)
     runQueued()
   }
 
-  function removeAccount(accountId: string): void {
-    reads.get(accountId)?.abort?.abort()
-    reads.delete(accountId)
-    queued.delete(accountId)
-    const nextLoading = new Set(loading.peek())
-    const nextGraphs = new Map(graphs.peek())
-    const nextDiscovered = new Map(discovered.peek())
-    const nextErrors = new Map(accountErrors.peek())
-    if (nextLoading.delete(accountId)) loading.value = nextLoading
-    if (nextGraphs.delete(accountId)) graphs.value = nextGraphs
-    if (nextDiscovered.delete(accountId)) discovered.value = nextDiscovered
-    if (nextErrors.delete(accountId)) accountErrors.value = nextErrors
+  function stopLoading(id: string) {
+    if (!loading.peek().has(id)) return
+    const next = new Set(loading.peek())
+    next.delete(id)
+    loading.value = next
+  }
+
+  function cancelRead(id: string) {
+    queued.delete(id)
+    running.get(id)?.abort()
+    stopLoading(id)
+  }
+
+  function deleteEntry<T>(
+    entries: Signal<ReadonlyMap<string, T>>,
+    key: string,
+  ) {
+    if (!entries.peek().has(key)) return
+    const next = new Map(entries.peek())
+    next.delete(key)
+    entries.value = next
+  }
+
+  function dropLegacy(key: string) {
+    cancelRead(`legacy/${key}`)
+    deleteEntry(legacy, key)
+    deleteEntry(legacyErrors, key)
+  }
+
+  function refreshLegacyAccount(accountId: string) {
+    for (const [spaceKey, roomId] of knownSpaces.get(accountId) ?? []) {
+      queueRead({ kind: 'legacy', accountId, spaceKey, roomId })
+    }
+  }
+
+  function refreshAccount(accountId: string) {
+    queueRead({ kind: 'graph', accountId })
+    queueRead({ kind: 'discovered', accountId })
+  }
+
+  function removeAccount(accountId: string) {
+    for (const key of knownSpaces.get(accountId)?.keys() ?? []) dropLegacy(key)
+    knownSpaces.delete(accountId)
+    cancelRead(`graph/${accountId}`)
+    cancelRead(`discovered/${accountId}`)
+    deleteEntry(graphs, accountId)
+    deleteEntry(discovered, accountId)
+    deleteEntry(accountErrors, accountId)
   }
 
   effect(() => {
@@ -374,23 +487,22 @@ export function createSpacesStore(
       spaces.set(key, room.room_id)
       byAccount.set(room.account_id, spaces)
     }
-    for (const accountId of reads.keys()) {
+    for (const accountId of knownSpaces.keys()) {
       if (!byAccount.has(accountId)) removeAccount(accountId)
     }
     for (const [accountId, spaces] of byAccount) {
-      const read = reads.get(accountId)
-      if (read === undefined) {
-        reads.set(accountId, { spaces, abort: null })
+      const previous = knownSpaces.get(accountId)
+      knownSpaces.set(accountId, spaces)
+      if (previous === undefined) {
         refreshAccount(accountId)
-      } else if (
-        read.spaces.size !== spaces.size ||
-        [...spaces.keys()].some((key) => !read.spaces.has(key))
-      ) {
-        read.spaces = spaces
-        // The account-wide graph already includes links for a newly listed
-        // space. Only the legacy read needs to fetch it individually.
-        const graph = graphs.peek().get(accountId)
-        if (graph !== undefined && 'legacy' in graph) refreshAccount(accountId)
+      } else if (graphs.peek().get(accountId) === null) {
+        for (const key of previous.keys()) {
+          if (!spaces.has(key)) dropLegacy(key)
+        }
+        for (const [spaceKey, roomId] of spaces) {
+          if (!previous.has(spaceKey))
+            queueRead({ kind: 'legacy', accountId, spaceKey, roomId })
+        }
       }
     }
   })
@@ -406,25 +518,38 @@ export function createSpacesStore(
   })
 
   live.subscribe((frame) => {
+    const accountId = frame.accountId
+    if (!knownSpaces.has(accountId)) return
     const change = roomDetailsChange(frame)
-    if (
-      change?.sources.has('space_graph') ||
-      change?.sources.has('space_browse')
-    ) {
-      refreshAccount(frame.accountId)
+    if (change?.sources.has('space_graph')) {
+      refreshAccount(accountId)
       return
     }
-    // Servers predating the graph only announce child state in the timeline.
-    const graph = graphs.peek().get(frame.accountId)
-    if (graph !== undefined && 'links' in graph) return
+    if (change?.sources.has('space_browse')) {
+      queueRead({ kind: 'discovered', accountId })
+      return
+    }
+    // The older server announces child state in the room timeline.
     const event = timelineEvent(frame)
     if (
-      event?.type === 'm.space.child' &&
-      reads.get(frame.accountId)?.spaces.has(roomKey(event))
+      graphs.peek().get(accountId) === null &&
+      event?.type === 'm.space.child'
     ) {
-      refreshAccount(frame.accountId)
+      refreshLegacy(event)
     }
   })
+
+  function refreshLegacy(space: Pick<RoomDto, 'account_id' | 'room_id'>) {
+    const spaceKey = roomKey(space)
+    if (knownSpaces.get(space.account_id)?.has(spaceKey)) {
+      queueRead({
+        kind: 'legacy',
+        accountId: space.account_id,
+        spaceKey,
+        roomId: space.room_id,
+      })
+    }
+  }
 
   let lastReconnects = live.reconnects.peek()
   effect(() => {
@@ -432,7 +557,7 @@ export function createSpacesStore(
     if (reconnects === lastReconnects) return
     lastReconnects = reconnects
     untracked(() => {
-      for (const accountId of reads.keys()) refreshAccount(accountId)
+      for (const accountId of knownSpaces.keys()) refreshAccount(accountId)
     })
   })
 
@@ -450,9 +575,13 @@ export function createSpacesStore(
     errors,
     loading,
     reordering,
-    refresh: ({ account_id }) => refreshAccount(account_id),
+    refresh: (space) => {
+      if (!knownSpaces.has(space.account_id)) return
+      if (graphs.peek().get(space.account_id) === null) refreshLegacy(space)
+      else refreshAccount(space.account_id)
+    },
     resetSession: () => {
-      for (const accountId of reads.keys()) removeAccount(accountId)
+      for (const accountId of knownSpaces.keys()) removeAccount(accountId)
       if (expanded.peek().size > 0) expanded.value = new Set()
       if (selected.peek() !== null) selected.value = null
     },

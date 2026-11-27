@@ -6,16 +6,12 @@ export type DiscoveredMembership =
   components['schemas']['DiscoveredSpaceMembershipDto']
 export type SpaceChildDto = components['schemas']['SpaceChildDto']
 
-export type SpaceGraph =
-  | { links: readonly SpaceGraphLink[] }
-  | {
-      legacy: ReadonlyMap<string, readonly SpaceChildDto[]>
-      errors: ReadonlyMap<string, string>
-    }
+/** A graph edge supplies a joined destination. Legacy state can also supply join routes. */
+export type ParentRoutes = readonly string[] | null
 
 export interface SpaceProjection {
   /** Advertised direct parents for Room Information, before cutting cycles. */
-  parents: ReadonlyMap<string, ReadonlyMap<string, readonly string[]>>
+  parents: ReadonlyMap<string, ReadonlyMap<string, ParentRoutes>>
   /** Joined space links in Matrix sibling order. */
   subspaces: ReadonlyMap<string, readonly string[]>
   /** Joined spaces that can appear below a root. */
@@ -83,11 +79,12 @@ function nestedSpaces(input: ReadonlyMap<string, readonly string[]>) {
 
 export function projectSpaces(
   catalog: ReadonlyMap<string, CatalogRoom>,
-  graphs: ReadonlyMap<string, SpaceGraph>,
+  graphs: ReadonlyMap<string, readonly SpaceGraphLink[] | null>,
+  legacy: ReadonlyMap<string, readonly SpaceChildDto[]>,
   discovered: ReadonlyMap<string, readonly DiscoveredMembership[]>,
   now: number,
 ): SpaceProjection {
-  const parents = new Map<string, Map<string, readonly string[]>>()
+  const parents = new Map<string, Map<string, ParentRoutes>>()
   const members = new Map<string, Set<string>>()
   const ancestors = new Map<string, Set<string>>()
   const branches = new Map<string, string[]>()
@@ -103,38 +100,41 @@ export function projectSpaces(
   const addAdvertisedLink = (
     parent: string,
     child: string,
-    via: readonly string[],
+    via: ParentRoutes,
   ) => {
     const entries = parents.get(child) ?? new Map()
     entries.set(parent, via)
     parents.set(child, entries)
   }
 
+  for (const [parent, children] of legacy) {
+    const space = catalog.get(parent)
+    if (space === undefined) continue
+    for (const child of children) {
+      const childKey = roomKey({
+        account_id: space.account_id,
+        room_id: child.room_id,
+      })
+      if (!joinedLink(parent, childKey)) continue
+      addAdvertisedLink(parent, childKey, child.via)
+      if (catalog.get(childKey)?.room_type !== 'm.space') {
+        addMembership(parent, childKey)
+      }
+    }
+  }
   for (const [accountId, graph] of graphs) {
+    if (graph === null) continue
     const key = (roomId: string) =>
       roomKey({ account_id: accountId, room_id: roomId })
-    if ('legacy' in graph) {
-      for (const [parent, children] of graph.legacy) {
-        for (const child of children) {
-          const childKey = key(child.room_id)
-          if (!joinedLink(parent, childKey)) continue
-          addAdvertisedLink(parent, childKey, child.via)
-          if (catalog.get(childKey)?.room_type !== 'm.space') {
-            addMembership(parent, childKey)
-          }
-        }
-      }
-      continue
-    }
     const advertised = new Map<string, Map<string, SpaceGraphLink>>()
-    for (const link of graph.links) {
+    for (const link of graph) {
       // Verified claims can inform parent navigation. The advertised child
       // event supplies sidebar membership and Matrix sibling order.
       if (link.source !== 'child') continue
       const parent = key(link.parent_room_id)
       const child = key(link.child_room_id)
       if (!joinedLink(parent, child)) continue
-      addAdvertisedLink(parent, child, [])
+      addAdvertisedLink(parent, child, null)
       addMembership(parent, child)
       if (catalog.get(child)?.room_type === 'm.space') {
         const siblings = advertised.get(parent) ?? new Map()

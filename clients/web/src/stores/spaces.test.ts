@@ -19,7 +19,7 @@ import {
 import type { LiveConnection } from './live-connection'
 import type { RoomDto } from './room-list'
 import type { RoomsStore } from './rooms'
-import { createSpacesStore, spacePickerEntries } from './spaces'
+import { adjacentSpace, createSpacesStore, spacePickerEntries } from './spaces'
 import { spaceReadHandlers } from '../test/room-details'
 import type { SpaceGraphLink } from './space-graph'
 
@@ -617,11 +617,12 @@ it('uses cached discovered memberships through ancestors and expires them locall
   }
 })
 
-it('reconciles cached memberships on browse invalidation', async () => {
+it('reconciles cached memberships without re-reading the graph on browse invalidation', async () => {
   const child = '!child:hs'
   let present = true
+  const graph = vi.fn(() => HttpResponse.json({ data: { links: [] } }))
   server.use(
-    http.get(graphUrl, () => HttpResponse.json({ data: { links: [] } })),
+    http.get(graphUrl, graph),
     http.get(discoveredUrl, () =>
       HttpResponse.json({
         data: {
@@ -648,4 +649,118 @@ it('reconciles cached memberships on browse invalidation', async () => {
   await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
   expect(store.visible.value).toEqual([])
   expect(store.selected.value).toBeNull()
+  expect(graph).toHaveBeenCalledTimes(1)
+})
+
+it('loads legacy spaces independently and retries only the affected space', async () => {
+  const slow = '!slow:hs'
+  const child = '!leaf:hs'
+  const requests: string[] = []
+  let release: (() => void) | undefined
+  server.use(
+    http.get(
+      `${BASE_URL}/v1/accounts/:accountId/rooms/:roomId/space/children`,
+      async ({ params }) => {
+        const roomId = String(params.roomId)
+        requests.push(roomId)
+        if (roomId === slow) {
+          await new Promise<void>((resolve) => {
+            release = resolve
+          })
+          return HttpResponse.json({ data: [] })
+        }
+        return HttpResponse.json({
+          data: [{ room_id: child, via: ['hs'], suggested: false }],
+        })
+      },
+    ),
+  )
+  const { store, rooms, emit } = harness()
+  rooms.value = [space(), space(slow), plainRoom(child)]
+  store.selected.value = key(SPACE)
+  try {
+    await vi.waitFor(() => expect(release).toBeDefined())
+    await vi.waitFor(() =>
+      expect(store.selectedRooms.value).toEqual(new Set([key(child)])),
+    )
+    expect(store.loading.value.size).toBe(1)
+    emit({
+      type: TIMELINE_EVENT,
+      accountId: ACCOUNT,
+      payload: { account_id: ACCOUNT, room_id: SPACE, type: 'm.space.child' },
+    })
+    await vi.waitFor(() =>
+      expect(requests.filter((id) => id === SPACE)).toHaveLength(2),
+    )
+    store.refresh(space())
+    await vi.waitFor(() =>
+      expect(requests.filter((id) => id === SPACE)).toHaveLength(3),
+    )
+    expect(requests.filter((id) => id === slow)).toHaveLength(1)
+  } finally {
+    release?.()
+    await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
+  }
+})
+
+it('keeps the joined graph usable when the optional discovery read fails', async () => {
+  const empty = '!empty:hs'
+  const child = '!leaf:hs'
+  let release: (() => void) | undefined
+  server.use(
+    http.get(graphUrl, () =>
+      HttpResponse.json({ data: { links: [link(SPACE, child)] } }),
+    ),
+    http.get(discoveredUrl, async () => {
+      await new Promise<void>((resolve) => {
+        release = resolve
+      })
+      return new HttpResponse(null, { status: 503 })
+    }),
+  )
+  const { store, rooms } = harness()
+  rooms.value = [space(), space(empty), plainRoom(child)]
+  store.selected.value = key(SPACE)
+  try {
+    await vi.waitFor(() => expect(release).toBeDefined())
+    await vi.waitFor(() =>
+      expect(store.selectedRooms.value).toEqual(new Set([key(child)])),
+    )
+    expect(store.parents.value.get(key(child))?.get(key(SPACE))).toBeNull()
+  } finally {
+    release?.()
+    await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
+  }
+  expect(store.errors.value.size).toBe(0)
+  expect(store.visible.value.map((room) => room.room_id)).toEqual([SPACE])
+})
+
+it('cycles from the position of a selected child inside a collapsed branch', async () => {
+  const before = '!before:hs'
+  const after = '!after:hs'
+  const nested = '!nested:hs'
+  const leaf = '!leaf:hs'
+  server.use(
+    http.get(graphUrl, () =>
+      HttpResponse.json({
+        data: {
+          links: [link(before, leaf), link(SPACE, nested), link(after, leaf)],
+        },
+      }),
+    ),
+  )
+  const { store, rooms } = harness()
+  rooms.value = [
+    space(before),
+    space(),
+    space(nested),
+    space(after),
+    plainRoom(leaf),
+  ]
+  await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
+  const order = [key(before), key(SPACE), key(after)]
+  const titles = new Map<string, string>()
+  store.selected.value = key(nested)
+  expect(adjacentSpace(store, order, titles, -1)).toBe(key(SPACE))
+  expect(adjacentSpace(store, order, titles, 1)).toBe(key(after))
 })

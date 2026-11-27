@@ -54,9 +54,11 @@ export const LINK_PREVIEW_SETTINGS: readonly LinkPreviewSetting[] = [
   'device+homeserver',
 ]
 
-/** Desktop sidebar bounds in CSS pixels. Keep the room list readable. */
+/** Width bounds for the named Spaces pane in CSS pixels. */
 export const SPACES_PANE_WIDTH_MIN = 128
 export const SPACES_PANE_WIDTH_MAX = 320
+
+/** Desktop sidebar bounds in CSS pixels. Keep the room list readable. */
 export const SIDEBAR_WIDTH_MIN = 360
 export const SIDEBAR_WIDTH_MAX = 640
 
