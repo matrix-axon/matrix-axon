@@ -260,6 +260,32 @@ describe('folded redactions (#1273)', () => {
     expect(blocker).toBe(105)
   })
 
+  it('keeps the base over a redaction that arrived below it', () => {
+    // `$old` was redacted before `$main` arrived. Its redaction is no
+    // extension, and the final merge must not prefer it over the base.
+    const displayed = [{ ...gone(90, 95), event_id: '$old' }, ev('$main', 100)]
+    const { target, blocker } = computeRoomReceipt(
+      caughtUp({ displayed, loaded: displayed, threads: [] }),
+    )
+    expect(target).toEqual(ev('$main', 100))
+    expect(blocker).toBeNull()
+  })
+
+  it('does not name a redaction at the blocker itself', () => {
+    // Two real events never share an arrival order. The tie pins the bound
+    // as strict, the same `maxByArrivalOrderBelow` the thread extension uses.
+    const displayed = [ev('$main', 100), gone(101, 105)]
+    const { target, blocker } = computeRoomReceipt(
+      caughtUp({
+        displayed,
+        loaded: [...displayed, ev('$b1', 105, ROOT_B)],
+        threads: [],
+      }),
+    )
+    expect(blocker).toBe(105)
+    expect(target?.event_id).toBe('$gone')
+  })
+
   it('does not extend while a thread is known unread from live events', () => {
     // `displayed` already lacks the rows the cutoff withheld, such as a main
     // timeline message arriving after it; the redaction must not cover them.

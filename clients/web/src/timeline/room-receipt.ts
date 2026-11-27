@@ -81,14 +81,23 @@ export interface RoomReceiptInput {
   knownUnreadCutoff: number | null
 }
 
-export interface RoomReceipt<T extends ReceiptCandidate> {
+/**
+ * A position a read receipt may name: an event id and where it arrived. Only a
+ * position, not an event: a folded redaction has no row of its own (review).
+ */
+export type ReceiptPosition = Pick<
+  ReceiptCandidate,
+  'event_id' | 'arrival_order'
+>
+
+export interface RoomReceipt {
   /** Exclusive arrival bound a thread panel may name up to. */
   blocker: number | null
   /**
    * The arrival-max position this view may name, or `null`: an event it holds,
    * or a redaction folded onto a displayed one, which has no event of its own.
    */
-  target: T | ReceiptCandidate | null
+  target: ReceiptPosition | null
 }
 
 /**
@@ -125,12 +134,7 @@ export function summaryLooksUnread(
  * the client has loaded, while thread summaries know about replies it has not,
  * so both signals are consulted and either one shuts the extension.
  */
-export function computeRoomReceipt<T extends ReceiptCandidate>(
-  input: Omit<RoomReceiptInput, 'displayed' | 'loaded'> & {
-    displayed: readonly T[]
-    loaded: readonly T[]
-  },
-): RoomReceipt<T> {
+export function computeRoomReceipt(input: RoomReceiptInput): RoomReceipt {
   const base = maxByArrivalOrder(input.displayed)
   const baseOrder = base?.arrival_order ?? -1
 
@@ -175,11 +179,11 @@ export function computeRoomReceipt<T extends ReceiptCandidate>(
         : (marker.arrivalThrough ?? arrivalOf?.get(marker.eventId) ?? -1),
     )
   }
-  const isRead = (event: T): boolean =>
+  const isRead = (event: ReceiptCandidate): boolean =>
     event.threadRoot !== null &&
     (readThrough.get(event.threadRoot) ?? -1) >= event.arrival_order
 
-  const above: readonly T[] = input.loaded.filter(
+  const above: readonly ReceiptCandidate[] = input.loaded.filter(
     (event) =>
       event.arrival_order > baseOrder &&
       event.threadRoot !== null &&
@@ -207,7 +211,7 @@ export function computeRoomReceipt<T extends ReceiptCandidate>(
   )
   const target = maxByArrivalOrder(
     [base, claimable, redaction].filter(
-      (event): event is T | ReceiptCandidate => event !== null,
+      (position): position is ReceiptCandidate => position !== null,
     ),
   )
   return { blocker, target }
