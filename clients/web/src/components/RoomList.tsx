@@ -636,9 +636,13 @@ export function RoomList() {
 
   /**
    * A mouse click on a row. In the single-pane layout the clicked link goes
-   * away with the list, and `RoomPage` lands focus on the room title instead
+   * away with the list, and the shell lands focus on the room title instead
    * (ADR 0062, WCR-17) — so the composer must not take it, as it must not on a
    * touch tap. Where the list stays beside the room it does take it.
+   *
+   * Enter (`activateRoom`) is deliberately not gated on the layout: whoever
+   * pressed it is already typing, so the composer is where they carry on, and
+   * it takes focus back from the title.
    */
   const activateRoomByPointer = (room: RoomDto, href: string) => {
     if (window.matchMedia(SINGLE_PANE_QUERY).matches) {

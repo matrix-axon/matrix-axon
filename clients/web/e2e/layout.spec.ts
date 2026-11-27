@@ -445,6 +445,21 @@ test('narrow: one pane, chosen by the route', async ({ page }) => {
   expect(await shown(page, '.sidebar')).toBe('visible')
 })
 
+test('narrow: Return in the room filter hands the composer the keyboard', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 640, height: 900 }) // 40rem
+  await page.goto('/')
+  await expect(page.locator('a.room-link').first()).toBeVisible()
+
+  await page.getByLabel('Filter by name').press('Enter')
+
+  await expect(page).toHaveURL(/\/rooms\//)
+  // The title takes focus on arrival here too; the composer must end up with it.
+  await expect.poll(() => active(page)).toContain('TEXTAREA[Message ')
+})
+
 test('narrow: touch tap opens a room without a click event', async ({
   page,
 }) => {

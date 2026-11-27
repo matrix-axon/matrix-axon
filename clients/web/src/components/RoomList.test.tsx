@@ -1246,15 +1246,39 @@ describe('RoomList keyboard shortcuts (ADR 0078)', () => {
   })
 
   it('Enter in the name filter opens the top match when several rooms match', async () => {
-    const { services, findByText, getByLabelText } = renderPage()
+    // The older room comes first in the response, so only the recent-first
+    // sort can make Ops the top match.
+    const { services, findByText, getByLabelText } = renderPage([LOUNGE, OPS])
     await findByText('Ops')
     const filter = getByLabelText('Filter by name') as HTMLInputElement
     const before = services.composerFocus.value
 
+    fireEvent.input(filter, { target: { value: 'o' } })
+    expect(await findByText('#lounge:hs')).toBeTruthy()
+    expect(await findByText('Ops')).toBeTruthy()
     fireEvent.keyDown(filter, { key: 'Enter' })
 
     await waitFor(() => expect(services.composerFocus.value).toBe(before + 1))
-    expect(window.location.pathname).toMatch(/\/rooms\//)
+    expect(window.location.pathname).toBe(
+      `/${ACCOUNT}/rooms/${encodeURIComponent('!ops:hs')}`,
+    )
+  })
+
+  it('Enter in the name filter does nothing when no room matches', async () => {
+    const { services, findByText, getByLabelText, queryByText } = renderPage()
+    await findByText('Ops')
+    const filter = getByLabelText('Filter by name') as HTMLInputElement
+    const before = services.composerFocus.value
+    const path = window.location.pathname
+
+    fireEvent.input(filter, { target: { value: 'no such room' } })
+    await waitFor(() => expect(queryByText('Ops')).toBeNull())
+    fireEvent.keyDown(filter, { key: 'Enter' })
+    // Past the deferral the focus bump would take.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(services.composerFocus.value).toBe(before)
+    expect(window.location.pathname).toBe(path)
   })
 
   it('a mouse click on a room row asks the new room composer for focus', async () => {
