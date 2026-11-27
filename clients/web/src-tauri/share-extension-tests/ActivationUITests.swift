@@ -49,8 +49,10 @@ final class ActivationUITests: XCTestCase {
         forDuration: 0.05,
         thenDragTo: origin.withOffset(CGVector(dx: app.frame.width * 0.15, dy: y)))
     }
+    // The last swipe may still be decelerating, so give it the same settle wait
+    // as the earlier ones rather than a one-shot read.
     XCTAssertTrue(
-      more.exists && more.isHittable,
+      waitFor(more, hittable, timeout: 5),
       "More never became hittable; first shareCell at \(cell.frame)\n\(app.debugDescription)")
     more.tap()
     XCTAssertTrue(app.navigationBars.firstMatch.waitForExistence(timeout: uiTimeout))
@@ -213,6 +215,14 @@ final class ActivationUITests: XCTestCase {
     // reorder that never works still fails.
     var moved = false
     for attempt in 1...3 {
+      // A reorder can land after the previous attempt's 5-second wait on a slow
+      // runner. Dragging again would then swap the rows back, so read the order
+      // once more before each retry.
+      if attempt > 1 && removes.firstMatch.identifier != "share-photo-remove-\(photoID)" {
+        print("[drag-reorder] attempt \(attempt - 1) landed late")
+        moved = true
+        break
+      }
       reveal(handles.element(boundBy: 1), app: app)
       // Both handles have the same label, so only their position tells them
       // apart, and XCTest looks up an element's coordinate again while the drag
@@ -240,7 +250,10 @@ final class ActivationUITests: XCTestCase {
         moved = true
         break
       }
-      print("[drag-reorder] attempt \(attempt) left \(photoID) first")
+      let order = removes.allElementsBoundByIndex.map {
+        String($0.identifier.dropFirst("share-photo-remove-".count))
+      }
+      print("[drag-reorder] attempt \(attempt) left \(photoID) first; order \(order)")
     }
     XCTAssertTrue(moved, "Three drags left \(photoID) first\n\(app.debugDescription)")
     // The status row is virtualized above the viewport here. Verify the saved
