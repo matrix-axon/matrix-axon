@@ -2144,6 +2144,10 @@ pub struct AccountDto {
     /// an older server.
     #[schema(required = false)]
     pub own_identity_changed: bool,
+    /// Whether this account excludes devices that have not been cross-signed (ADR 0136).
+    /// Current servers always send this field. Treat it as false when absent on an older server.
+    #[schema(required = false)]
+    pub exclude_insecure_devices: bool,
     /// Sync-engine readiness (ADR 0030, issue #241): whether mutations to this
     /// account are currently reliable. `"connecting"` before the SDK client/
     /// session is up (including for an account with no supervised sync task,
@@ -2181,6 +2185,7 @@ impl AccountDto {
             // for wire stability; populated from the persisted column.
             verified: Some(a.verified),
             own_identity_changed: a.own_identity_changed,
+            exclude_insecure_devices: a.exclude_insecure_devices,
             sync_state,
             backup,
             created_at: a.created_at.to_rfc3339(),

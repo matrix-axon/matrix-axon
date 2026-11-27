@@ -16,13 +16,16 @@
 //! type so this one stays purely about connections (single responsibility).
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Deref;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axon_core::SyncConfig;
 use axon_store::{Account, AccountState, Store};
 use matrix_sdk::ruma::{OwnedRoomId, RoomId};
-use matrix_sdk::Client;
-use tokio::sync::Mutex as AsyncMutex;
+use matrix_sdk::{Client, Room};
+use tokio::sync::{Mutex as AsyncMutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
+use tokio_util::sync::{CancellationToken, DropGuard};
 use uuid::Uuid;
 
 use crate::client::{
@@ -31,6 +34,7 @@ use crate::client::{
 };
 use crate::error::{GatewayError, SyncError};
 use crate::homeserver_gate::{HomeserverGate, HomeserverGates};
+use crate::{InsecureDevicesError, LifecycleError};
 
 /// A per-account connection slot. The slot's [`AsyncMutex`] is what makes a
 /// connect single-flight: the first caller holds it across the (awaiting)
@@ -38,7 +42,85 @@ use crate::homeserver_gate::{HomeserverGate, HomeserverGates};
 /// freshly cached client instead of starting their own connect. `None` means
 /// "not connected yet"; `Some` caches the live client (clones are cheap — the
 /// SDK client is Arc-backed).
-type Slot = Arc<AsyncMutex<Option<Client>>>;
+type Slot = Arc<ClientSlot>;
+
+#[derive(Default)]
+struct ClientSlot {
+    client: AsyncMutex<ClientState>,
+    requests: Arc<RwLock<()>>,
+}
+
+/// Keeps request admission open for the full lifetime of the SDK handle,
+/// including when a gateway resolves a room from the client.
+pub(crate) struct ClientRequest<T> {
+    inner: T,
+    _guard: OwnedRwLockReadGuard<()>,
+}
+
+impl<T> Deref for ClientRequest<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl ClientRequest<Client> {
+    pub(crate) fn room(self, room_id: &RoomId) -> Option<ClientRequest<Room>> {
+        Some(ClientRequest {
+            inner: self.inner.get_room(room_id)?,
+            _guard: self._guard,
+        })
+    }
+}
+
+/// The SDK's client context survives every clone of the client, including SDK
+/// tasks and handles reached through a Room. This token fires when the last
+/// such owner is gone. It also covers aborted sync runs whose children did not
+/// get to finish their usual cleanup.
+#[derive(Clone)]
+struct ClientLifetime {
+    _signal: Arc<DropGuard>,
+}
+
+struct ManagedClient {
+    client: Client,
+    dropped: CancellationToken,
+}
+
+#[derive(Default)]
+struct ClientState {
+    live: Option<ManagedClient>,
+    retired: Vec<CancellationToken>,
+}
+
+impl ClientState {
+    fn put(&mut self, client: Client) {
+        let dropped = CancellationToken::new();
+        client.add_event_handler_context(ClientLifetime {
+            _signal: Arc::new(dropped.clone().drop_guard()),
+        });
+        self.live = Some(ManagedClient { client, dropped });
+    }
+
+    fn take(&mut self) -> Option<Client> {
+        let ManagedClient { client, dropped } = self.live.take()?;
+        self.retired.retain(|token| !token.is_cancelled());
+        self.retired.push(dropped);
+        Some(client)
+    }
+
+    fn check_retired(&mut self) -> Result<(), SyncError> {
+        self.retired.retain(|token| !token.is_cancelled());
+        if self.retired.is_empty() {
+            Ok(())
+        } else {
+            Err(SyncError::Sdk(
+                "the previous Matrix client is still closing".to_owned(),
+            ))
+        }
+    }
+}
 
 /// Rooms the homeserver has positively denied knowing (ADR 0094), keyed by the
 /// account that asked. Shared between the gateway — which learns it from a
@@ -209,29 +291,47 @@ impl ClientManager {
     /// waiting on an in-flight connect. Used by the GET/list backup snapshot
     /// (ADR 0098): a cold connect or a hung slot lock must not pin account
     /// reads. `None` if nothing is cached or the slot is currently locked.
-    pub fn cached(&self, account_id: Uuid) -> Option<Client> {
+    pub(crate) fn cached(&self, account_id: Uuid) -> Option<ClientRequest<Client>> {
         let slot = self.slot(account_id);
-        slot.try_lock().ok().and_then(|guard| guard.clone())
+        let request = slot.requests.clone().try_read_owned().ok()?;
+        let client = slot.client.try_lock().ok()?.live.as_ref()?.client.clone();
+        Some(ClientRequest {
+            inner: client,
+            _guard: request,
+        })
     }
 
-    /// Return the cached client for `account_id`, building and authenticating one
-    /// if the account isn't connected yet. Single-flight per account: concurrent
-    /// callers coalesce onto a single connect.
-    ///
-    /// An unknown account id is [`GatewayError::UnknownAccount`]; a non-`active`
-    /// account is [`GatewayError::AccountNotActive`] (not retryable without a
-    /// login); a connect that fails (homeserver unreachable, auth/restore error,
-    /// store error) is [`GatewayError::NotConnected`] — retryable.
-    pub async fn get_or_connect(&self, account_id: Uuid) -> Result<Client, GatewayError> {
+    /// Borrow a client for an ordinary request, connecting on demand. The
+    /// account's replacement cannot pass the write barrier until it drops.
+    pub(crate) async fn get_or_connect(
+        &self,
+        account_id: Uuid,
+    ) -> Result<ClientRequest<Client>, GatewayError> {
         let slot = self.slot(account_id);
-        let mut guard = slot.lock().await;
-        if let Some(client) = guard.as_ref() {
-            let client = client.clone();
+        let request = slot.requests.clone().read_owned().await;
+        let client = self.get_or_connect_unleased(account_id).await?;
+        Ok(ClientRequest {
+            inner: client,
+            _guard: request,
+        })
+    }
+
+    /// Connect for the supervised run or an operation holding the identity
+    /// lock. Those owners either drop their handles before retiring the client
+    /// or register cancellable verification drivers. Ordinary callers must use
+    /// the leased entry point.
+    pub(crate) async fn get_or_connect_unleased(
+        &self,
+        account_id: Uuid,
+    ) -> Result<Client, GatewayError> {
+        let slot = self.slot(account_id);
+        let mut guard = slot.client.lock().await;
+        if let Some(managed) = guard.live.as_ref() {
+            let client = managed.client.clone();
             drop(guard);
             self.retry_pending_adoption_cleanup(account_id).await;
             return Ok(client);
         }
-
         let account = self
             .store
             .get_account(account_id)
@@ -252,9 +352,10 @@ impl ClientManager {
             return Err(GatewayError::AccountNotActive(account_id));
         }
 
+        guard.check_retired()?;
         let client = connect_account(&self.store, &account, &self.config).await?;
         self.finish_adoption_cleanup(account_id).await;
-        *guard = Some(client.clone());
+        guard.put(client.clone());
         Ok(client)
     }
 
@@ -270,10 +371,11 @@ impl ClientManager {
     /// first (a reactivated row may carry a stale slot from a prior session).
     pub async fn login(&self, account: &Account, password: &str) -> Result<Client, SyncError> {
         let slot = self.slot(account.account_id);
-        let mut guard = slot.lock().await;
-        *guard = None;
+        let mut guard = slot.client.lock().await;
+        drop(guard.take());
+        guard.check_retired()?;
         let client = login_new_device(&self.store, account, &self.config, password).await?;
-        *guard = Some(client.clone());
+        guard.put(client.clone());
         Ok(client)
     }
 
@@ -288,12 +390,13 @@ impl ClientManager {
         device_id: &str,
     ) -> Result<Client, SyncError> {
         let slot = self.slot(account.account_id);
-        let mut guard = slot.lock().await;
-        *guard = None;
+        let mut guard = slot.client.lock().await;
+        drop(guard.take());
+        guard.check_retired()?;
         let client =
             import_token_new_device(&self.store, account, &self.config, access_token, device_id)
                 .await?;
-        *guard = Some(client.clone());
+        guard.put(client.clone());
         Ok(client)
     }
 
@@ -320,8 +423,9 @@ impl ClientManager {
         acquisition_client: Client,
     ) -> Result<(), SyncError> {
         let slot = self.slot(account.account_id);
-        let mut guard = slot.lock().await;
-        *guard = None;
+        let mut guard = slot.client.lock().await;
+        drop(guard.take());
+        guard.check_retired()?;
         drop(acquisition_client);
 
         adopt_matrix_oauth_acquire_staging(&self.config, staging_dir_name, account.account_id)
@@ -329,7 +433,7 @@ impl ClientManager {
         match connect_account(&self.store, account, &self.config).await {
             Ok(permanent_client) => {
                 self.finish_adoption_cleanup(account.account_id).await;
-                *guard = Some(permanent_client);
+                guard.put(permanent_client);
             }
             Err(error) => {
                 self.pending_adoption_cleanup
@@ -347,6 +451,37 @@ impl ClientManager {
         Ok(())
     }
 
+    pub(crate) async fn lock_client_requests(&self, account_id: Uuid) -> OwnedRwLockWriteGuard<()> {
+        self.slot(account_id).requests.clone().write_owned().await
+    }
+
+    /// The lifecycle has drained requests and stopped sync. Retire the old
+    /// client and wait for any remaining SDK handles before committing the
+    /// policy. On timeout the old setting survives and cold connects continue
+    /// to refuse the slot until retirement completes.
+    pub(crate) async fn set_exclude_insecure_devices(
+        &self,
+        account_id: Uuid,
+        enabled: bool,
+        drain_timeout: Duration,
+    ) -> Result<(), InsecureDevicesError> {
+        let slot = self.slot(account_id);
+        let mut state = slot.client.lock().await;
+        drop(state.take());
+        self.clear_dead_rooms(account_id);
+        let retired =
+            futures_util::future::join_all(state.retired.iter().map(CancellationToken::cancelled));
+        tokio::time::timeout(drain_timeout, retired)
+            .await
+            .map_err(|_| InsecureDevicesError::ClientRetiring)?;
+        state.retired.clear();
+        self.store
+            .set_exclude_insecure_devices(account_id, enabled)
+            .await
+            .map_err(LifecycleError::from)?;
+        Ok(())
+    }
+
     /// Take the cached client for `account_id` out of its slot, returning it (or
     /// `None` if nothing is cached). This both *yields* the client — so the caller
     /// can do one last thing with it, e.g. invalidate the device token upstream on
@@ -356,7 +491,7 @@ impl ClientManager {
     /// this one returns it.
     pub async fn take(&self, account_id: Uuid) -> Option<Client> {
         let slot = self.slot(account_id);
-        let mut guard = slot.lock().await;
+        let mut guard = slot.client.lock().await;
         guard.take()
     }
 
@@ -366,7 +501,7 @@ impl ClientManager {
     #[cfg(test)]
     pub(crate) async fn inject_for_test(&self, account_id: Uuid, client: Client) {
         let slot = self.slot(account_id);
-        *slot.lock().await = Some(client);
+        slot.client.lock().await.put(client);
     }
 
     /// Drop the cached client for `account_id` so the next
@@ -391,8 +526,12 @@ impl ClientManager {
             map.get(&account_id).cloned()
         };
         if let Some(slot) = slot {
-            *slot.lock().await = None;
+            drop(slot.client.lock().await.take());
         }
+        self.clear_dead_rooms(account_id);
+    }
+
+    fn clear_dead_rooms(&self, account_id: Uuid) {
         self.dead_rooms
             .lock()
             .expect("dead room set poisoned")
@@ -402,7 +541,7 @@ impl ClientManager {
     /// Expose an account's raw connection slot, so a test can hold its lock
     /// itself to simulate a concurrent `get_or_connect`/`login` in flight.
     #[cfg(test)]
-    pub(crate) fn slot_for_test(&self, account_id: Uuid) -> Slot {
+    fn slot_for_test(&self, account_id: Uuid) -> Slot {
         self.slot(account_id)
     }
 }
@@ -440,6 +579,17 @@ mod tests {
             .expect("offline client")
     }
 
+    #[tokio::test]
+    async fn a_retired_slot_refuses_reconnect_until_raw_sdk_clones_are_gone() {
+        let mut state = ClientState::default();
+        let clone = offline_client().await;
+        state.put(clone.clone());
+        drop(state.take());
+        assert!(state.check_retired().is_err());
+        drop(clone);
+        assert!(state.check_retired().is_ok());
+    }
+
     /// Regression for issue #289: the old `evict` used `try_lock` and silently
     /// skipped when the slot was held by a concurrent `get_or_connect`, leaving
     /// the stale client cached for the next supervised restart to reuse (and
@@ -456,7 +606,7 @@ mod tests {
 
         // Simulate a concurrent `get_or_connect` holding the slot lock.
         let slot = manager.slot_for_test(account_id);
-        let guard = slot.lock().await;
+        let guard = slot.client.lock().await;
 
         let evicting_manager = manager.clone();
         let evict = tokio::spawn(async move {

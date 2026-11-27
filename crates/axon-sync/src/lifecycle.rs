@@ -18,7 +18,7 @@ use std::future::IntoFuture;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axon_core::{LiveFrame, SyncConfig};
+use axon_core::{insecure_devices::InsecureDeviceImpact, LiveFrame, SyncConfig};
 use axon_media::MediaCacheHandle;
 use axon_search::IndexHandle;
 use axon_store::{
@@ -41,15 +41,18 @@ use crate::backup::{
     log_post_create_version, plan_backup, BackupAction, BackupPlan, BackupProbe, BackupVerb,
     ENABLE_EXPORT_TIMEOUT, UPLOAD_WAIT_TIMEOUT,
 };
-use crate::engine::{spawn_supervised, AccountTask, TaskRegistry};
+use crate::engine::{spawn_supervised, TaskRegistry};
 use crate::error::{GatewayError, SyncError};
 use crate::homeserver_gate::Caller;
-use crate::manager::ClientManager;
+use crate::insecure_devices::{
+    read_impact, require_cross_signed_device, InsecureDevicesError, IMPACT_TIMEOUT,
+};
+use crate::manager::{ClientManager, ClientRequest};
 use crate::matrix_oauth_grant::MatrixOAuthGrantRegistry;
 use crate::own_identity;
 use crate::redecrypt::{BackupSource, RedecryptContext, RedecryptSummary, SweepScope};
 use crate::sync_health::SyncHealth;
-use crate::verification::{FlowRegistry, VerificationRooms};
+use crate::verification::{cancel_account_flows, FlowRegistry, VerificationRooms};
 
 /// How long logout waits for a cancelled supervised task to finish draining
 /// (sync-service stop + re-decryption join) before escalating to an abort
@@ -92,6 +95,8 @@ const RECOVER_SWEEP_TIMEOUT: Duration = Duration::from_secs(30);
 /// returns 200 with a partial summary at this cap, never 504.
 const MANUAL_REDECRYPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const QR_TRUST_DERIVATION_TIMEOUT: Duration = Duration::from_secs(10);
+const CLIENT_REQUEST_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+const CLIENT_RETIRE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// What can go wrong running a lifecycle verb. Wire-neutral, like
 /// [`GatewayError`](crate::GatewayError): the composition-root adapter
@@ -775,10 +780,34 @@ impl AccountLifecycle {
     async fn lock_active_account_client(
         &self,
         account_id: Uuid,
-    ) -> Result<(Account, Client, tokio::sync::OwnedMutexGuard<()>), LifecycleError> {
-        // Resolve identity to take the per-identity lock (keyed by
-        // `(user_id, homeserver_url)`, the key space the other verbs use); a 404
-        // is cheap and needs no lock.
+    ) -> Result<
+        (
+            Account,
+            ClientRequest<Client>,
+            tokio::sync::OwnedMutexGuard<()>,
+        ),
+        LifecycleError,
+    > {
+        let (account, guard) = self.lock_account(account_id).await?;
+        match account.state {
+            AccountState::Active => {}
+            AccountState::Deactivated => return Err(LifecycleError::NotActive(account_id)),
+            AccountState::Deleting => return Err(LifecycleError::BeingDeleted(account_id)),
+        }
+
+        let client = self
+            .manager
+            .get_or_connect(account_id)
+            .await
+            .map_err(Self::active_client_error)?;
+        Ok((account, client, guard))
+    }
+
+    async fn lock_account(
+        &self,
+        account_id: Uuid,
+    ) -> Result<(Account, tokio::sync::OwnedMutexGuard<()>), LifecycleError> {
+        // Resolve the account ID to the Matrix user ID that keys its lifecycle lock.
         let account = self
             .store
             .get_account(account_id)
@@ -796,27 +825,210 @@ impl AccountLifecycle {
             .get_account(account_id)
             .await?
             .ok_or(LifecycleError::NotFound(account_id))?;
+        Ok((account, guard))
+    }
+
+    fn active_client_error(error: GatewayError) -> LifecycleError {
+        match error {
+            GatewayError::UnknownAccount(id) => LifecycleError::NotFound(id),
+            GatewayError::AccountNotActive(id) => LifecycleError::NotActive(id),
+            other => LifecycleError::Upstream(other.to_string()),
+        }
+    }
+
+    /// Read current impact for an active account. The same preflight runs again
+    /// when the setting is enabled.
+    pub async fn insecure_devices_impact(
+        &self,
+        account_id: Uuid,
+    ) -> Result<InsecureDeviceImpact, InsecureDevicesError> {
+        let (_, client, _guard) = self.lock_active_account_client(account_id).await?;
+        self.read_insecure_devices_impact(account_id, &client).await
+    }
+
+    async fn read_insecure_devices_impact(
+        &self,
+        account_id: Uuid,
+        client: &Client,
+    ) -> Result<InsecureDeviceImpact, InsecureDevicesError> {
+        let gate = self.manager.homeserver_gate(client);
+        tokio::time::timeout(IMPACT_TIMEOUT, read_impact(account_id, client, &gate))
+            .await
+            .map_err(|_| {
+                tracing::warn!(%account_id, "MSC4153 impact read timed out");
+                InsecureDevicesError::ImpactUnavailable
+            })?
+    }
+
+    /// Update the policy for this account's SDK client. Disabling also works
+    /// while logged out or disconnected, when there is no impact to acknowledge.
+    pub async fn set_exclude_insecure_devices(
+        &self,
+        account_id: Uuid,
+        enabled: bool,
+        acknowledgement_token: Option<&str>,
+    ) -> Result<(), InsecureDevicesError> {
+        let (account, guard) = self.lock_account(account_id).await?;
         match account.state {
-            AccountState::Active => {}
-            AccountState::Deactivated => return Err(LifecycleError::NotActive(account_id)),
-            AccountState::Deleting => return Err(LifecycleError::BeingDeleted(account_id)),
+            AccountState::Deleting => return Err(LifecycleError::BeingDeleted(account_id).into()),
+            AccountState::Deactivated if enabled => {
+                return Err(LifecycleError::NotActive(account_id).into());
+            }
+            _ => {}
         }
 
-        // The supervised task normally holds a cached client; the cold-connect
-        // gate (active-only) is satisfied by the check above. Map the gateway's
-        // errors onto the lifecycle ones — under the lock on an `active` row the
-        // not-active/unknown arms are unreachable, but stay defensive.
-        let client = self
-            .manager
-            .get_or_connect(account_id)
-            .await
-            .map_err(|err| match err {
-                GatewayError::UnknownAccount(id) => LifecycleError::NotFound(id),
-                GatewayError::AccountNotActive(id) => LifecycleError::NotActive(id),
-                other => LifecycleError::Upstream(other.to_string()),
-            })?;
+        if account.exclude_insecure_devices == enabled {
+            return Ok(());
+        }
 
-        Ok((account, client, guard))
+        // Stop admitting requests and let all current client holders finish.
+        // The supervisor keeps syncing while we wait, so read the impact only
+        // after acquiring the guard.
+        let requests = tokio::time::timeout(
+            CLIENT_REQUEST_DRAIN_TIMEOUT,
+            self.manager.lock_client_requests(account_id),
+        )
+        .await
+        .map_err(|_| InsecureDevicesError::ClientBusy)?;
+
+        let affected_rooms = if enabled {
+            let client = self
+                .manager
+                .get_or_connect_unleased(account_id)
+                .await
+                .map_err(Self::active_client_error)?;
+            require_cross_signed_device(account_id, &client, None).await?;
+            let impact = self
+                .read_insecure_devices_impact(account_id, &client)
+                .await?;
+            // Sync can observe an identity rotation during room hydration.
+            require_cross_signed_device(account_id, &client, Some(impact.rooms.len())).await?;
+            if acknowledgement_token != Some(impact.acknowledgement_token.as_str()) {
+                let reason = if acknowledgement_token.is_none() {
+                    "missing_acknowledgement"
+                } else {
+                    "stale_acknowledgement"
+                };
+                tracing::info!(%account_id, affected_rooms = impact.rooms.len(),
+                    reason, "refused MSC4153 setting change");
+                return Err(InsecureDevicesError::AcknowledgementRequired(impact));
+            }
+            impact.rooms.len()
+        } else {
+            0
+        };
+
+        // Once the old task is stopped, the replacement must be supervised
+        // even if the caller disconnects or the database write fails.
+        let lifecycle = self.clone();
+        self.tracker
+            .spawn(async move {
+                let (_identity, _requests) = (guard, requests);
+                lifecycle
+                    .restart_with_insecure_devices(account, enabled, affected_rooms)
+                    .await
+            })
+            .await
+            .map_err(|error| {
+                tracing::error!(%account_id, %error, "MSC4153 setting task failed");
+                LifecycleError::Store("MSC4153 setting task failed".to_owned())
+            })?
+    }
+
+    async fn restart_with_insecure_devices(
+        &self,
+        mut account: Account,
+        enabled: bool,
+        affected_rooms: usize,
+    ) -> Result<(), InsecureDevicesError> {
+        let account_id = account.account_id;
+        let old = account.exclude_insecure_devices;
+        let active = account.state == AccountState::Active;
+        if active {
+            if let Err(error) = self.reap_task(account_id).await {
+                self.resume_sync_after_failed_drain(&account);
+                return Err(error.into());
+            }
+            // The supervisor normally drains SAS drivers itself. Cover a run
+            // aborted during cleanup, or a driver started before sync came up.
+            cancel_account_flows(&self.verifications, account_id).await;
+        }
+
+        let result = self
+            .manager
+            .set_exclude_insecure_devices(account_id, enabled, CLIENT_RETIRE_TIMEOUT)
+            .await;
+        if result.is_ok() {
+            self.matrix_oauth_grants.cancel_account(account_id);
+            account.exclude_insecure_devices = enabled;
+        }
+        if active {
+            self.supervise(account);
+        }
+        result?;
+
+        tracing::info!(%account_id, old, new = enabled, affected_rooms, "changed MSC4153 setting");
+        Ok(())
+    }
+
+    /// Leave an unabortable task in the registry for logout/delete to find.
+    /// Recover the current account only when that same task has stopped and
+    /// no other lifecycle verb has superseded it.
+    fn resume_sync_after_failed_drain(&self, account: &Account) {
+        let account_id = account.account_id;
+        let pending = self
+            .tasks
+            .lock()
+            .expect("task registry poisoned")
+            .get_mut(&account_id)
+            .and_then(|task| Some((task.take_stop_signal()?, task.handle.abort_handle())));
+        let Some((stopped, old_task)) = pending else {
+            return;
+        };
+        let identity = self.lock_for(&account.user_id, &account.homeserver_url);
+        let lifecycle = self.clone();
+        self.tracker.spawn(async move {
+            tokio::select! {
+                () = lifecycle.cancel.cancelled() => return,
+                () = stopped.cancelled() => {}
+            }
+            loop {
+                {
+                    let _guard = tokio::select! {
+                        () = lifecycle.cancel.cancelled() => return,
+                        guard = identity.lock() => guard,
+                    };
+                    let still_registered = lifecycle
+                        .tasks
+                        .lock()
+                        .expect("task registry poisoned")
+                        .get(&account_id)
+                        .is_some_and(|task| task.handle.id() == old_task.id());
+                    if !still_registered {
+                        return;
+                    }
+                    match lifecycle.store.get_account(account_id).await {
+                        Ok(Some(active)) if active.state == AccountState::Active => {
+                            // Join as well as observing the stop signal so the
+                            // cancelled future and all its locals are gone.
+                            if lifecycle.reap_task(account_id).await.is_ok() {
+                                lifecycle.supervise(active);
+                                tracing::info!(%account_id, "resumed sync after MSC4153 drain failure");
+                                return;
+                            }
+                        }
+                        Ok(_) => return,
+                        Err(error) => {
+                            tracing::warn!(%account_id, %error, "could not read account while recovering sync after MSC4153 drain failure");
+                        }
+                    }
+                }
+                tokio::select! {
+                    () = lifecycle.cancel.cancelled() => return,
+                    () = tokio::time::sleep(Duration::from_secs(5)) => {}
+                }
+            }
+        });
     }
 
     /// Log a Matrix account in at runtime as a fresh device, returning its Axon
@@ -1803,18 +2015,18 @@ impl AccountLifecycle {
             .lock()
             .expect("task registry poisoned")
             .remove(&account_id);
-        let Some(AccountTask { cancel, mut handle }) = task else {
+        let Some(mut task) = task else {
             return Ok(());
         };
 
-        cancel.cancel();
-        match tokio::time::timeout(DRAIN_TIMEOUT, &mut handle).await {
+        task.cancel.cancel();
+        match tokio::time::timeout(DRAIN_TIMEOUT, &mut task.handle).await {
             Ok(Ok(())) => return Ok(()),
             Ok(Err(err)) => {
                 tracing::warn!(
                     %account_id,
                     error = %err,
-                    "supervised task panicked during logout drain"
+                    "supervised task panicked while draining"
                 );
                 return Ok(());
             }
@@ -1825,8 +2037,8 @@ impl AccountLifecycle {
             ),
         }
 
-        handle.abort();
-        match tokio::time::timeout(ABORT_TIMEOUT, &mut handle).await {
+        task.handle.abort();
+        match tokio::time::timeout(ABORT_TIMEOUT, &mut task.handle).await {
             // Finished or cancelled — terminated either way.
             Ok(_) => Ok(()),
             Err(_) => {
@@ -1839,7 +2051,7 @@ impl AccountLifecycle {
                 self.tasks
                     .lock()
                     .expect("task registry poisoned")
-                    .insert(account_id, AccountTask { cancel, handle });
+                    .insert(account_id, task);
                 Err(LifecycleError::Draining(account_id))
             }
         }
@@ -1849,6 +2061,8 @@ impl AccountLifecycle {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    mod insecure_devices;
 
     /// A media-cache handle over a throwaway temp directory, for the lifecycle
     /// tests (the delete path calls `purge_account`, which is a no-op when the
@@ -2597,7 +2811,7 @@ pub(crate) mod tests {
 
         let drained = Arc::new(AtomicBool::new(false));
         let cancel = CancellationToken::new();
-        let handle = tokio::spawn({
+        let task = AccountTask::spawn(&lc.tracker, cancel.clone(), {
             let cancel = cancel.clone();
             let drained = Arc::clone(&drained);
             async move {
@@ -2606,10 +2820,7 @@ pub(crate) mod tests {
                 drained.store(true, Ordering::SeqCst);
             }
         });
-        lc.tasks
-            .lock()
-            .unwrap()
-            .insert(acct.account_id, AccountTask { cancel, handle });
+        lc.tasks.lock().unwrap().insert(acct.account_id, task);
 
         lc.logout(acct.account_id).await.expect("logout succeeds");
 
@@ -2691,13 +2902,10 @@ pub(crate) mod tests {
         // Ignores its token entirely; the sleep is an await point, so the abort
         // lands there.
         let cancel = CancellationToken::new();
-        let handle = tokio::spawn(async {
+        let task = AccountTask::spawn(&lc.tracker, cancel.clone(), async {
             tokio::time::sleep(Duration::from_secs(3600)).await;
         });
-        lc.tasks
-            .lock()
-            .unwrap()
-            .insert(acct.account_id, AccountTask { cancel, handle });
+        lc.tasks.lock().unwrap().insert(acct.account_id, task);
 
         lc.logout(acct.account_id)
             .await
@@ -2740,7 +2948,7 @@ pub(crate) mod tests {
         // until `unwedge` is set.
         let unwedge = Arc::new(AtomicBool::new(false));
         let cancel = CancellationToken::new();
-        let handle = tokio::spawn({
+        let task = AccountTask::spawn(&lc.tracker, cancel.clone(), {
             let unwedge = Arc::clone(&unwedge);
             async move {
                 while !unwedge.load(Ordering::SeqCst) {
@@ -2748,10 +2956,7 @@ pub(crate) mod tests {
                 }
             }
         });
-        lc.tasks
-            .lock()
-            .unwrap()
-            .insert(acct.account_id, AccountTask { cancel, handle });
+        lc.tasks.lock().unwrap().insert(acct.account_id, task);
 
         let err = lc.logout(acct.account_id).await.unwrap_err();
         assert!(matches!(err, LifecycleError::Draining(id) if id == acct.account_id));
@@ -2811,7 +3016,7 @@ pub(crate) mod tests {
         // sever wedges and logout returns `Draining`.
         let unwedge = Arc::new(AtomicBool::new(false));
         let cancel = CancellationToken::new();
-        let handle = tokio::spawn({
+        let task = AccountTask::spawn(&lc.tracker, cancel.clone(), {
             let unwedge = Arc::clone(&unwedge);
             async move {
                 while !unwedge.load(Ordering::SeqCst) {
@@ -2819,10 +3024,7 @@ pub(crate) mod tests {
                 }
             }
         });
-        lc.tasks
-            .lock()
-            .unwrap()
-            .insert(acct.account_id, AccountTask { cancel, handle });
+        lc.tasks.lock().unwrap().insert(acct.account_id, task);
 
         let err = lc.logout(acct.account_id).await.unwrap_err();
         assert!(matches!(err, LifecycleError::Draining(id) if id == acct.account_id));
@@ -2976,7 +3178,7 @@ pub(crate) mod tests {
 
         let drained = Arc::new(AtomicBool::new(false));
         let cancel = CancellationToken::new();
-        let handle = tokio::spawn({
+        let task = AccountTask::spawn(&lc.tracker, cancel.clone(), {
             let cancel = cancel.clone();
             let drained = Arc::clone(&drained);
             async move {
@@ -2985,10 +3187,7 @@ pub(crate) mod tests {
                 drained.store(true, Ordering::SeqCst);
             }
         });
-        lc.tasks
-            .lock()
-            .unwrap()
-            .insert(acct.account_id, AccountTask { cancel, handle });
+        lc.tasks.lock().unwrap().insert(acct.account_id, task);
 
         lc.delete(acct.account_id).await.expect("delete succeeds");
 
@@ -3027,7 +3226,7 @@ pub(crate) mod tests {
         // No await points: survives both cancel and abort until `unwedge` is set.
         let unwedge = Arc::new(AtomicBool::new(false));
         let cancel = CancellationToken::new();
-        let handle = tokio::spawn({
+        let task = AccountTask::spawn(&lc.tracker, cancel.clone(), {
             let unwedge = Arc::clone(&unwedge);
             async move {
                 while !unwedge.load(Ordering::SeqCst) {
@@ -3035,10 +3234,7 @@ pub(crate) mod tests {
                 }
             }
         });
-        lc.tasks
-            .lock()
-            .unwrap()
-            .insert(acct.account_id, AccountTask { cancel, handle });
+        lc.tasks.lock().unwrap().insert(acct.account_id, task);
 
         let err = lc.delete(acct.account_id).await.unwrap_err();
         assert!(matches!(err, LifecycleError::Draining(id) if id == acct.account_id));
@@ -3125,17 +3321,14 @@ pub(crate) mod tests {
             .await;
 
         let cancel = CancellationToken::new();
-        let handle = tokio::spawn({
+        let task = AccountTask::spawn(&lc.tracker, cancel.clone(), {
             let cancel = cancel.clone();
             async move {
                 cancel.cancelled().await;
             }
         });
         cancel.cancel();
-        lc.tasks
-            .lock()
-            .unwrap()
-            .insert(acct.account_id, AccountTask { cancel, handle });
+        lc.tasks.lock().unwrap().insert(acct.account_id, task);
 
         let summary = lc
             .redecrypt_utds(acct.account_id)
@@ -3169,16 +3362,13 @@ pub(crate) mod tests {
             .await;
 
         let cancel = CancellationToken::new();
-        let handle = tokio::spawn({
+        let task = AccountTask::spawn(&lc.tracker, cancel.clone(), {
             let cancel = cancel.clone();
             async move {
                 cancel.cancelled().await;
             }
         });
-        lc.tasks
-            .lock()
-            .unwrap()
-            .insert(acct.account_id, AccountTask { cancel, handle });
+        lc.tasks.lock().unwrap().insert(acct.account_id, task);
 
         let lock = lc.lock_for(&user, hs);
         let guard = lock.lock().await;
