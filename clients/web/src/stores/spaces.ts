@@ -36,7 +36,8 @@ export interface SpacesStore {
   visible: ReadonlySignal<readonly RoomDto[]>
   subspaces: ReadonlySignal<ReadonlyMap<string, readonly string[]>>
   nested: ReadonlySignal<ReadonlySet<string>>
-  expanded: Signal<ReadonlySet<string>>
+  expanded: ReadonlySignal<ReadonlySet<string>>
+  setExpanded(path: string, isExpanded: boolean): void
   /** Total unread notifications across distinct reachable joined chat rooms. */
   unread: ReadonlySignal<ReadonlyMap<string, number>>
   /** Joined chat room keys in the selected space, once its graph is known. */
@@ -191,9 +192,10 @@ export function createSpacesStore(
   live: LiveConnection,
   accountFilter: Signal<string> = signal('all'),
   accounts?: Pick<AccountsStore, 'accounts' | 'loading' | 'error'>,
+  expandedPaths: Signal<readonly string[]> = signal([]),
 ): SpacesStore {
   const selected = signal<string | null>(null)
-  const expanded = signal<ReadonlySet<string>>(new Set())
+  const expanded = computed(() => new Set(expandedPaths.value))
   const reordering = signal(false)
   const effectiveAccountFilter = computed(() => {
     const saved = accountFilter.value
@@ -569,6 +571,13 @@ export function createSpacesStore(
     subspaces: computed(() => projection.value.subspaces),
     nested: computed(() => projection.value.nested),
     expanded,
+    setExpanded: (path, isExpanded) => {
+      if (expanded.peek().has(path) === isExpanded) return
+      const paths = expandedPaths.peek()
+      expandedPaths.value = isExpanded
+        ? [...paths, path]
+        : paths.filter((candidate) => candidate !== path)
+    },
     unread,
     selectedRooms,
     parents: computed(() => projection.value.parents),
@@ -582,7 +591,6 @@ export function createSpacesStore(
     },
     resetSession: () => {
       for (const accountId of knownSpaces.keys()) removeAccount(accountId)
-      if (expanded.peek().size > 0) expanded.value = new Set()
       if (selected.peek() !== null) selected.value = null
     },
   }

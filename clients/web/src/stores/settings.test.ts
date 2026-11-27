@@ -79,6 +79,7 @@ describe('createSettingsStore', () => {
       activeAccountId: null,
       pinnedRooms: [],
       spaceOrder: [],
+      expandedSpacePaths: [],
       spacesPaneCollapsed: false,
       spacesPaneAutoHide: true,
       showSpaceNames: false,
@@ -195,6 +196,20 @@ describe('room-list settings (ADRs 0038/0042)', () => {
     expect(store.roomSort.value).toBe('recent')
     expect(store.roomFilter.value).toBe('all')
     expect(store.theme.value).toBe('dark')
+  })
+
+  it('restores expanded space paths from local settings', () => {
+    const storage = memoryStorage()
+    const store = createSettingsStore(storage)
+    const otherTab = createSettingsStore(storage)
+    expect(store.expandedSpacePaths.value).toEqual([])
+    const paths = [
+      '"account/!root:hs"',
+      '"account/!root:hs"/"account/!child:hs"',
+    ]
+    store.expandedSpacePaths.value = paths
+    otherTab.theme.value = 'dark'
+    expect(createSettingsStore(storage).expandedSpacePaths.value).toEqual(paths)
   })
 
   it('persists browser-local space ordering', () => {

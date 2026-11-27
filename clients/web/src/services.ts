@@ -2020,6 +2020,7 @@ export function createServices(
     live,
     settings.roomAccountFilter,
     accounts,
+    settings.expandedSpacePaths,
   )
   const roomDetails = createRoomDetailsStore(api, live)
   const invites = createInvitesStore(api, rooms)

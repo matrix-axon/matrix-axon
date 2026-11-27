@@ -168,6 +168,14 @@ test('expands a joined subspace and filters its deduplicated rooms', async ({
     `/v1/accounts/${ACCOUNT_ID}/spaces/discovered`,
     `/v1/accounts/${ACCOUNT_ID}/spaces/graph`,
   ])
+
+  await page.reload()
+  await expect(expand).toHaveAttribute('aria-expanded', 'false')
+  await expect(child).toHaveCount(0)
+  await expand.click()
+  await expect(grandchild).toBeVisible()
+  await page.reload()
+  await expect(grandchild).toBeVisible()
 })
 
 test('space names are optional and remembered on desktop and tablet widths', async ({

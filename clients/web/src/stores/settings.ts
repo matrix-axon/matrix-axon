@@ -82,6 +82,8 @@ export interface SettingsV1 {
   pinnedRooms: string[]
   /** Personal ordering for the joined-space picker, keyed like pinned rooms. */
   spaceOrder: string[]
+  /** Expanded picker paths, scoped by the account keys in each path. */
+  expandedSpacePaths: readonly string[]
   /** Whether the desktop sidebar hides the spaces avatar rail. */
   spacesPaneCollapsed: boolean
   /** Keep the rail hidden while there is no meaningful space choice. */
@@ -247,6 +249,7 @@ const DEFAULTS: SettingsV1 = {
   activeAccountId: null,
   pinnedRooms: [],
   spaceOrder: [],
+  expandedSpacePaths: [],
   spacesPaneCollapsed: false,
   spacesPaneAutoHide: true,
   showSpaceNames: false,
@@ -397,6 +400,11 @@ function parse(
     spaceOrder: Array.isArray(v1.spaceOrder)
       ? v1.spaceOrder.filter((key): key is string => typeof key === 'string')
       : [],
+    expandedSpacePaths: Array.isArray(v1.expandedSpacePaths)
+      ? v1.expandedSpacePaths.filter(
+          (path): path is string => typeof path === 'string',
+        )
+      : [],
     spacesPaneCollapsed:
       typeof v1.spacesPaneCollapsed === 'boolean'
         ? v1.spacesPaneCollapsed
@@ -535,6 +543,7 @@ export interface SettingsStore {
   activeAccountId: Signal<string | null>
   pinnedRooms: Signal<string[]>
   spaceOrder: Signal<string[]>
+  expandedSpacePaths: Signal<readonly string[]>
   spacesPaneCollapsed: Signal<boolean>
   spacesPaneAutoHide: Signal<boolean>
   showSpaceNames: Signal<boolean>
@@ -610,6 +619,7 @@ export function createSettingsStore(
   const activeAccountId = signal<string | null>(initial.activeAccountId)
   const pinnedRooms = signal<string[]>(initial.pinnedRooms)
   const spaceOrder = signal<string[]>(initial.spaceOrder)
+  const expandedSpacePaths = signal(initial.expandedSpacePaths)
   const spacesPaneCollapsed = signal<boolean>(initial.spacesPaneCollapsed)
   const spacesPaneAutoHide = signal<boolean>(initial.spacesPaneAutoHide)
   const showSpaceNames = signal(initial.showSpaceNames)
@@ -671,6 +681,7 @@ export function createSettingsStore(
       activeAccountId: activeAccountId.value,
       pinnedRooms: pinnedRooms.value,
       spaceOrder: spaceOrder.value,
+      expandedSpacePaths: expandedSpacePaths.value,
       spacesPaneCollapsed: spacesPaneCollapsed.value,
       spacesPaneAutoHide: spacesPaneAutoHide.value,
       showSpaceNames: showSpaceNames.value,
@@ -723,6 +734,7 @@ export function createSettingsStore(
     activeAccountId,
     pinnedRooms,
     spaceOrder,
+    expandedSpacePaths,
     spacesPaneCollapsed,
     spacesPaneAutoHide,
     showSpaceNames,

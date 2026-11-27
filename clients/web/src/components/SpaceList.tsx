@@ -168,12 +168,7 @@ export function SpaceList() {
                   aria-expanded={expanded}
                   aria-label={`${expanded ? 'Collapse' : 'Expand'} ${title} subspaces`}
                   title={`${expanded ? 'Collapse' : 'Expand'} ${title} subspaces`}
-                  onClick={() => {
-                    const paths = new Set(spaces.expanded.value)
-                    if (expanded) paths.delete(path)
-                    else paths.add(path)
-                    spaces.expanded.value = paths
-                  }}
+                  onClick={() => spaces.setExpanded(path, !expanded)}
                 >
                   <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
                 </button>

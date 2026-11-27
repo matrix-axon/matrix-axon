@@ -477,7 +477,7 @@ it('expands joined branches in Matrix order while keeping saved root order', asy
     otherRoot,
     SPACE,
   ])
-  store.expanded.value = new Set(entries().map(({ path }) => path))
+  for (const { path } of entries()) store.setExpanded(path, true)
   expect(entries().map(({ space }) => space.room_id)).toEqual([
     otherRoot,
     early,
@@ -518,7 +518,8 @@ it('cuts picker cycles and keeps every space reachable and selectable', async ()
   await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
   const entries = () => spacePickerEntries(store, [], new Map())
   expect(entries().map(({ space }) => space.room_id)).toEqual([second])
-  store.expanded.value = new Set([entries()[0].path])
+  const rootPath = entries()[0].path
+  store.setExpanded(rootPath, true)
   expect(entries().map(({ space }) => space.room_id)).toEqual([second, SPACE])
   expect(entries()[1].expandable).toBe(false)
   store.selected.value = key(second)
@@ -526,6 +527,9 @@ it('cuts picker cycles and keeps every space reachable and selectable', async ()
   counts.value = new Map([[key(leaf), 4]])
   expect(store.unread.value.get(key(SPACE))).toBe(4)
   expect(store.unread.value.get(key(second))).toBe(4)
+  store.resetSession()
+  expect(store.selected.value).toBeNull()
+  expect(store.expanded.value).toEqual(new Set([rootPath]))
 })
 
 it('reloads account graph pages after invalidation during pagination and removes dropped links', async () => {

@@ -259,6 +259,7 @@ export function testServices(
     live,
     settings.roomAccountFilter,
     accounts,
+    settings.expandedSpacePaths,
   )
   const roomDetails = createRoomDetailsStore(api, live)
   const updates = createUpdateChecker({
