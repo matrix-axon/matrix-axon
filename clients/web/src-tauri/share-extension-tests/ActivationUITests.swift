@@ -30,6 +30,19 @@ final class ActivationUITests: XCTestCase {
       predicate: NSPredicate(format: format), object: element)
     return XCTWaiter.wait(for: [condition], timeout: timeout ?? uiTimeout) == .completed
   }
+  /// Taps a text field and waits for keyboard focus before the caller types.
+  /// On a loaded runner (CI run 46078372331) the tap placed the cursor but the
+  /// software keyboard never appeared, and typeText failed three times with
+  /// "Neither element nor any descendant has keyboard focus". Tap again
+  /// instead of typing blind.
+  private func focus(_ field: XCUIElement, app: XCUIApplication) {
+    for attempt in 1...3 {
+      field.tap()
+      if waitFor(field, "hasKeyboardFocus == true", timeout: 10) { return }
+      print("[focus] tap \(attempt) left \(field.identifier) without keyboard focus")
+    }
+    XCTFail("\(field.identifier) never took keyboard focus\n\(app.debugDescription)")
+  }
   private func showAllActivities(_ app: XCUIApplication) {
     let more = app.descendants(matching: .any)
       .matching(NSPredicate(format: "label == 'More' OR label == 'More Apps'")).firstMatch
@@ -158,7 +171,7 @@ final class ActivationUITests: XCTestCase {
     let original = filename.value as? String ?? ""
     XCTAssertFalse(original.isEmpty)
     XCTAssertFalse(app.staticTexts["ready"].exists)
-    filename.tap()
+    focus(filename, app: app)
     XCTAssertTrue(app.navigationBars["Share to Axon"].exists)
     XCTAssertFalse(app.navigationBars["Rename photo"].exists)
     filename.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: original.count) + "Coast holiday.heic")
@@ -186,7 +199,7 @@ final class ActivationUITests: XCTestCase {
     let master = app.textViews["share-master-caption"]
     XCTAssertTrue(master.waitForExistence(timeout: uiTimeout))
     reveal(master, app: app)
-    master.tap()
+    focus(master, app: app)
     master.typeText("Together")
     app.buttons["share-photo-caption-done"].tap()
     let fields = app.textViews.matching(NSPredicate(format: "identifier BEGINSWITH 'share-photo-caption-'"))
@@ -290,7 +303,7 @@ final class ActivationUITests: XCTestCase {
     let first = app.textViews[firstID]
     reveal(first, app: app)
     XCTAssertLessThanOrEqual(first.frame.height, 45)
-    first.tap()
+    focus(first, app: app)
     XCTAssertEqual(first.value as? String ?? "", "")
     first.typeText("First coast\nSecond line")
     app.buttons["share-photo-caption-done"].tap()
@@ -299,7 +312,7 @@ final class ActivationUITests: XCTestCase {
     reveal(other, app: app)
     let secondID = other.identifier
     let second = app.textViews[secondID]
-    second.tap()
+    focus(second, app: app)
     XCTAssertEqual(second.value as? String ?? "", "")
     second.typeText("Second mountain")
     app.buttons["share-photo-caption-done"].tap()
