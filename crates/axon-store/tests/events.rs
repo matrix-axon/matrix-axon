@@ -539,6 +539,9 @@ async fn room_timeline_reports_the_latest_redactions_arrival_order() {
         Some(second.as_str())
     );
     assert_eq!(redacted.redaction_arrival_order, Some(second_arrival));
+    // ADR 0089's amendment rests on this: a redaction arrives above the row it
+    // redacted, so naming it acknowledges more than the row did.
+    assert!(redacted.id < second_arrival);
 
     let untouched = timeline
         .iter()

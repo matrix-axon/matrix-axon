@@ -3221,6 +3221,87 @@ mod tests {
 
     use super::*;
 
+    fn redacted_row() -> TimelineRow {
+        TimelineRow {
+            id: 10,
+            event_id: "$gone:localhost".into(),
+            room_id: "!room:localhost".into(),
+            sender: "@alice:localhost".into(),
+            state_key: None,
+            prev_content: None,
+            origin_ts: 1_700_000_000_000,
+            event_type: "m.room.message".into(),
+            content: None,
+            decrypted_body_text: None,
+            relates_to: None,
+            redacts: None,
+            redaction_event_id: Some("$redaction:localhost".into()),
+            redaction_arrival_order: Some(42),
+            sender_trust: None,
+            utd_reason: None,
+            edited: false,
+            edit_count: 0,
+            latest_edit_ts: None,
+            reactions: None,
+        }
+    }
+
+    /// A timeline row carries its folded redaction's arrival order onto the
+    /// wire next to the redaction id (#1273).
+    #[test]
+    fn a_redacted_row_reports_its_redactions_arrival_order() {
+        let dto = EventDto::from_row(Uuid::nil(), redacted_row());
+        assert!(dto.redacted);
+        assert_eq!(
+            dto.redaction_event_id.as_deref(),
+            Some("$redaction:localhost")
+        );
+        assert_eq!(dto.redaction_arrival_order, Some(42));
+        let wire = serde_json::to_value(&dto).unwrap();
+        assert_eq!(wire["redaction_arrival_order"], 42);
+
+        let plain = EventDto::from_row(
+            Uuid::nil(),
+            TimelineRow {
+                redaction_event_id: None,
+                redaction_arrival_order: None,
+                ..redacted_row()
+            },
+        );
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap()["redaction_arrival_order"],
+            Value::Null
+        );
+    }
+
+    /// A live `/v1/ws` frame is never already redacted, so it reports no
+    /// redaction position.
+    #[test]
+    fn a_live_frame_reports_no_redaction_arrival_order() {
+        let dto = EventDto::from(axon_core::LiveEvent {
+            account_id: Uuid::nil(),
+            event_id: "$live:localhost".into(),
+            room_id: "!room:localhost".into(),
+            sender: "@alice:localhost".into(),
+            state_key: None,
+            prev_content: None,
+            origin_ts: 1_700_000_000_000,
+            arrival_order: 11,
+            event_type: "m.room.message".into(),
+            content: Some(json!({"body": "hi"})),
+            body: Some("hi".into()),
+            relates_to: None,
+            sender_trust: None,
+            utd_reason: None,
+        });
+        assert_eq!(dto.redaction_event_id, None);
+        assert_eq!(dto.redaction_arrival_order, None);
+        assert_eq!(
+            serde_json::to_value(&dto).unwrap()["redaction_arrival_order"],
+            Value::Null
+        );
+    }
+
     fn edit_error(entry: serde_json::Value) -> String {
         serde_json::from_value::<EditRequest>(
             json!({"body": "https://a.example/", "url_previews": [entry]}),
