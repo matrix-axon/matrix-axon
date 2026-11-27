@@ -144,7 +144,9 @@ enum TerminalOutcome {
 /// once terminal — the retained outcome plus when it became terminal (for TTL
 /// eviction). The live objects are what `get`/`list` re-derive state from.
 pub(crate) struct FlowEntry {
-    request: VerificationRequest,
+    // Live SDK handles are cleared on termination so the replay window
+    // cannot keep the account's client and SQLite store alive.
+    request: Option<VerificationRequest>,
     sas: Option<SasVerification>,
     /// The user being verified — own user id (self-verification) or the peer's
     /// (cross-user, ADR 0040).
@@ -622,9 +624,11 @@ pub(crate) async fn cancel_account_flows(registry: &FlowRegistry, account_id: Uu
     let handles: Vec<(String, JoinHandle<()>)> = {
         let mut reg = registry.lock().expect("flow registry poisoned");
         reg.iter_mut()
-            .filter(|((aid, _), entry)| *aid == account_id && entry.terminal.is_none())
+            .filter(|((aid, _), _)| *aid == account_id)
             .filter_map(|((_, flow_id), entry)| {
-                entry.driver_cancel.cancel();
+                if entry.terminal.is_none() {
+                    entry.driver_cancel.cancel();
+                }
                 entry.driver_handle.take().map(|h| (flow_id.clone(), h))
             })
             .collect()
@@ -820,8 +824,8 @@ fn snapshot_from_sas(
 
 /// Re-derive a flow's replayable state from its live SDK object, or its retained
 /// terminal outcome.
-fn snapshot(entry: &FlowEntry) -> FlowState {
-    let flow_id = entry.request.flow_id().to_owned();
+fn snapshot(flow_id: &str, entry: &FlowEntry) -> FlowState {
+    let flow_id = flow_id.to_owned();
     let target_user_id = entry.target_user_id.clone();
     let target_device_id = entry.target_device_id.clone();
 
@@ -841,19 +845,20 @@ fn snapshot(entry: &FlowEntry) -> FlowState {
         };
     }
 
+    let request = entry.request.as_ref().expect("live verification request");
     if let Some(sas) = &entry.sas {
         snapshot_from_sas(flow_id, target_user_id, target_device_id, sas)
-    } else if let Some(sas) = sas_from_request(&entry.request) {
+    } else if let Some(sas) = sas_from_request(request) {
         snapshot_from_sas(flow_id, target_user_id, target_device_id, &sas)
     } else {
         FlowState {
             flow_id,
             target_user_id,
             target_device_id,
-            stage: flow_stage_from_request_without_sas(&entry.request.state()),
+            stage: flow_stage_from_request_without_sas(&request.state()),
             emoji: None,
             decimals: None,
-            cancel_reason: entry.request.cancel_info().map(|c| c.reason().to_owned()),
+            cancel_reason: request.cancel_info().map(|c| c.reason().to_owned()),
         }
     }
 }
@@ -904,6 +909,8 @@ fn mark_terminal(registry: &FlowRegistry, key: &(Uuid, String), outcome: Termina
         .expect("flow registry poisoned")
         .get_mut(key)
     {
+        entry.request = None;
+        entry.sas = None;
         entry.terminal = Some(outcome);
         entry.terminal_at = Some(Instant::now());
         entry.room_id.is_some()
@@ -983,7 +990,7 @@ pub(crate) async fn on_incoming_request(
         reg.insert(
             key.clone(),
             FlowEntry {
-                request: request.clone(),
+                request: Some(request.clone()),
                 sas: None,
                 target_user_id: target_user_id.clone(),
                 target_device_id: Some(target_device_id.clone()),
@@ -1146,7 +1153,7 @@ pub(crate) async fn on_incoming_room_request(
         reg.insert(
             registry_key.clone(),
             FlowEntry {
-                request: request.clone(),
+                request: Some(request.clone()),
                 sas: None,
                 target_user_id: target_user_id.clone(),
                 target_device_id: target_device_id.clone(),
@@ -1529,6 +1536,7 @@ async fn adopt_sas(
         .lock()
         .expect("flow registry poisoned")
         .get_mut(key)
+        .filter(|entry| entry.terminal.is_none())
     {
         entry.sas = Some(sas.clone());
     }
@@ -1897,7 +1905,7 @@ impl VerificationEngine {
         }
         let client = self
             .manager
-            .get_or_connect(account.account_id)
+            .get_or_connect_unleased(account.account_id)
             .await
             .map_err(|e| match e {
                 GatewayError::UnknownAccount(id) => VerifyError::NotFound(id),
@@ -2019,7 +2027,7 @@ impl VerificationEngine {
             reg.insert(
                 key.clone(),
                 FlowEntry {
-                    request: request.clone(),
+                    request: Some(request.clone()),
                     sas: None,
                     target_user_id: target_user_id.clone(),
                     target_device_id: target_device_id.clone(),
@@ -2076,7 +2084,7 @@ impl VerificationEngine {
         Ok(reg
             .iter()
             .filter(|((aid, _), _)| *aid == account_id)
-            .map(|(_, entry)| snapshot(entry))
+            .map(|((_, flow_id), entry)| snapshot(flow_id, entry))
             .collect())
     }
 
@@ -2097,7 +2105,7 @@ impl VerificationEngine {
         }
         let reg = self.registry.lock().expect("flow registry poisoned");
         reg.get(&(account_id, flow_id.to_owned()))
-            .map(snapshot)
+            .map(|entry| snapshot(flow_id, entry))
             .ok_or_else(|| VerifyError::FlowNotFound(flow_id.to_owned()))
     }
 
@@ -2234,7 +2242,10 @@ impl VerificationEngine {
             if entry.terminal.is_some() {
                 return Ok(());
             }
-            (entry.sas.clone(), entry.request.clone())
+            (
+                entry.sas.clone(),
+                entry.request.clone().expect("live verification request"),
+            )
         };
         // Cancel via the SAS object if there is one, else the request. A send
         // failure is only safe to swallow when the flow is *already* terminal (it

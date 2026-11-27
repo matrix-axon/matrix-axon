@@ -562,7 +562,7 @@ pub async fn space_hierarchy(
     // Postgres `TEXT` rejects a NUL, so a `%00` in the path would otherwise
     // become a 500 from the query. Other controls cannot be in a room id.
     // Issue 932 moves this check into a shared extractor for every room route.
-    if room_id.bytes().any(|b| b < 0x20 || b == 0x7f) {
+    if crate::extract::room_id_has_control_character(&room_id) {
         return Err(ApiError::bad_request("invalid room id"));
     }
     let after = q
@@ -680,7 +680,7 @@ pub async fn room_discovery(
     Path((account_id, room_id)): Path<(Uuid, String)>,
 ) -> Result<ApiResponse<RoomDiscoveryDto>, ApiError> {
     // As in `space_hierarchy`: a NUL would otherwise be a 500 (issue 932).
-    if room_id.bytes().any(|b| b < 0x20 || b == 0x7f) {
+    if crate::extract::room_id_has_control_character(&room_id) {
         return Err(ApiError::bad_request("invalid room id"));
     }
     let snapshot = store.room_summary_snapshot(account_id, &room_id).await?;

@@ -13,6 +13,26 @@ use serde::de::DeserializeOwned;
 
 use crate::response::ApiError;
 
+pub(crate) const MAX_MATRIX_ROOM_ID_BYTES: usize = 255;
+
+/// Older room routes accept unknown IDs, but control characters cannot
+/// occur in a Matrix room ID and PostgreSQL rejects NUL in a text argument.
+pub(crate) fn room_id_has_control_character(room_id: &str) -> bool {
+    room_id.bytes().any(|byte| byte.is_ascii_control())
+}
+
+/// A bounded room ID for use in a keyset cursor. Kept compatible with cursors
+/// issued by the older hierarchy and joined-graph endpoints.
+pub(crate) fn room_id_fits_cursor(room_id: &str) -> bool {
+    room_id.len() <= MAX_MATRIX_ROOM_ID_BYTES && !room_id.contains('\0')
+}
+
+pub(crate) fn valid_space_browse_room_id(room_id: &str) -> bool {
+    room_id.starts_with('!')
+        && room_id_fits_cursor(room_id)
+        && !room_id_has_control_character(room_id)
+}
+
 /// Drop-in replacement for [`axum::extract::Path`] whose rejection is an
 /// [`ApiError`] (`400`) rather than axum's default plain-text body.
 pub struct Path<T>(pub T);

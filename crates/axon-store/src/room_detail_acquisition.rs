@@ -99,16 +99,18 @@ pub enum DetailWrite {
 }
 
 /// The room's membership epoch while the account is active and joined.
-/// `$1` is the account, `$2` the room.
-pub(crate) const JOINED_EPOCH: &str = "SELECT s.membership_epoch FROM room_summaries s \
+/// `$1` is the account. `room_id` is a SQL expression supplied by the caller.
+pub(crate) fn joined_epoch_sql(room_id: &str) -> String {
+    format!("SELECT s.membership_epoch FROM room_summaries s \
     JOIN accounts ac ON ac.account_id = s.account_id \
-    WHERE s.account_id = $1 AND s.room_id = $2 AND NOT s.hidden_left AND ac.state = 'active' \
+    WHERE s.account_id = $1 AND s.room_id = {room_id} AND NOT s.hidden_left AND ac.state = 'active' \
       AND EXISTS (SELECT 1 FROM room_state m WHERE m.account_id = s.account_id \
           AND m.room_id = s.room_id AND m.event_type = 'm.room.member' \
           AND m.state_key = ac.user_id AND m.content->>'membership' = 'join' \
           AND m.redacted IS DISTINCT FROM true) \
       AND NOT EXISTS (SELECT 1 FROM room_upstream_reconcile r \
-          WHERE r.account_id = s.account_id AND r.room_id = s.room_id AND r.state = 'gone')";
+          WHERE r.account_id = s.account_id AND r.room_id = s.room_id AND r.state = 'gone')")
+}
 
 pub(crate) const NOW_MS: &str = "floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint";
 
@@ -196,7 +198,7 @@ impl Store {
         account_id: Uuid,
         room_id: &str,
     ) -> Result<Option<i64>, StoreError> {
-        let epoch: Option<(i64,)> = sqlx_core::query_as::query_as(JOINED_EPOCH)
+        let epoch: Option<(i64,)> = sqlx_core::query_as::query_as(&joined_epoch_sql("$2"))
             .bind(account_id)
             .bind(room_id)
             .fetch_optional(&self.pool)
@@ -262,7 +264,7 @@ impl Store {
         debug_assert_eq!(kind == DetailKind::Absence, !state_type.is_empty());
         let mut tx = self.reconciliation_transaction().await?;
         let current: Option<(i64,)> =
-            sqlx_core::query_as::query_as(&format!("{JOINED_EPOCH} FOR SHARE OF s"))
+            sqlx_core::query_as::query_as(&format!("{} FOR SHARE OF s", joined_epoch_sql("$2")))
                 .bind(account_id)
                 .bind(room_id)
                 .fetch_optional(&mut *tx)

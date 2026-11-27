@@ -25,7 +25,7 @@ use tracing::instrument::WithSubscriber;
 use uuid::Uuid;
 
 use crate::{
-    homeserver_gate::{outcome_of, HomeserverGate},
+    homeserver_gate::HomeserverGate,
     lifecycle::{lock_for, IdentityLocks},
     manager::ClientManager,
     room_details::RoomDetailsChanges,
@@ -671,20 +671,11 @@ impl AccountWatch {
         }
         // Prime the roster explicitly, so failures are visible and the SDK's
         // initial room subscription normally does local work only.
-        if !room.are_members_synced() {
-            let permit = self
-                .gate
-                .acquire_briefly(MEMBER_SYNC_TIMEOUT, MEMBER_SYNC_ADMISSION_WAIT)
-                .await?;
-            // An independent SDK operation can hydrate while we wait for the
-            // gate. Drop that unused permit without recording a network success.
-            if !room.are_members_synced() {
-                let result = tokio::time::timeout(MEMBER_SYNC_TIMEOUT, room.sync_members()).await;
-                permit.finish(outcome_of(&result));
-                result.ok()?.ok()?;
-            }
-        }
-        if !room.are_members_synced() {
+        if !self
+            .gate
+            .ensure_room_members(room, MEMBER_SYNC_TIMEOUT, MEMBER_SYNC_ADMISSION_WAIT)
+            .await
+        {
             return None;
         }
         // Subscribe before reading the fallible snapshot so later changes are

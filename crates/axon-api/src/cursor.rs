@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::extract::{room_id_fits_cursor, valid_space_browse_room_id};
+
 /// Upper bound on the encoded length of any cursor we'll even attempt to decode.
 /// Every cursor this module emits is the base64url of a short decimal string, so
 /// anything materially longer is malformed (or hostile) — reject it before we
@@ -149,9 +151,6 @@ const MAX_HIERARCHY_ENCODED_LEN: usize = 4096;
 /// The store treats any other `order` as absent, so it never issues one.
 const MAX_HIERARCHY_ORDER_LEN: usize = 50;
 
-/// The store pages only children whose room id fits Matrix's 255-byte limit.
-const MAX_HIERARCHY_ROOM_ID_BYTES: usize = 255;
-
 /// Wire form of a [`SpaceHierarchyCursor`]. `s` binds the cursor to the
 /// account and space it was issued for, so a cursor from another space is
 /// rejected instead of silently paging that space from an unrelated key.
@@ -215,7 +214,7 @@ pub fn decode_hierarchy(
     let order_ok = wire.o.as_deref().is_none_or(|o| {
         o.len() <= MAX_HIERARCHY_ORDER_LEN && o.bytes().all(|b| (0x20..=0x7e).contains(&b))
     });
-    let room_ok = wire.r.len() <= MAX_HIERARCHY_ROOM_ID_BYTES && !wire.r.contains('\0');
+    let room_ok = room_id_fits_cursor(&wire.r);
     (order_ok && room_ok && wire.s == hierarchy_scope(account_id, space_room_id)).then_some(
         SpaceHierarchyCursor {
             order: wire.o,
@@ -223,6 +222,35 @@ pub fn decode_hierarchy(
             room_id: wire.r,
         },
     )
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpaceBrowseCursorWire {
+    scope: String,
+    parent: String,
+    child: String,
+}
+
+pub fn encode_space_browse(account_id: Uuid, root: &str, parent: &str, child: &str) -> String {
+    let wire = SpaceBrowseCursorWire {
+        scope: hierarchy_scope(account_id, root),
+        parent: parent.to_owned(),
+        child: child.to_owned(),
+    };
+    URL_SAFE_NO_PAD.encode(serde_json::to_vec(&wire).expect("space browse cursor serializes"))
+}
+
+pub fn decode_space_browse(account_id: Uuid, root: &str, cursor: &str) -> Option<(String, String)> {
+    if cursor.len() > MAX_HIERARCHY_ENCODED_LEN {
+        return None;
+    }
+    let bytes = URL_SAFE_NO_PAD.decode(cursor).ok()?;
+    let wire: SpaceBrowseCursorWire = serde_json::from_slice(&bytes).ok()?;
+    (wire.scope == hierarchy_scope(account_id, root)
+        && valid_space_browse_room_id(&wire.parent)
+        && valid_space_browse_room_id(&wire.child))
+    .then_some((wire.parent, wire.child))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -250,9 +278,7 @@ pub fn decode_space_graph(account_id: Uuid, cursor: &str) -> Option<SpaceGraphKe
     }
     let bytes = URL_SAFE_NO_PAD.decode(cursor).ok()?;
     let wire: SpaceGraphCursorWire = serde_json::from_slice(&bytes).ok()?;
-    let valid_room = |id: &str| {
-        id.starts_with('!') && id.len() <= MAX_HIERARCHY_ROOM_ID_BYTES && !id.contains('\0')
-    };
+    let valid_room = |id: &str| id.starts_with('!') && room_id_fits_cursor(id);
     if wire.a != account_id || !valid_room(&wire.r) || !valid_room(&wire.k) {
         return None;
     }

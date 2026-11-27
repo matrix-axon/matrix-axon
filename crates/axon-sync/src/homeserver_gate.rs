@@ -46,7 +46,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
-use matrix_sdk::{Client, HttpError};
+use matrix_sdk::{Client, HttpError, Room};
 use tokio::sync::Notify;
 use tokio::time::error::Elapsed;
 use tokio::time::Instant;
@@ -486,6 +486,28 @@ impl HomeserverGate {
             return self.try_acquire(timeout);
         }
         tokio::time::timeout(wait, self.acquire(timeout)).await.ok()
+    }
+
+    /// Complete a lazy SDK room roster under the homeserver's load gate.
+    pub(crate) async fn ensure_room_members(
+        self: &Arc<Self>,
+        room: &Room,
+        timeout: Duration,
+        admission_wait: Duration,
+    ) -> bool {
+        if room.are_members_synced() {
+            return true;
+        }
+        let Some(permit) = self.acquire_briefly(timeout, admission_wait).await else {
+            return false;
+        };
+        // Another SDK operation may have hydrated it while we waited.
+        if room.are_members_synced() {
+            return true;
+        }
+        let result = tokio::time::timeout(timeout, room.sync_members()).await;
+        permit.finish(outcome_of(&result));
+        matches!(result, Ok(Ok(_))) && room.are_members_synced()
     }
 
     /// A permit if one can be had without waiting and nobody is queued.

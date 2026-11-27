@@ -49,6 +49,8 @@ pub enum RoomDetailSource {
     /// `GET …/spaces/graph` for the frame's account: a joined relationship
     /// or the current evidence used to verify it changed.
     SpaceGraph,
+    /// An explicit nested space crawl changed its root's browse cache or status.
+    SpaceBrowse,
 }
 
 /// The order an absence job confirms a room's missing metadata types (ADR
@@ -78,6 +80,8 @@ pub enum RoomDetailJob {
     /// One page of the space's hierarchy crawl (ADR 0128 decision 3); the
     /// job queues the next page itself.
     Hierarchy,
+    /// One page of an explicit nested crawl anchored at a joined space.
+    BrowseHierarchy,
     /// The room summary of one unjoined room a joined space links (ADR 0128
     /// decision 5).
     Summary,

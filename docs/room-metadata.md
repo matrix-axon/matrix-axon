@@ -401,6 +401,18 @@ Because it is unchanged, it still returns the link's raw `order` string, so the 
 It stays for existing clients and will be marked deprecated once the web client, the TUI, and the oversized-space work ([issue 553](https://github.com/matrix-axon/matrix-axon/issues/553)) have moved to `space/hierarchy`.
 The web client's Room Information panel has ([ADR 0133](adr/0133-web-room-information-metadata-and-discovery.md) decision 6); its spaces store, which feeds the space rail and room-list grouping, is the web client's last caller ([issue 1054](https://github.com/matrix-axon/matrix-axon/issues/1054)).
 
+### Nested space browsing
+
+To discover deeper paths, explicitly send `POST /v1/accounts/{account_id}/rooms/{room_id}/space/browse` for a joined space and read the paged cache with `GET` on the same path.
+The browse response reads cached links and crawl progress independently, so a page commit can appear in one before the other.
+Re-read from the first page on a `room_details.changed` frame for the root with source `space_browse`.
+If the frame arrives while a read is in flight, repeat the read after it finishes.
+The cache includes validated links through browsable unjoined spaces and expires six hours after the crawl starts.
+For a joined child, get its details from the synced room list.
+`GET /v1/accounts/{account_id}/spaces/discovered` provides the sidebar with cached pairs of joined spaces and joined descendants through unjoined intermediaries.
+It makes no homeserver calls, including on reconnect and after expiration.
+See [ADR 0128](adr/0128-paged-space-hierarchy-and-unjoined-room-discovery.md#12-explicit-browsing-through-unjoined-spaces).
+
 ## Homeserver details
 
 `GET /v1/accounts/{account_id}/rooms/{room_id}/homeserver_details` returns two details only the account's homeserver knows, from Axon's cache ([ADR 0126](adr/0126-room-detail-acquisition-and-coverage.md) decision 3):
@@ -508,10 +520,13 @@ A `room_details.changed` WebSocket frame tells a client which room or account re
 | `discovery`          | `GET …/discovery`          | The frame's room is an unjoined room whose room-summary request changed its discovery row, the endpoint's `support`, or its failure category                                     |
 | `identity_changes`   | `GET …/info`               | A room member warning appears, changes, or clears. Transitions between `null` and `[]` are visible on read                                                                       |
 | `space_graph`        | `GET …/spaces/graph`       | A space link or the account's join, visibility, or parent-claim evidence changed                                                                                                 |
+| `space_browse`       | `GET …/space/browse`       | An explicit nested crawl updated the frame's joined root. Re-read `GET …/spaces/discovered` for cached sidebar memberships.                                                      |
 
 An acquisition job also publishes its source when it ends if a read reported it as `queued` or `running`, so a panel showing a refresh in progress learns it finished even when nothing changed.
-A job dropped from a full queue publishes its source only if a read had seen it; the panel's next read asks again.
-A crawl's later pages carry the first page's observation, so a client showing a crawl hears when a later page is dropped too, and its next `enrich` read resumes the crawl from its cursor.
+A job dropped from a full queue publishes its source only if a read had seen it.
+The panel's next read asks again for metadata, homeserver details, single-room discovery, or direct hierarchy enrichment as applicable.
+Nested browsing resumes on the next explicit POST.
+A crawl's later pages carry the first page's observation, so a client showing a crawl hears when a later page is dropped and can resume from its saved cursor.
 A page that only re-observes identical summaries publishes nothing until the crawl ends.
 `sources` is never empty and lists sources in the order above; clients must ignore values they do not know.
 The frame is a signal, not a payload: a client never applies a diff from it.

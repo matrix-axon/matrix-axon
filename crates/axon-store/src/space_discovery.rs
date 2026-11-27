@@ -19,7 +19,8 @@ use sqlx_core::row::Row;
 use sqlx_postgres::{PgRow, Postgres};
 use uuid::Uuid;
 
-use crate::room_detail_acquisition::{backoff_ms, JOINED_EPOCH, NOW_MS};
+use crate::room_detail_acquisition::{backoff_ms, joined_epoch_sql, NOW_MS};
+use crate::space_browse::browse_root_epoch_sql;
 use crate::spaces::SPACE_LINK_IS_CURRENT;
 use crate::{Store, StoreError};
 
@@ -136,12 +137,31 @@ pub struct DiscoveredEntry {
     pub summary: Value,
     /// Fields that failed validation, by name.
     pub withheld: Vec<&'static str>,
+    /// Validated child links keyed by child room ID. Populated only for nested browsing.
+    pub children: serde_json::Map<String, Value>,
+}
+
+/// Independent pagination and refresh state for direct previews and explicit browsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HierarchyDepth {
+    Direct,
+    Nested,
+}
+
+impl HierarchyDepth {
+    fn table(self) -> &'static str {
+        match self {
+            Self::Direct => "space_discovery",
+            Self::Nested => "space_browse_crawl",
+        }
+    }
 }
 
 /// The limits a crawl applies (ADR 0128 decision 10), passed in by the
 /// worker that owns them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CrawlLimits {
+    pub depth: HierarchyDepth,
     /// The page limit a crawl starts at.
     pub page_limit: i32,
     pub max_pages: i32,
@@ -159,8 +179,10 @@ pub enum CrawlStep {
     /// A parsed page.
     Page {
         entries: Vec<DiscoveredEntry>,
-        /// Entries skipped whole: no valid room id, or not an object.
+        /// Entries within the limit skipped because they lack a valid room ID.
         unidentified: i32,
+        /// This nested page exceeded the requested room limit.
+        over_limit: bool,
         next_batch: Option<String>,
     },
     /// The body exceeded the byte limit. The crawl's page limit halves and
@@ -215,6 +237,26 @@ pub struct CrawlWrite {
     pub omission_skipped: bool,
     /// The crawl restarted from the first page.
     pub restarted: bool,
+}
+
+#[derive(Clone, Copy)]
+struct CrawlRoot<'a> {
+    account_id: Uuid,
+    space_id: &'a str,
+    depth: HierarchyDepth,
+}
+
+struct ParsedPage<'a> {
+    entries: &'a [DiscoveredEntry],
+    unidentified: i32,
+    over_limit: bool,
+    next_batch: Option<&'a str>,
+}
+
+struct CrawlBackoff {
+    category: &'static str,
+    delay_ms: i64,
+    drop_cursor: bool,
 }
 
 /// The crawl row a write starts from.
@@ -281,6 +323,18 @@ impl Store {
         account_id: Uuid,
         space_id: &str,
     ) -> Result<SpaceCrawlSnapshot, StoreError> {
+        self.hierarchy_crawl_snapshot(account_id, space_id, HierarchyDepth::Direct)
+            .await
+    }
+
+    /// Read the status of the selected crawl without requesting upstream work.
+    pub async fn hierarchy_crawl_snapshot(
+        &self,
+        account_id: Uuid,
+        space_id: &str,
+        depth: HierarchyDepth,
+    ) -> Result<SpaceCrawlSnapshot, StoreError> {
+        let table = depth.table();
         let sql = format!(
             "WITH clock AS (SELECT {NOW_MS} AS now) \
              SELECT generation, outcome, pages, page_limit, rooms_cached, started_at, \
@@ -288,7 +342,7 @@ impl Store {
                     CASE WHEN outcome IN ('complete', 'truncated') \
                          THEN expires_at IS NULL OR expires_at <= clock.now \
                          ELSE next_attempt_at IS NULL OR next_attempt_at <= clock.now END AS due \
-             FROM space_discovery, clock WHERE account_id = $1 AND space_id = $2"
+             FROM {table}, clock WHERE account_id = $1 AND space_id = $2"
         );
         let row: Option<PgRow> = sqlx_core::query::query::<Postgres>(&sql)
             .bind(account_id)
@@ -314,7 +368,10 @@ impl Store {
                 row.try_get::<bool, _>("due")?,
             ),
         };
-        let eligible = self.joined_epoch(account_id, space_id).await?.is_some();
+        let eligible = match depth {
+            HierarchyDepth::Direct => self.joined_epoch(account_id, space_id).await?.is_some(),
+            HierarchyDepth::Nested => self.can_browse_space(account_id, space_id).await?,
+        };
         Ok(SpaceCrawlSnapshot {
             eligible,
             due: eligible && due,
@@ -334,13 +391,14 @@ impl Store {
         limits: CrawlLimits,
     ) -> Result<CrawlBegin, StoreError> {
         let mut tx = self.reconciliation_transaction().await?;
-        if !Self::fence(&mut tx, account_id, space_id, epoch).await? {
+        let table = limits.depth.table();
+        if !Self::fence(&mut tx, account_id, space_id, epoch, limits.depth).await? {
             return Ok(CrawlBegin::Fenced);
         }
         let now = Self::now(&mut tx).await?;
         let sql = format!(
             "SELECT {CRAWL_COLUMNS}, completed_at, expires_at, next_attempt_at \
-             FROM space_discovery WHERE account_id = $1 AND space_id = $2 FOR UPDATE"
+             FROM {table} WHERE account_id = $1 AND space_id = $2 FOR UPDATE"
         );
         let row: Option<PgRow> = sqlx_core::query::query::<Postgres>(&sql)
             .bind(account_id)
@@ -348,10 +406,10 @@ impl Store {
             .fetch_optional(&mut *tx)
             .await?;
         let Some(row) = row else {
-            sqlx_core::query::query(
-                "INSERT INTO space_discovery (account_id, space_id, generation, outcome, \
-                     page_limit, started_at) VALUES ($1, $2, 1, 'in_progress', $3, $4)",
-            )
+            sqlx_core::query::query(&format!(
+                "INSERT INTO {table} (account_id, space_id, generation, outcome, \
+                     page_limit, started_at) VALUES ($1, $2, 1, 'in_progress', $3, $4)"
+            ))
             .bind(account_id)
             .bind(space_id)
             .bind(limits.page_limit)
@@ -379,17 +437,19 @@ impl Store {
                 restarts: crawl.restarts,
             })
         };
+        let resumable = limits.depth == HierarchyDepth::Direct
+            || crawl.started_at.saturating_add(limits.crawl_ttl_ms) > now;
         let begin = match crawl.outcome.as_str() {
-            "in_progress" => resume(&crawl),
+            "in_progress" if resumable => resume(&crawl),
             "failed" if next_attempt_at.is_some_and(|at| at > now) => CrawlBegin::NotDue,
-            "failed" if crawl.cursor.is_some() => {
+            "failed" if resumable && crawl.cursor.is_some() => {
                 // Out of backoff: the same generation goes on from its
                 // cursor. The failure category stays until a page succeeds.
-                sqlx_core::query::query(
-                    "UPDATE space_discovery SET outcome = 'in_progress', expires_at = NULL, \
+                sqlx_core::query::query(&format!(
+                    "UPDATE {table} SET outcome = 'in_progress', expires_at = NULL, \
                          next_attempt_at = NULL \
-                     WHERE account_id = $1 AND space_id = $2",
-                )
+                     WHERE account_id = $1 AND space_id = $2"
+                ))
                 .bind(account_id)
                 .bind(space_id)
                 .execute(&mut *tx)
@@ -399,8 +459,7 @@ impl Store {
             "complete" | "truncated" if expires_at.is_none_or(|at| at > now) => CrawlBegin::NotDue,
             // Ended and expired, or failed with nothing to resume from.
             _ => {
-                Self::new_generation(&mut tx, account_id, space_id, now, limits.page_limit, 0)
-                    .await?;
+                Self::new_generation(&mut tx, account_id, space_id, now, limits, 0).await?;
                 CrawlBegin::Page(CrawlPosition {
                     generation: crawl.generation + 1,
                     from: None,
@@ -437,11 +496,12 @@ impl Store {
             fenced: true,
             ..CrawlWrite::default()
         };
-        if !Self::fence(&mut tx, account_id, space_id, epoch).await? {
+        let table = limits.depth.table();
+        if !Self::fence(&mut tx, account_id, space_id, epoch, limits.depth).await? {
             return Ok(fenced);
         }
         let sql = format!(
-            "SELECT {CRAWL_COLUMNS} FROM space_discovery \
+            "SELECT {CRAWL_COLUMNS} FROM {table} \
              WHERE account_id = $1 AND space_id = $2 FOR UPDATE"
         );
         let row: Option<PgRow> = sqlx_core::query::query::<Postgres>(&sql)
@@ -456,6 +516,11 @@ impl Store {
             return Ok(fenced);
         }
         let now = Self::now(&mut tx).await?;
+        let root = CrawlRoot {
+            account_id,
+            space_id,
+            depth: limits.depth,
+        };
         let mut write = CrawlWrite {
             page_limit: crawl.page_limit,
             ..CrawlWrite::default()
@@ -464,18 +529,21 @@ impl Store {
             CrawlStep::Page {
                 entries,
                 unidentified,
+                over_limit,
                 next_batch,
             } => {
-                self.record_page(
+                Self::record_page(
                     &mut tx,
-                    account_id,
-                    space_id,
+                    root,
                     &crawl,
                     limits,
                     now,
-                    entries,
-                    *unidentified,
-                    next_batch.as_deref(),
+                    ParsedPage {
+                        entries,
+                        unidentified: *unidentified,
+                        over_limit: *over_limit,
+                        next_batch: next_batch.as_deref(),
+                    },
                     &mut write,
                 )
                 .await?;
@@ -489,10 +557,10 @@ impl Store {
                 write.page_limit = crawl.page_limit / 2;
                 write.outcome = "in_progress";
                 write.next_page = true;
-                sqlx_core::query::query(
-                    "UPDATE space_discovery SET page_limit = $3, support = 'supported' \
-                     WHERE account_id = $1 AND space_id = $2",
-                )
+                sqlx_core::query::query(&format!(
+                    "UPDATE {table} SET page_limit = $3, support = 'supported' \
+                     WHERE account_id = $1 AND space_id = $2"
+                ))
                 .bind(account_id)
                 .bind(space_id)
                 .bind(write.page_limit)
@@ -502,12 +570,11 @@ impl Store {
             CrawlStep::TooLarge => {
                 Self::end_crawl(
                     &mut tx,
-                    account_id,
-                    space_id,
+                    root,
                     now,
                     "truncated",
                     Some("too_large"),
-                    limits.crawl_ttl_ms,
+                    limits,
                     &mut write,
                 )
                 .await?;
@@ -519,13 +586,17 @@ impl Store {
                     account_id,
                     space_id,
                     now,
-                    crawl.page_limit,
+                    CrawlLimits {
+                        page_limit: crawl.page_limit,
+                        ..limits
+                    },
                     crawl.restarts + 1,
                 )
                 .await?;
                 write.outcome = "in_progress";
                 write.next_page = true;
                 write.restarted = true;
+                write.changed = limits.depth == HierarchyDepth::Nested;
             }
             CrawlStep::CursorExpired => {
                 // An expired cursor cannot be resumed; the attempt after the
@@ -537,49 +608,46 @@ impl Store {
                 );
                 Self::fail_crawl(
                     &mut tx,
-                    account_id,
-                    space_id,
+                    root,
                     now,
                     &crawl,
-                    "cursor_expired",
-                    delay,
-                    true,
+                    CrawlBackoff {
+                        category: "cursor_expired",
+                        delay_ms: delay,
+                        drop_cursor: true,
+                    },
                     &mut write,
                 )
                 .await?;
             }
-            CrawlStep::Denied { failure, ttl_ms } => {
-                // Conclusive: no backoff growth, and no cursor to resume.
-                // Cached summaries stay until a complete crawl or a leave.
-                sqlx_core::query::query(
-                    "UPDATE space_discovery SET outcome = 'failed', cursor = NULL, \
-                         failure = $3, failures = 0, support = 'supported', \
-                         expires_at = $4, next_attempt_at = $4 \
-                     WHERE account_id = $1 AND space_id = $2",
-                )
+            CrawlStep::Denied { ttl_ms, .. } | CrawlStep::Unsupported { ttl_ms } => {
+                // A conclusive answer ends the crawl until its retry window.
+                // Direct summaries keep their existing availability policy.
+                let (support, failure) = match step {
+                    CrawlStep::Denied { failure, .. } => ("supported", Some(*failure)),
+                    _ => ("unsupported", None),
+                };
+                let nested = limits.depth == HierarchyDepth::Nested;
+                if nested {
+                    write.changed = Self::clear_space_browse(&mut tx, account_id, space_id).await?;
+                }
+                sqlx_core::query::query(&format!(
+                    "UPDATE {table} SET outcome = 'failed', cursor = NULL, \
+                         failure = $3, failures = 0, support = $4, \
+                         rooms_cached = CASE WHEN $5 THEN 0 ELSE rooms_cached END, \
+                         expires_at = $6, next_attempt_at = $6 \
+                     WHERE account_id = $1 AND space_id = $2"
+                ))
                 .bind(account_id)
                 .bind(space_id)
-                .bind(*failure)
+                .bind(failure)
+                .bind(support)
+                .bind(nested)
                 .bind(now.saturating_add(*ttl_ms))
                 .execute(&mut *tx)
                 .await?;
                 write.outcome = "failed";
-                write.failure = Some(failure);
-                write.conclusive = true;
-            }
-            CrawlStep::Unsupported { ttl_ms } => {
-                sqlx_core::query::query(
-                    "UPDATE space_discovery SET outcome = 'failed', cursor = NULL, \
-                         failure = NULL, failures = 0, support = 'unsupported', \
-                         expires_at = $3, next_attempt_at = $3 \
-                     WHERE account_id = $1 AND space_id = $2",
-                )
-                .bind(account_id)
-                .bind(space_id)
-                .bind(now.saturating_add(*ttl_ms))
-                .execute(&mut *tx)
-                .await?;
-                write.outcome = "failed";
+                write.failure = failure;
                 write.conclusive = true;
             }
             CrawlStep::Failure {
@@ -593,7 +661,16 @@ impl Store {
                 )
                 .max(retry_after_ms.unwrap_or(0));
                 Self::fail_crawl(
-                    &mut tx, account_id, space_id, now, &crawl, category, delay, false, &mut write,
+                    &mut tx,
+                    root,
+                    now,
+                    &crawl,
+                    CrawlBackoff {
+                        category,
+                        delay_ms: delay,
+                        drop_cursor: false,
+                    },
+                    &mut write,
                 )
                 .await?;
             }
@@ -608,9 +685,14 @@ impl Store {
         account_id: Uuid,
         space_id: &str,
         epoch: i64,
+        depth: HierarchyDepth,
     ) -> Result<bool, StoreError> {
+        let eligible = match depth {
+            HierarchyDepth::Direct => joined_epoch_sql("$2"),
+            HierarchyDepth::Nested => browse_root_epoch_sql("$2"),
+        };
         let current: Option<(i64,)> =
-            sqlx_core::query_as::query_as(&format!("{JOINED_EPOCH} FOR SHARE OF s"))
+            sqlx_core::query_as::query_as(&format!("{eligible} FOR SHARE OF s"))
                 .bind(account_id)
                 .bind(space_id)
                 .fetch_optional(&mut **tx)
@@ -634,19 +716,23 @@ impl Store {
         account_id: Uuid,
         space_id: &str,
         now: i64,
-        page_limit: i32,
+        limits: CrawlLimits,
         restarts: i32,
     ) -> Result<(), StoreError> {
-        sqlx_core::query::query(
-            "UPDATE space_discovery SET generation = generation + 1, outcome = 'in_progress', \
-                 cursor = NULL, tokens = '{}', pages = 0, page_limit = $3, restarts = $4, \
+        let table = limits.depth.table();
+        if limits.depth == HierarchyDepth::Nested {
+            Self::clear_space_browse(tx, account_id, space_id).await?;
+        }
+        sqlx_core::query::query(&format!(
+            "UPDATE {table} SET generation = generation + 1, outcome = 'in_progress', \
+                 cursor = NULL, tokens = '{{}}', pages = 0, page_limit = $3, restarts = $4, \
                  unidentified = 0, rooms_cached = 0, started_at = $5, completed_at = NULL, \
                  expires_at = NULL, next_attempt_at = NULL \
-             WHERE account_id = $1 AND space_id = $2",
-        )
+             WHERE account_id = $1 AND space_id = $2"
+        ))
         .bind(account_id)
         .bind(space_id)
-        .bind(page_limit)
+        .bind(limits.page_limit)
         .bind(restarts)
         .bind(now)
         .execute(&mut **tx)
@@ -655,29 +741,36 @@ impl Store {
     }
 
     /// End the crawl `complete` or `truncated` until the crawl TTL passes.
-    #[allow(clippy::too_many_arguments)]
     async fn end_crawl(
         tx: &mut sqlx_core::transaction::Transaction<'_, Postgres>,
-        account_id: Uuid,
-        space_id: &str,
+        root: CrawlRoot<'_>,
         now: i64,
         outcome: &'static str,
         failure: Option<&'static str>,
-        crawl_ttl_ms: i64,
+        limits: CrawlLimits,
         write: &mut CrawlWrite,
     ) -> Result<(), StoreError> {
-        sqlx_core::query::query(
-            "UPDATE space_discovery SET outcome = $3, failure = $4, cursor = NULL, \
-                 completed_at = $5, expires_at = $6, next_attempt_at = NULL, \
+        let table = root.depth.table();
+        let expires = match root.depth {
+            HierarchyDepth::Direct => "$6",
+            HierarchyDepth::Nested => "started_at + $6",
+        };
+        let expiry_arg = match root.depth {
+            HierarchyDepth::Direct => now.saturating_add(limits.crawl_ttl_ms),
+            HierarchyDepth::Nested => limits.crawl_ttl_ms,
+        };
+        sqlx_core::query::query(&format!(
+            "UPDATE {table} SET outcome = $3, failure = $4, cursor = NULL, \
+                 completed_at = $5, expires_at = {expires}, next_attempt_at = NULL, \
                  support = 'supported', failures = 0 \
-             WHERE account_id = $1 AND space_id = $2",
-        )
-        .bind(account_id)
-        .bind(space_id)
+             WHERE account_id = $1 AND space_id = $2"
+        ))
+        .bind(root.account_id)
+        .bind(root.space_id)
         .bind(outcome)
         .bind(failure)
         .bind(now)
-        .bind(now.saturating_add(crawl_ttl_ms))
+        .bind(expiry_arg)
         .execute(&mut **tx)
         .await?;
         write.outcome = outcome;
@@ -688,26 +781,28 @@ impl Store {
 
     /// Make the crawl `failed` until `delay_ms` passes, keeping the cursor
     /// and the committed pages unless `drop_cursor`.
-    #[allow(clippy::too_many_arguments)]
     async fn fail_crawl(
         tx: &mut sqlx_core::transaction::Transaction<'_, Postgres>,
-        account_id: Uuid,
-        space_id: &str,
+        root: CrawlRoot<'_>,
         now: i64,
         crawl: &Crawl,
-        category: &'static str,
-        delay_ms: i64,
-        drop_cursor: bool,
+        backoff: CrawlBackoff,
         write: &mut CrawlWrite,
     ) -> Result<(), StoreError> {
+        let table = root.depth.table();
+        let CrawlBackoff {
+            category,
+            delay_ms,
+            drop_cursor,
+        } = backoff;
         let failures = crawl.failures.saturating_add(1);
-        sqlx_core::query::query(
-            "UPDATE space_discovery SET outcome = 'failed', failure = $3, failures = $4, \
+        sqlx_core::query::query(&format!(
+            "UPDATE {table} SET outcome = 'failed', failure = $3, failures = $4, \
                  next_attempt_at = $5, cursor = CASE WHEN $6 THEN NULL ELSE cursor END \
-             WHERE account_id = $1 AND space_id = $2",
-        )
-        .bind(account_id)
-        .bind(space_id)
+             WHERE account_id = $1 AND space_id = $2"
+        ))
+        .bind(root.account_id)
+        .bind(root.space_id)
         .bind(category)
         .bind(failures)
         .bind(now.saturating_add(delay_ms))
@@ -721,20 +816,119 @@ impl Store {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn record_page(
-        &self,
         tx: &mut sqlx_core::transaction::Transaction<'_, Postgres>,
-        account_id: Uuid,
-        space_id: &str,
+        root: CrawlRoot<'_>,
+        crawl: &Crawl,
+        limits: CrawlLimits,
+        now: i64,
+        page: ParsedPage<'_>,
+        write: &mut CrawlWrite,
+    ) -> Result<(), StoreError> {
+        let CrawlRoot {
+            account_id,
+            space_id,
+            depth,
+        } = root;
+        let ParsedPage {
+            entries,
+            unidentified,
+            over_limit,
+            next_batch,
+        } = page;
+        let table = depth.table();
+        let added = match limits.depth {
+            HierarchyDepth::Direct => {
+                Self::record_direct_children(tx, root, crawl, limits, now, entries, write).await?
+            }
+            HierarchyDepth::Nested => {
+                let added =
+                    Self::record_space_browse(tx, account_id, space_id, now, entries).await?;
+                write.cached = added;
+                write.changed = added > 0;
+                added
+            }
+        };
+        let from = crawl.cursor.as_deref();
+        let pages = crawl.pages.saturating_add(1);
+        let unidentified = crawl.unidentified.saturating_add(unidentified.max(0));
+        let looped = next_batch.is_some_and(|next| {
+            from == Some(next) || crawl.tokens.iter().any(|token| token == next)
+        });
+        sqlx_core::query::query(&format!(
+                "UPDATE {table} SET pages = $3, unidentified = $4, \
+                 rooms_cached = rooms_cached + $5, cursor = $6, \
+                 tokens = CASE WHEN $7::text IS NULL THEN tokens ELSE array_append(tokens, $7) END, \
+                 failure = NULL, failures = 0, next_attempt_at = NULL, support = 'supported' \
+             WHERE account_id = $1 AND space_id = $2"
+            ))
+        .bind(account_id)
+        .bind(space_id)
+        .bind(pages)
+        .bind(unidentified)
+        .bind(i32::try_from(added).unwrap_or(i32::MAX))
+        .bind(next_batch)
+        .bind(from)
+        .execute(&mut **tx)
+        .await?;
+
+        if over_limit {
+            Self::end_crawl(tx, root, now, "truncated", None, limits, write).await?;
+            return Ok(());
+        }
+
+        match next_batch {
+            None => {
+                if limits.depth == HierarchyDepth::Direct {
+                    if unidentified == 0 {
+                        write.omitted =
+                            Self::omit_unreturned(tx, account_id, space_id, crawl, now, limits)
+                                .await?;
+                        write.changed |= write.omitted > 0;
+                    } else {
+                        write.omission_skipped = true;
+                    }
+                    write.orphans = Self::delete_orphans(tx, account_id, space_id).await?;
+                }
+                Self::end_crawl(tx, root, now, "complete", None, limits, write).await?;
+            }
+            Some(_) if looped => {
+                Self::end_crawl(
+                    tx,
+                    root,
+                    now,
+                    "truncated",
+                    Some("pagination_loop"),
+                    limits,
+                    write,
+                )
+                .await?;
+            }
+            Some(_) if pages >= limits.max_pages => {
+                Self::end_crawl(tx, root, now, "truncated", None, limits, write).await?;
+            }
+            Some(_) => {
+                write.outcome = "in_progress";
+                write.next_page = true;
+            }
+        }
+        Ok(())
+    }
+
+    async fn record_direct_children(
+        tx: &mut sqlx_core::transaction::Transaction<'_, Postgres>,
+        root: CrawlRoot<'_>,
         crawl: &Crawl,
         limits: CrawlLimits,
         now: i64,
         entries: &[DiscoveredEntry],
-        unidentified: i32,
-        next_batch: Option<&str>,
         write: &mut CrawlWrite,
-    ) -> Result<(), StoreError> {
+    ) -> Result<usize, StoreError> {
+        let CrawlRoot {
+            account_id,
+            space_id,
+            ..
+        } = root;
         // Duplicate ids in one page keep the first entry. A page is bounded
         // by the worker's body limit, not by its page limit, so lookups stay
         // linear in its size.
@@ -837,92 +1031,13 @@ impl Store {
         .bind(crawl.generation)
         .fetch_all(&mut **tx)
         .await?;
-
-        let from = crawl.cursor.as_deref();
-        let pages = crawl.pages.saturating_add(1);
-        let unidentified = crawl.unidentified.saturating_add(unidentified.max(0));
-        let looped = next_batch.is_some_and(|next| {
-            from == Some(next) || crawl.tokens.iter().any(|token| token == next)
-        });
-        sqlx_core::query::query(
-            "UPDATE space_discovery SET pages = $3, unidentified = $4, \
-                 rooms_cached = rooms_cached + $5, cursor = $6, \
-                 tokens = CASE WHEN $7::text IS NULL THEN tokens ELSE array_append(tokens, $7) END, \
-                 failure = NULL, failures = 0, next_attempt_at = NULL, support = 'supported' \
-             WHERE account_id = $1 AND space_id = $2",
-        )
-        .bind(account_id)
-        .bind(space_id)
-        .bind(pages)
-        .bind(unidentified)
-        .bind(i32::try_from(newly_returned.len()).unwrap_or(i32::MAX))
-        .bind(next_batch)
-        .bind(from)
-        .execute(&mut **tx)
-        .await?;
-
-        match next_batch {
-            None => {
-                if unidentified == 0 {
-                    write.omitted = self
-                        .omit_unreturned(tx, account_id, space_id, crawl, now, limits)
-                        .await?;
-                    write.changed |= write.omitted > 0;
-                } else {
-                    write.omission_skipped = true;
-                }
-                write.orphans = Self::delete_orphans(tx, account_id, space_id).await?;
-                Self::end_crawl(
-                    tx,
-                    account_id,
-                    space_id,
-                    now,
-                    "complete",
-                    None,
-                    limits.crawl_ttl_ms,
-                    write,
-                )
-                .await?;
-            }
-            Some(_) if looped => {
-                Self::end_crawl(
-                    tx,
-                    account_id,
-                    space_id,
-                    now,
-                    "truncated",
-                    Some("pagination_loop"),
-                    limits.crawl_ttl_ms,
-                    write,
-                )
-                .await?;
-            }
-            Some(_) if pages >= limits.max_pages => {
-                Self::end_crawl(
-                    tx,
-                    account_id,
-                    space_id,
-                    now,
-                    "truncated",
-                    None,
-                    limits.crawl_ttl_ms,
-                    write,
-                )
-                .await?;
-            }
-            Some(_) => {
-                write.outcome = "in_progress";
-                write.next_page = true;
-            }
-        }
-        Ok(())
+        Ok(newly_returned.len())
     }
 
     /// Mark `not_returned` every linked child this generation did not
     /// return whose summary predates the generation, so a summary another
     /// crawl or a room-summary job refreshed meanwhile is kept.
     async fn omit_unreturned(
-        &self,
         tx: &mut sqlx_core::transaction::Transaction<'_, Postgres>,
         account_id: Uuid,
         space_id: &str,

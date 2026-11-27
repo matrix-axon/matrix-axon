@@ -64,8 +64,8 @@ pub use homeserver_status::{
     HomeserverBreakerSnapshot, HomeserverGateSnapshot, HomeserverStatusProvider,
 };
 pub use lifecycle::{
-    AccountLifecycle, BackupAction, DeleteError, LoginError, LogoutError, RecoverError,
-    RecoverResult, RedecryptUtdsError, RedecryptUtdsStats,
+    AccountLifecycle, BackupAction, DeleteError, InsecureDevicesError, LoginError, LogoutError,
+    RecoverError, RecoverResult, RedecryptUtdsError, RedecryptUtdsStats,
 };
 pub use linked_events::{FetchedEvent, KeptMedia, LinkedEventError, LinkedEventSource};
 pub use matrix_oauth_acquire::{
@@ -260,6 +260,14 @@ pub fn router(state: AppState) -> Router {
             "/v1/accounts/{account_id}",
             get(routes::accounts::get_account).delete(routes::accounts::delete_account),
         )
+        .route(
+            "/v1/accounts/{account_id}/exclude_insecure_devices",
+            put(routes::insecure_devices::set),
+        )
+        .route(
+            "/v1/accounts/{account_id}/exclude_insecure_devices/impact",
+            get(routes::insecure_devices::impact),
+        )
         // Interactive SAS verification: start/list on one path, per-flow read +
         // confirm/cancel below.
         .route(
@@ -351,6 +359,15 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}/spaces/graph",
             get(routes::space_graph::space_graph),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/space/browse",
+            get(routes::space_browse::space_browse)
+                .post(routes::space_browse::request_space_browse),
+        )
+        .route(
+            "/v1/accounts/{account_id}/spaces/discovered",
+            get(routes::space_browse::discovered_space_memberships),
         )
         // Paged replacement for space/children (ADR 0128).
         .route(

@@ -2339,6 +2339,10 @@ async fn accounts_read_api() {
         .upsert_account(&deactivated_user, hs)
         .await
         .expect("deactivated");
+    store
+        .set_exclude_insecure_devices(deactivated.account_id, true)
+        .await
+        .expect("enable exclusion for retained account");
     for key in [[1; 32], [2; 32]] {
         store
             .record_account_verification(deactivated.account_id, false, Some(&key), false)
@@ -2387,6 +2391,7 @@ async fn accounts_read_api() {
     // a concrete `false` rather than the old always-`null` stub.
     assert_eq!(active_row["verified"], false);
     assert_eq!(active_row["own_identity_changed"], false);
+    assert_eq!(active_row["exclude_insecure_devices"], false);
     assert_eq!(active_row["user_id"], active_user);
     assert_eq!(active_row["homeserver_url"], hs);
     // No `SyncStateProvider` was injected (this router uses the plain `new`
@@ -2407,6 +2412,7 @@ async fn accounts_read_api() {
     assert_eq!(deactivated_row["state"], "deactivated");
     assert_eq!(deactivated_row["verified"], false);
     assert_eq!(deactivated_row["own_identity_changed"], true);
+    assert_eq!(deactivated_row["exclude_insecure_devices"], true);
     assert!(deactivated_row.get("own_identity_master_key").is_none());
 
     assert!(
@@ -2426,6 +2432,7 @@ async fn accounts_read_api() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(deactivated_by_id["data"]["state"], "deactivated");
     assert_eq!(deactivated_by_id["data"]["own_identity_changed"], true);
+    assert_eq!(deactivated_by_id["data"]["exclude_insecure_devices"], true);
 
     // The `deleting` account is absent from the list but still readable by id —
     // the by-id read is unfiltered.
