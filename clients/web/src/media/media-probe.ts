@@ -113,13 +113,18 @@ function dimension(value: number): boolean {
  * Resolve on the first of `types`, reject on the element's `error` or when
  * `signal` aborts. Listeners are removed either way, so an abandoned probe
  * leaves nothing behind on the element.
+ *
+ * The promise counts as handled from the start: a wait set up before an
+ * assignment that then throws is never awaited, and the abort in
+ * `withLoaded`'s `finally` would otherwise reject it as an unhandled
+ * rejection. Whoever awaits it still sees the rejection.
  */
 function once(
   target: EventTarget,
   types: readonly string[],
   signal: AbortSignal,
 ): Promise<void> {
-  return new Promise((resolve, reject) => {
+  const settled = new Promise<void>((resolve, reject) => {
     if (signal.aborted) {
       reject(new Error('aborted'))
       return
@@ -137,6 +142,8 @@ function once(
     target.addEventListener('error', onError)
     signal.addEventListener('abort', onAbort)
   })
+  settled.catch(() => {})
+  return settled
 }
 
 /** `promise`, or a rejection once `signal` aborts. */
@@ -417,9 +424,17 @@ export function probeVideo(
       // budget. Such a file, typically one whose duration is unknown, is
       // drawn at the frame it loaded on.
       if (element.seekable.length > 0) {
+        // Listen before seeking, or a fast `seeked` is missed.
         const seeked = once(element, ['seeked'], signal)
-        element.currentTime = posterFrameTime(element.duration)
-        await seeked
+        let seeking = true
+        try {
+          element.currentTime = posterFrameTime(element.duration)
+        } catch {
+          // An engine that refuses the seek (`InvalidStateError`) has moved
+          // nowhere, so the loaded frame is drawn, as with nothing seekable.
+          seeking = false
+        }
+        if (seeking) await seeked
       }
       if (element.readyState < HAVE_CURRENT_DATA)
         await once(element, ['loadeddata', 'canplay'], signal)

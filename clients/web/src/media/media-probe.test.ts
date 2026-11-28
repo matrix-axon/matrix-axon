@@ -30,6 +30,8 @@ interface Script {
   seekable?: number
   /** Fire `loadeddata` a moment after `loadedmetadata`. */
   loadedData?: boolean
+  /** Throw `InvalidStateError` when `currentTime` is set. */
+  seekThrows?: boolean
 }
 
 /** A media element that plays back `script` asynchronously, as browsers do. */
@@ -99,6 +101,8 @@ class FakeMedia extends EventTarget {
   }
 
   set currentTime(time: number) {
+    if (this.script.seekThrows)
+      throw new DOMException('cannot seek', 'InvalidStateError')
     this.seekedTo = time
     if (this.script.seeks === false || this.seekable.length === 0) return
     queueMicrotask(() => {
@@ -413,6 +417,39 @@ describe('probeVideo', () => {
     expect(probe?.info).toEqual({ width: 1920, height: 1080 })
     expect(probe?.poster).not.toBeNull()
     expect(element.seekedTo).toBeNull()
+  })
+
+  it('draws the loaded frame when the seek throws, leaving no rejection unhandled', async () => {
+    // The `seeked` wait is set up before the seek, so a throwing seek
+    // abandons it; the probe's abort must not then reject it unhandled.
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => unhandled.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const { element, createVideo } = video({
+        seekThrows: true,
+        loadedData: true,
+      })
+
+      const probe = await probeVideo(file(), {
+        createVideo,
+        createCanvas: () => new FakeCanvas() as unknown as HTMLCanvasElement,
+        timeoutMs: 1_000,
+      })
+      // Unhandled rejections are reported after a macrotask.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      expect(probe?.info).toEqual({
+        width: 1920,
+        height: 1080,
+        duration_ms: 31_251,
+      })
+      expect(probe?.poster).not.toBeNull()
+      expect(element.seekedTo).toBeNull()
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
   })
 
   it('renders the video in the document while probing, invisibly, and removes it', async () => {
