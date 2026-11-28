@@ -2555,6 +2555,17 @@ pub struct EventDto {
     pub relates_to: Option<Value>,
     pub redacted: bool,
     pub redaction_event_id: Option<String>,
+    /// The `arrival_order` of [`redaction_event_id`](Self::redaction_event_id).
+    ///
+    /// The collapsed timeline strips bare redactions, so this is the only place
+    /// a timeline read says where one arrived. A displayed event's redaction
+    /// is a receipt candidate on the same terms as the event (#1273, ADR 0089):
+    /// a room rule set to notify on every event counts redactions, and a
+    /// trailing one is otherwise never acknowledged. `#[serde(default)]`,
+    /// unlike `arrival_order`: an absent value only means "no candidate", which
+    /// is how every server before this field behaved.
+    #[serde(default)]
+    pub redaction_arrival_order: Option<i64>,
     /// Server-aggregated per-emoji reaction tally (M8), keyed by reaction key.
     /// The collapsed timeline strips raw `m.reaction` rows, so reaction badges and
     /// the ids needed to withdraw a reaction come from here rather than from
@@ -2842,6 +2853,11 @@ impl EventDto {
     /// `content`. `relates_to` stays: a read keeps it, so a redacted reply or
     /// thread member is still that relation. This DTO has no edit or
     /// `thread_id` fields for a read to clear.
+    ///
+    /// The first redaction id is kept. A live redaction's receipt position is
+    /// recorded by `App::note_live_redaction_position` (`app/timeline.rs`),
+    /// which replaces the id with the latest-arriving one, matching the
+    /// server's timeline read (#1273). Change neither to match the other.
     pub(crate) fn mask_as_redacted(&mut self, redaction_event_id: &str) {
         self.redacted = true;
         if self.redaction_event_id.is_none() && !redaction_event_id.is_empty() {

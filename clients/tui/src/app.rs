@@ -2652,6 +2652,7 @@ impl App {
             relates_to: echo_relates_to,
             redacted: false,
             redaction_event_id: None,
+            redaction_arrival_order: None,
             reactions: None,
             utd_reason: None,
             sender_trust: None,

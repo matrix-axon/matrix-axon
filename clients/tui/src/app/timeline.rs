@@ -446,6 +446,12 @@ impl App {
         if event.event_type == "m.room.redaction" {
             if let Some(target_id) = event.redaction_target() {
                 self.apply_live_redaction(&key, &event.event_id, target_id);
+                self.note_live_redaction_position(
+                    &key,
+                    target_id,
+                    &event.event_id,
+                    event.arrival_order,
+                );
             } else {
                 self.note_unnamed_redaction(&key);
             }
@@ -686,6 +692,89 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Record where a live redaction arrived on the message it masked, and
+    /// acknowledge it if that message is on screen (#1273).
+    ///
+    /// A timeline read reports the same position as `redaction_arrival_order`,
+    /// which [`super::read_markers::read_targets_for`] reads on the next room
+    /// open; this is the live half. The redaction never becomes a row, so
+    /// without it a redaction counted by a notify-all room rule is never named
+    /// in a receipt. The latest arrival wins, as on a read, because a receipt
+    /// for it covers every earlier redaction of the same message.
+    ///
+    /// Only a masked message carries the position. A withdrawn reaction and a
+    /// discarded edit are other folded relations, left out of scope.
+    fn note_live_redaction_position(
+        &mut self,
+        room: &RoomKey,
+        target_id: &str,
+        redaction_event_id: &str,
+        arrival_order: i64,
+    ) {
+        // Asked before the row is borrowed: `selected_room` borrows all of
+        // `self`, and the gate below only needs it as a yes or no.
+        let live_view = self.last_jump_ts.is_none()
+            && self
+                .selected_room()
+                .is_some_and(|selected| RoomKey::from(selected) == *room);
+        let Some(target) = self
+            .messages
+            .events
+            .get_mut(room)
+            .and_then(|events| events.iter_mut().find(|event| event.event_id == target_id))
+        else {
+            return;
+        };
+        if !target.redacted
+            || target
+                .redaction_arrival_order
+                .is_some_and(|known| known >= arrival_order)
+        {
+            return;
+        }
+        // Latest wins, as on a timeline read. `EventDto::mask_as_redacted`
+        // keeps the first id instead, and that is deliberate: it only masks,
+        // and this is the one place that also records where a redaction
+        // arrived, so the two fields always describe the same redaction.
+        target.redaction_event_id = Some(redaction_event_id.to_owned());
+        target.redaction_arrival_order = Some(arrival_order);
+        // The same gate as a live event's own read below, narrowed to the
+        // main timeline: the room is on screen at the live end, and the main
+        // timeline shows the message. A history jump is looking at the past
+        // and claims nothing. The open thread panel showing a reply is not
+        // enough: this is an unthreaded room receipt, so it may only name what
+        // `read_targets_for` would, which asks `thread_visible` with no panel
+        // (review).
+        let on_screen = live_view
+            && should_show_event(target, &self.display)
+            && thread_visible(target, None, &self.promoted_thread_events)
+            && thread_visible(
+                target,
+                self.thread_panel.as_deref(),
+                &self.promoted_thread_events,
+            );
+        if !on_screen {
+            return;
+        }
+        // Only the receipt moves. The cross-device marker is a display-order
+        // position, and a redaction adds nothing to display, so it is handed
+        // the marker it already has. A room with no marker yet is left alone
+        // rather than given one at the redacted message, which may be old: the
+        // marker and receipt are sent together, and opening the room writes
+        // both (review on #1278).
+        let Some(marker) = self.read_markers.get(room).cloned() else {
+            return;
+        };
+        self.note_room_read(
+            room.clone(),
+            marker,
+            Some(super::read_markers::ReceiptTarget {
+                event_id: redaction_event_id.to_owned(),
+                arrival_order,
+            }),
+        );
     }
 
     /// The loaded row `target_id` points at, or [`RedactionTarget::Absent`].

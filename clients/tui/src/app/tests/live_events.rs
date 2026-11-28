@@ -832,6 +832,159 @@ fn live_redaction_of_a_loaded_message_is_a_tombstone_and_moves_nothing() {
     assert_eq!(app.receipt_targets[&key].event_id, "$bridge");
 }
 
+/// #1273: a live redaction of a message on screen is acknowledged. The
+/// redaction never becomes a row, so it has to be the receipt target itself,
+/// or a notify-all room rule leaves it counted for good. The cross-device
+/// marker stays put: a redaction adds nothing to display.
+#[test]
+fn live_redaction_of_a_displayed_message_moves_only_the_receipt() {
+    let (mut app, key) = selected_room_app();
+    let mut message = text_message("$msg:example.com", "hello");
+    message.arrival_order = 10;
+    app.messages.events.insert(key.clone(), vec![message]);
+    app.read_markers.insert(
+        key.clone(),
+        read_markers::ReadMarker {
+            event_id: "$msg:example.com".to_owned(),
+            origin_ts: 0,
+        },
+    );
+    app.receipt_targets.insert(
+        key.clone(),
+        read_markers::ReceiptTarget {
+            event_id: "$msg:example.com".to_owned(),
+            arrival_order: 10,
+        },
+    );
+    let mut redaction = redaction_frame("$redact:example.com", "$msg:example.com");
+    redaction.arrival_order = 11;
+
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction)));
+
+    let masked = &app.messages.events[&key][0];
+    assert_eq!(masked.redaction_arrival_order, Some(11));
+    assert_eq!(
+        app.receipt_targets[&key],
+        read_markers::ReceiptTarget {
+            event_id: "$redact:example.com".to_owned(),
+            arrival_order: 11,
+        }
+    );
+    assert_eq!(app.read_markers[&key].event_id, "$msg:example.com");
+    assert!(
+        app.pending_marker_put.is_some(),
+        "the receipt advance is sent"
+    );
+}
+
+/// A room with no cross-device marker yet gets none at the redacted message,
+/// which may be old. The marker and receipt go out together, and opening the
+/// room writes both (review on #1278).
+#[test]
+fn live_redaction_in_a_room_with_no_marker_writes_nothing() {
+    let (mut app, key) = selected_room_app();
+    let mut message = text_message("$msg:example.com", "hello");
+    message.arrival_order = 10;
+    app.messages.events.insert(key.clone(), vec![message]);
+    let mut redaction = redaction_frame("$redact:example.com", "$msg:example.com");
+    redaction.arrival_order = 11;
+
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction)));
+
+    assert_eq!(
+        app.messages.events[&key][0].redaction_arrival_order,
+        Some(11)
+    );
+    assert!(!app.read_markers.contains_key(&key));
+    assert!(!app.receipt_targets.contains_key(&key));
+    assert!(app.pending_marker_put.is_none());
+}
+
+/// A reply shown only by the open thread panel is not the room view's to
+/// claim. The receipt here is unthreaded, so naming the reply's redaction would
+/// acknowledge the whole room up to it (review on #1278). The position is still
+/// recorded, for whenever the main timeline does show the reply.
+#[test]
+fn live_redaction_of_a_reply_in_the_open_thread_panel_does_not_receipt_it() {
+    let (mut app, key) = selected_room_app();
+    let mut reply = text_message("$reply:example.com", "in thread");
+    reply.arrival_order = 10;
+    reply.relates_to = Some(serde_json::json!({
+        "rel_type": "m.thread",
+        "event_id": "$root:example.com",
+    }));
+    app.messages.events.insert(key.clone(), vec![reply]);
+    app.thread_panel = Some("$root:example.com".to_owned());
+    let mut redaction = redaction_frame("$redact:example.com", "$reply:example.com");
+    redaction.arrival_order = 11;
+
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction)));
+
+    assert_eq!(
+        app.messages.events[&key][0].redaction_arrival_order,
+        Some(11)
+    );
+    assert!(!app.receipt_targets.contains_key(&key));
+}
+
+/// The latest redaction wins, as on a timeline read: a second frame that
+/// arrived earlier replaces neither the recorded redaction nor the receipt.
+#[test]
+fn an_older_live_redaction_does_not_replace_a_newer_one() {
+    let (mut app, key) = selected_room_app();
+    let mut message = text_message("$msg:example.com", "hello");
+    message.arrival_order = 5;
+    app.messages.events.insert(key.clone(), vec![message]);
+    app.read_markers.insert(
+        key.clone(),
+        read_markers::ReadMarker {
+            event_id: "$msg:example.com".to_owned(),
+            origin_ts: 0,
+        },
+    );
+    for (id, arrival_order) in [("$newer:example.com", 20), ("$older:example.com", 10)] {
+        let mut redaction = redaction_frame(id, "$msg:example.com");
+        redaction.arrival_order = arrival_order;
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction)));
+    }
+
+    let masked = &app.messages.events[&key][0];
+    assert_eq!(
+        masked.redaction_event_id.as_deref(),
+        Some("$newer:example.com")
+    );
+    assert_eq!(masked.redaction_arrival_order, Some(20));
+    assert_eq!(
+        app.receipt_targets[&key],
+        read_markers::ReceiptTarget {
+            event_id: "$newer:example.com".to_owned(),
+            arrival_order: 20,
+        }
+    );
+}
+
+/// The live receipt for a redaction has the same gate as any live read: a
+/// history jump is looking at the past and claims nothing (#1273).
+#[test]
+fn live_redaction_during_a_history_jump_does_not_receipt_it() {
+    let (mut app, key) = selected_room_app();
+    app.last_jump_ts = Some(1);
+    let mut message = text_message("$msg:example.com", "hello");
+    message.arrival_order = 10;
+    app.messages.events.insert(key.clone(), vec![message]);
+    let mut redaction = redaction_frame("$redact:example.com", "$msg:example.com");
+    redaction.arrival_order = 11;
+
+    app.handle_live_frame(LiveFrame::Timeline(Box::new(redaction)));
+
+    assert_eq!(
+        app.messages.events[&key][0].redaction_arrival_order,
+        Some(11),
+        "the position is still recorded for the next room open"
+    );
+    assert!(!app.receipt_targets.contains_key(&key));
+}
+
 #[test]
 fn live_redaction_of_a_loaded_image_drops_the_thumbnail() {
     let (mut app, key) = selected_room_app();

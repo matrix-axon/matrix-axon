@@ -67,6 +67,7 @@ pub(super) fn event_with_state_key(
         relates_to: None,
         redacted: false,
         redaction_event_id: None,
+        redaction_arrival_order: None,
         reactions: None,
         utd_reason: None,
         sender_trust: None,
