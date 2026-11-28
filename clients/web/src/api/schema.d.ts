@@ -6134,11 +6134,14 @@ export interface components {
         MediaUploadLimitDto: {
             /**
              * Format: int64
-             * @description The homeserver's `m.upload.size`, in bytes. `null` when it is unknown,
-             *     for example because the homeserver did not answer, has not been asked
-             *     yet, or does not report one. Axon then applies only its own cap, and
-             *     the homeserver may still refuse an upload below `max_bytes`. Always
-             *     sent, so `null` is distinct from an absent field.
+             * @description The homeserver's `m.upload.size`, in bytes, as this account's Matrix
+             *     client can use it: when the homeserver raised its limit after the
+             *     client first uploaded, the client keeps refusing above the old one
+             *     until it is rebuilt, and this is that old one. `null` when it is
+             *     unknown, for example because the homeserver did not answer, has not
+             *     been asked yet, or does not report one. Axon then applies only its own
+             *     cap, and the homeserver may still refuse an upload below `max_bytes`.
+             *     Always sent, so `null` is distinct from an absent field.
              */
             homeserver_max_bytes: number | null;
             /**
@@ -12233,7 +12236,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Definite event_too_large, preview_too_large or payload_too_large validation rejection; preview-aware content uses a 40960-byte budget including 12288 bytes reserved for media fields. payload_too_large also covers an upload that is now over the account's `media_upload_limit.max_bytes`, which can drop after staging. No preflight upload claims or event dispatch. */
+            /** @description Definite event_too_large, preview_too_large or payload_too_large validation rejection; preview-aware content uses a 40960-byte budget including 12288 bytes reserved for media fields. payload_too_large also covers a staged upload that is now over the account's `media_upload_limit.max_bytes`, which can drop after staging: its claim is released, the upload stays staged and retryable, and nothing is sent. Otherwise no preflight upload claims or event dispatch. */
             413: {
                 headers: {
                     [name: string]: unknown;

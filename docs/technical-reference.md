@@ -227,16 +227,24 @@ It advertises the lower of the two as `media_upload_limit` on `GET /v1/accounts`
 
 - `max_bytes` is the largest body `POST /v1/accounts/{account_id}/media/uploads` accepts.
   A larger one is a `413`, refused before staging when its `Content-Length` already says so, and otherwise as soon as the streamed body passes the limit.
+  A missing or inactive account is still a `404` or `403` first.
   A send rechecks the limit when it claims the staged file, in case the limit dropped after staging.
 - `homeserver_max_bytes` is `null` when the homeserver's limit is unknown, and `max_bytes` is then `media.max_upload_bytes`.
   It's unknown when no answer has arrived yet, when the lookup failed, when the homeserver sent no `m.upload.size`, or when the account has no connected client.
+  It can also be lower than the homeserver now allows: see the SDK's limit below.
 - A server older than this field omits `media_upload_limit`, and clients keep their own fallback limit.
 
 Account reads never wait for the homeserver.
 A missing or hour-old answer starts one lookup for that account, under the homeserver's load gate, with a 10 s request timeout.
-A failed lookup is retried after a minute.
-A homeserver or proxy `413` on a media send, or the SDK's own refusal against the `m.upload.size` it cached, asks for a fresh lookup.
+A failed lookup is retried after a minute, and one the load gate turns away after 5 s.
+Every media upload reports a refusal as too large: an attachment, its thumbnail, a link-preview image on a send or an edit, and a room or profile avatar.
+
+- A homeserver or proxy `413` asks for a fresh lookup, even while the answer is fresh, and keeps asking after a failed one until a lookup succeeds.
+- The Matrix SDK caches `m.upload.size` on the client's first upload and refuses anything above it until the client is rebuilt, so a limit the homeserver raised later is not usable yet.
+  The SDK's refusal carries that cached size, and Axon caps `homeserver_max_bytes` at it until the client is rebuilt (a reconnect after a failed sync, a re-login, or a restart).
+
 Lookups log under `upload limit:`, at `INFO` when the homeserver's limit changes and at `WARN` when a lookup fails.
+Refusals log `error_kind="upload_too_large"` at `WARN`.
 
 Raising the limit takes more than `media.max_upload_bytes`: the homeserver's own limit and any reverse proxy in front of either server must allow the size too.
 

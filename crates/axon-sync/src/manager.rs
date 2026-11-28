@@ -500,6 +500,7 @@ impl ClientManager {
     pub async fn take(&self, account_id: Uuid) -> Option<Client> {
         let slot = self.slot(account_id);
         let mut guard = slot.client.lock().await;
+        self.upload_limits.forget(account_id);
         guard.take()
     }
 
@@ -537,6 +538,9 @@ impl ClientManager {
             drop(slot.client.lock().await.take());
         }
         self.clear_dead_rooms(account_id);
+        // The rebuilt client has an empty SDK upload-size cache, so a limit
+        // learned from this one's refusals no longer applies.
+        self.upload_limits.forget(account_id);
     }
 
     fn clear_dead_rooms(&self, account_id: Uuid) {

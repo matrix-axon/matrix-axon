@@ -2194,11 +2194,14 @@ pub struct MediaUploadLimitDto {
     /// `m.upload.size`, or `media.max_upload_bytes` alone when
     /// `homeserver_max_bytes` is `null`. It can change between reads.
     pub max_bytes: u64,
-    /// The homeserver's `m.upload.size`, in bytes. `null` when it is unknown,
-    /// for example because the homeserver did not answer, has not been asked
-    /// yet, or does not report one. Axon then applies only its own cap, and
-    /// the homeserver may still refuse an upload below `max_bytes`. Always
-    /// sent, so `null` is distinct from an absent field.
+    /// The homeserver's `m.upload.size`, in bytes, as this account's Matrix
+    /// client can use it: when the homeserver raised its limit after the
+    /// client first uploaded, the client keeps refusing above the old one
+    /// until it is rebuilt, and this is that old one. `null` when it is
+    /// unknown, for example because the homeserver did not answer, has not
+    /// been asked yet, or does not report one. Axon then applies only its own
+    /// cap, and the homeserver may still refuse an upload below `max_bytes`.
+    /// Always sent, so `null` is distinct from an absent field.
     #[schema(required = true)]
     pub homeserver_max_bytes: Option<u64>,
 }

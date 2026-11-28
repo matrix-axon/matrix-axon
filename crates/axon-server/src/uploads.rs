@@ -254,6 +254,20 @@ impl FilesystemStagedUploads {
             })
     }
 
+    /// An upload needs an account that exists (`404`) and is active (`403`).
+    async fn check_account(&self, account_id: Uuid) -> Result<(), StageUploadError> {
+        let account = self.store.get_account(account_id).await.map_err(internal)?;
+        let Some(account) = account else {
+            return Err(StageUploadError::NotFound("account not found".to_owned()));
+        };
+        if account.state != AccountState::Active {
+            return Err(StageUploadError::Forbidden(format!(
+                "account {account_id} is not active"
+            )));
+        }
+        Ok(())
+    }
+
     async fn stage_upload_inner(
         &self,
         request: StageUploadRequest,
@@ -261,20 +275,7 @@ impl FilesystemStagedUploads {
         generated: bool,
         cap: u64,
     ) -> Result<StagedUpload, StageUploadError> {
-        let account = self
-            .store
-            .get_account(request.account_id)
-            .await
-            .map_err(internal)?;
-        let Some(account) = account else {
-            return Err(StageUploadError::NotFound("account not found".to_owned()));
-        };
-        if account.state != AccountState::Active {
-            return Err(StageUploadError::Forbidden(format!(
-                "account {} is not active",
-                request.account_id
-            )));
-        }
+        self.check_account(request.account_id).await?;
 
         let upload_id = Uuid::new_v4();
         let account_dir = self.root.join(request.account_id.to_string());
@@ -739,8 +740,10 @@ impl StagedUploadService for FilesystemStagedUploads {
         let cap = self.upload_cap(account_id);
         // A body that says it is too large is refused before it takes a
         // writer. The streamed count is enforced either way, so a wrong or
-        // absent length changes nothing but when the refusal comes.
+        // absent length changes nothing but when the refusal comes. A
+        // missing or inactive account still answers as such first.
         if let Some(declared) = request.declared_bytes.filter(|declared| *declared > cap) {
+            self.check_account(account_id).await?;
             tracing::info!(
                 account_id = %account_id,
                 declared_bytes = declared,
@@ -1885,6 +1888,33 @@ mod tests {
             .expect("a body within the limit");
 
         assert_eq!(staged_files(dir.path(), account_id), 1);
+        store.delete_account_row(account_id).await.expect("cleanup");
+    }
+
+    /// Review of #1210: the early refusal of a declared oversize must not
+    /// hide a missing (`404`) or inactive (`403`) account.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn a_declared_oversize_still_names_a_missing_or_inactive_account() {
+        let store = connect_store().await;
+        let account_id = test_account(&store).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (service, _limit) = limited_uploads(store.clone(), dir.path().into(), 4);
+
+        let missing = stage_body(&service, Uuid::new_v4(), Some(5), vec![b"1"]).await;
+        assert!(
+            matches!(missing, Err(StageUploadError::NotFound(_))),
+            "{missing:?}"
+        );
+        store
+            .set_account_state(account_id, axon_store::AccountState::Deactivated)
+            .await
+            .expect("deactivate");
+        let inactive = stage_body(&service, account_id, Some(5), vec![b"1"]).await;
+        assert!(
+            matches!(inactive, Err(StageUploadError::Forbidden(_))),
+            "{inactive:?}"
+        );
         store.delete_account_row(account_id).await.expect("cleanup");
     }
 

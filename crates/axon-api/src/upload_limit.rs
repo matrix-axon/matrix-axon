@@ -16,8 +16,9 @@ pub struct UploadLimit {
     /// cap and the homeserver's, or its own cap alone when the homeserver's
     /// is unknown.
     pub max_bytes: u64,
-    /// The homeserver's `m.upload.size`, or `None` when it is unknown (no
-    /// fresh answer, a failed or unsupported lookup, or no connected client).
+    /// The homeserver's `m.upload.size` as the account's Matrix client can
+    /// use it, or `None` when it is unknown (no fresh answer, a failed or
+    /// unsupported lookup, or no connected client).
     pub homeserver_max_bytes: Option<u64>,
 }
 
