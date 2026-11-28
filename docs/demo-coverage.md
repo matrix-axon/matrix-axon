@@ -66,6 +66,7 @@ shows it.
 | Image galleries (adjacency grouping, ADR 0081)          | **n/a**               | `media`                                                                                                                       | `media`         |
 | Lightbox paging across a gallery run                    | **n/a**               | `media`                                                                                                                       | `media`         |
 | Upright thumbnail of an EXIF-rotated photo              | **not covered**       | **not covered** — no corpus photo carries an orientation tag or a sender thumbnail                                            | **not covered** |
+| Video poster, dimensions and duration at send time      | **n/a**               | **not covered** — no scene sends media                                                                                        | **not covered** |
 | Full-text search across rooms (Tantivy)                 | `search`              | `search`                                                                                                                      | `search`        |
 | Search field filters (`room:`, `all:true`)              | `search`              | `search`                                                                                                                      | `search`        |
 | Search hit as a deep link into a room                   | **not covered**       | `search`                                                                                                                      | `search`        |
@@ -184,6 +185,10 @@ shows it.
   a longer scene.
   Axon now produces upright thumbnails for eligible image sends in both encrypted and unencrypted rooms.
   A demo of generation needs to stage and send an EXIF-tagged image large enough to qualify.
+- **Video poster, dimensions and duration at send time.** The web client reads
+  them from the file in the browser as it sends a video ([ADR 0142](adr/0142-send-time-media-metadata-and-thumbnails.md) section 7), so only a scene that sends one can show them, and none does (see "Sending media" above).
+  Such a scene would also need a corpus video the recording browser can decode: headless Chromium has no HEVC, and the poster is skipped for a codec the browser cannot decode.
+  The TUI has no video decoder and sends no poster, hence `n/a`.
 - **Typing indicators and read receipts, and a reaction badge updating live.**
   All need a second live client acting concurrently; the corpus is seeded history, not a running participant.
   The reaction case is worth distinguishing from the two rows above it:

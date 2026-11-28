@@ -4173,6 +4173,7 @@ describe('sending media (M-W8.5, ADR 0065)', () => {
         caption: 'look at this',
         reply_to: null,
         thread_root: null,
+        txn_id: expect.any(String),
       }),
     )
     // The chip is gone once the send is under way.
@@ -4198,6 +4199,7 @@ describe('sending media (M-W8.5, ADR 0065)', () => {
         thread_root: null,
         format: 'org.matrix.custom.html',
         formatted_body: '<p><strong>look</strong> at this</p>',
+        txn_id: expect.any(String),
       }),
     )
   })

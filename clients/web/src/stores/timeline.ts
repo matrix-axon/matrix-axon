@@ -14,7 +14,15 @@ import {
   uploadKind,
   type MediaService,
   type UploadKind,
+  type UploadResult,
 } from '../media/media-service'
+import {
+  probeAudio,
+  probeVideo,
+  type MediaProbe,
+  type SendMediaInfo,
+} from '../media/media-probe'
+import type { MediaSendSupport } from './capabilities'
 import { perfMark } from '../perf'
 import type { PreviewInput } from '../incoming-share/contract'
 import {
@@ -37,6 +45,28 @@ export type StickerSend = Pick<
 >
 
 export type LocalEchoStatus = 'pending' | 'failed'
+
+/**
+ * What one media send decided, kept on its echo so every retry of it sends
+ * the same thing (ADR 0142 § 4).
+ *
+ * The server joins a retry to the first send by its `txn_id`, and answers a
+ * retry whose caption, relation, `info` or thumbnail differ with a `409`. So
+ * a retry reuses the id and the probe, and once a request has gone out,
+ * sends exactly the `info` and thumbnail that one did. The echo's `kind`
+ * travels with it for the same reason.
+ */
+export interface MediaSendPlan {
+  /** One per send the user sees, kept across its retries. */
+  txnId: string
+  /**
+   * The video or audio probe (ADR 0142 § 7), started when the upload first
+   * started; absent when none applies or none has started.
+   */
+  probe?: Promise<MediaProbe | null>
+  /** What the last `send-media` request carried, once one went out. */
+  sent?: { info: SendMediaInfo | null; thumbnail: boolean }
+}
 
 type SendOptions = {
   /** Wire previews with upload ids already staged: share recovery's path. */
@@ -76,7 +106,12 @@ export type TimelineEvent = EventDto & {
      * revoked when the echo leaves the slice; `dropEchoes` is the one place
      * that happens.
      */
-    media?: { file: File; kind: UploadKind; previewUrl: string | null }
+    media?: {
+      file: File
+      kind: UploadKind
+      previewUrl: string | null
+      plan: MediaSendPlan
+    }
     sticker?: StickerSend
     /**
      * Display-only position within a multi-image send (ADR 0081). `retrySend`
@@ -443,6 +478,11 @@ export function createTimelineStore(
   accountId: string,
   roomId: string,
   threadRoot?: string,
+  /**
+   * What the server's media sends support (ADR 0142 § 1). Without it, media
+   * sends as ADR 0059's `image` and `file` kinds, with no `info` or poster.
+   */
+  support?: MediaSendSupport,
 ): TimelineStore {
   const events = signal<TimelineEvent[]>([])
   const loading = signal(true)
@@ -1583,6 +1623,15 @@ export function createTimelineStore(
     replyTo?: string
     threadRoot?: string
     senderId?: string
+    /** A retry's kind and plan, carried from its failed echo. */
+    retry?: { kind: UploadKind; plan: MediaSendPlan }
+  }
+
+  /** ADR 0142 § 4's additions to a `send-media` body. */
+  type MediaExtras = {
+    info?: SendMediaInfo | null
+    thumbnailUploadId?: string
+    txnId?: string
   }
 
   async function sendStagedMedia(
@@ -1599,6 +1648,7 @@ export function createTimelineStore(
     uploadId: string,
     caption: string | undefined,
     options: SendOptions,
+    extras: MediaExtras = {},
   ) {
     return mutateWithResult(
       () =>
@@ -1618,9 +1668,51 @@ export function createTimelineStore(
             ...(options.urlPreviews === undefined
               ? {}
               : { url_previews: options.urlPreviews }),
+            ...(extras.info == null ? {} : { info: extras.info }),
+            ...(extras.thumbnailUploadId === undefined
+              ? {}
+              : { thumbnail_upload_id: extras.thumbnailUploadId }),
+            ...(extras.txnId === undefined ? {} : { txn_id: extras.txnId }),
           },
         }),
       options.progress,
+    )
+  }
+
+  /** Update a media echo's plan in place, if the echo is still there. */
+  function patchMediaPlan(localId: string, patch: Partial<MediaSendPlan>) {
+    events.value = events.value.map((event) => {
+      const echo = event.localEcho
+      if (event.event_id !== localId || echo?.media === undefined) return event
+      return {
+        ...event,
+        localEcho: {
+          ...echo,
+          media: { ...echo.media, plan: { ...echo.media.plan, ...patch } },
+        },
+      }
+    })
+  }
+
+  /** The media on an echo still in the slice. */
+  function echoMediaOf(localId: string) {
+    return events.value.find((event) => event.event_id === localId)?.localEcho
+      ?.media
+  }
+
+  /**
+   * Stage a video's poster as an `image` upload (ADR 0142 § 7), or `null`
+   * when the probe made none.
+   */
+  async function stagePoster(
+    probe: Promise<MediaProbe | null>,
+  ): Promise<UploadResult | null> {
+    const poster = (await probe)?.poster ?? null
+    if (poster === null) return null
+    return media.upload(
+      accountId,
+      new File([poster], 'poster.jpg', { type: poster.type || 'image/jpeg' }),
+      'image',
     )
   }
 
@@ -1637,7 +1729,10 @@ export function createTimelineStore(
     options: MediaSendOptions,
     batch?: { index: number; total: number },
   ): string {
-    const kind = uploadKind(file)
+    const { retry, ...sendOptions } = options
+    const kind =
+      retry?.kind ?? uploadKind(file, support?.mediaUploadKinds.peek() ?? null)
+    const plan: MediaSendPlan = retry?.plan ?? { txnId: randomId() }
     // The server sets the event body to the caption, or to the filename when
     // there is none — so an echo built with the same rule is what the confirming
     // live frame's `confirmsEcho` body match recognizes, for free.
@@ -1645,7 +1740,12 @@ export function createTimelineStore(
     const localId = `local:${randomId()}`
     const previewUrl = kind === 'image' ? URL.createObjectURL(file) : null
 
-    const echo = buildLocalEcho(localId, body, options, options.senderId)
+    const echo = buildLocalEcho(
+      localId,
+      body,
+      sendOptions,
+      sendOptions.senderId,
+    )
     events.value = [
       ...events.value,
       // Cast for the same reason `buildLocalEcho` does: the generated schema
@@ -1653,7 +1753,7 @@ export function createTimelineStore(
       {
         ...echo,
         content: {
-          msgtype: kind === 'image' ? 'm.image' : 'm.file',
+          msgtype: `m.${kind}`,
           body,
           filename: file.name,
           ...(options.formattedBody
@@ -1669,7 +1769,7 @@ export function createTimelineStore(
         },
         localEcho: {
           ...echo.localEcho!,
-          media: { file, kind, previewUrl },
+          media: { file, kind, previewUrl, plan },
           ...(batch === undefined ? {} : { batch }),
         },
       } as unknown as TimelineEvent,
@@ -1677,26 +1777,90 @@ export function createTimelineStore(
     return localId
   }
 
-  /** Upload the bytes for an echo already in the slice, and send the event. */
+  /**
+   * Upload the bytes for an echo already in the slice, and send the event.
+   *
+   * A video or audio file is probed for its `info` and poster (ADR 0142 § 7)
+   * while its bytes upload, so on any upload of more than a few seconds the
+   * probe adds no time. Only against a server that applies what it finds
+   * (`send_media_thumbnails`); a failed probe or poster upload sends the
+   * media without them.
+   */
   async function completeMediaSend(
     localId: string,
     file: File,
     options: MediaSendOptions,
   ): Promise<boolean> {
-    const staged = await media.upload(accountId, file)
+    const echoMedia = echoMediaOf(localId)
+    const kind = echoMedia?.kind ?? uploadKind(file)
+    let plan = echoMedia?.plan ?? { txnId: randomId() }
+    const sent = plan.sent
+    const enriched = support?.sendMediaThumbnails.peek() === true
+    if (
+      plan.probe === undefined &&
+      sent === undefined &&
+      enriched &&
+      (kind === 'video' || kind === 'audio')
+    ) {
+      plan = {
+        ...plan,
+        probe: kind === 'video' ? probeVideo(file) : probeAudio(file),
+      }
+      patchMediaPlan(localId, { probe: plan.probe })
+    }
+    const probe = plan.probe ?? Promise.resolve(null)
+    // A retry after a request went out sends what that request sent, so the
+    // server recognises it (`MediaSendPlan`).
+    const poster =
+      sent === undefined || sent.thumbnail
+        ? stagePoster(probe)
+        : Promise.resolve(null)
+    if (sent?.thumbnail === true) {
+      // Without the poster this retry would differ from the request the
+      // server may remember, and be answered 409 on every attempt. So it
+      // fails here, before the original is uploaded again, and the next
+      // Retry tries the poster again. A fresh upload id is fine: the server
+      // compares whether a thumbnail is sent, not which.
+      const staged = await poster
+      if (staged === null || !staged.ok) {
+        error.value =
+          staged === null ? 'Upload failed' : uploadFailureMessage(staged.error)
+        failEcho(localId)
+        return false
+      }
+    }
+
+    const staged = await media.upload(accountId, file, kind)
     if (!staged.ok) {
       error.value = uploadFailureMessage(staged.error)
       failEcho(localId)
       return false
     }
 
+    const info = sent === undefined ? ((await probe)?.info ?? null) : sent.info
+    const posterStaged = await poster
+    const thumbnailUploadId = posterStaged?.ok
+      ? posterStaged.uploadId
+      : undefined
+    patchMediaPlan(localId, {
+      sent: { info, thumbnail: thumbnailUploadId !== undefined },
+    })
     const result = await dispatchMedia(
       staged.uploadId,
       options.caption,
       options,
+      { info, thumbnailUploadId, txnId: plan.txnId },
     )
 
     if (!result.ok) {
+      // A `400` sent nothing and is not remembered, and an `info` or poster
+      // the server refused would be refused again, so Retry sends the media
+      // bare (ADR 0142 § 4: a thumbnail never costs a send).
+      if (
+        result.status === 400 &&
+        (info !== null || thumbnailUploadId !== undefined)
+      )
+        patchMediaPlan(localId, { sent: { info: null, thumbnail: false } })
       failEcho(localId)
       return false
     }
@@ -1734,12 +1898,13 @@ export function createTimelineStore(
       file,
       // Caption and `replyTo` belong to the first image only; `threadRoot`
       // applies to all, because thread membership is a destination rather
-      // than a per-event decoration (ADR 0081).
+      // than a per-event decoration (ADR 0081). A retry is one file.
       options: {
         ...options,
         caption: index === 0 ? options.caption : undefined,
         formattedBody: index === 0 ? options.formattedBody : undefined,
         replyTo: index === 0 ? options.replyTo : undefined,
+        retry: index === 0 ? options.retry : undefined,
       },
       localId: '',
     }))
@@ -1881,6 +2046,9 @@ export function createTimelineStore(
                 ? undefined
                 : body,
             senderId,
+            // The same id, kind and probe, so the server can join this retry
+            // to a send that in fact went through (ADR 0142 § 4).
+            retry: { kind: failedMedia.kind, plan: failedMedia.plan },
           })
     },
 

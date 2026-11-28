@@ -1745,6 +1745,22 @@ const server = createServer((req, res) => {
       })),
     })
   }
+  // The newest staged upload with this filename, as its raw bytes, for a
+  // spec that must look at them: a video poster that is solid black has the
+  // right size and type, and only its pixels give it away. A route capture
+  // cannot stand in, because Playwright's WebKit exposes no Blob body.
+  if (req.method === 'GET' && url.pathname === '/__e2e/upload-bytes') {
+    const name = url.searchParams.get('filename')
+    const upload = [...uploads.values()]
+      .filter((u) => u.filename === name)
+      .at(-1)
+    if (upload === undefined) return json(res, { error: 'no such upload' }, 404)
+    res.writeHead(200, {
+      'content-type': upload.contentType ?? 'application/octet-stream',
+    })
+    res.end(upload.bytes)
+    return
+  }
   if (req.method === 'GET' && url.pathname === '/__e2e/qr-submission') {
     return json(res, {
       data: {

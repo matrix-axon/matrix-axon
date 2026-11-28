@@ -16,6 +16,7 @@ import {
   createMediaService,
   MAX_UPLOAD_BYTES,
   uploadFailureMessage,
+  uploadKind,
   type MediaFailure,
 } from './media-service'
 
@@ -538,6 +539,20 @@ describe('createMediaService.upload', () => {
 
     expect(seen.kind).toBe('file')
     expect(seen.contentType).toBe('application/pdf')
+  })
+
+  it('stages a kind the caller chose', async () => {
+    const seen = captureUpload()
+    const media = createMediaService({ auth: stubAuth(), baseUrl: BASE_URL })
+
+    await media.upload(
+      ACCOUNT,
+      new File(['moov'], 'clip.mp4', { type: 'video/mp4' }),
+      'video',
+    )
+
+    expect(seen.kind).toBe('video')
+    expect(seen.contentType).toBe('video/mp4')
   })
 
   it('stages a file the browser could not type as kind=file', async () => {
@@ -1147,4 +1162,28 @@ it('enforces byte limits and error-envelope parsing on buffered transports', asy
     (await buffered.acquire(ACCOUNT, 'mxc://hs/too-big', { maxBytes: 4 }))
       .result,
   ).toMatchObject({ ok: false, error: { kind: 'too_large' } })
+})
+
+describe('uploadKind (ADR 0142 § 1)', () => {
+  const typed = (type: string) => new File(['x'], 'f', { type })
+  const ALL = ['image', 'file', 'video', 'audio'] as const
+
+  it('stages video and audio as their own kinds when the server lists them', () => {
+    expect(uploadKind(typed('video/quicktime'), ALL)).toBe('video')
+    expect(uploadKind(typed('audio/mpeg'), ALL)).toBe('audio')
+    expect(uploadKind(typed('image/heic'), ALL)).toBe('image')
+    expect(uploadKind(typed('application/pdf'), ALL)).toBe('file')
+    expect(uploadKind(typed(''), ALL)).toBe('file')
+  })
+
+  it('falls back to file when the server does not list them, or is not known', () => {
+    // An older server rejects kind=video while staging (ADR 0142 § 1).
+    expect(uploadKind(typed('video/mp4'), ['image', 'file'])).toBe('file')
+    expect(uploadKind(typed('audio/mp4'), ['image', 'file', 'video'])).toBe(
+      'file',
+    )
+    expect(uploadKind(typed('video/mp4'), null)).toBe('file')
+    expect(uploadKind(typed('video/mp4'))).toBe('file')
+    expect(uploadKind(typed('image/png'))).toBe('image')
+  })
 })
