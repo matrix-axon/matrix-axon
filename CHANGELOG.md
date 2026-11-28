@@ -3,6 +3,29 @@
 Notable changes to each release, newest first.
 The same notes are on the [GitHub Releases](https://github.com/matrix-axon/matrix-axon/releases) page.
 
+## v0.2.2 - 2026-11-28
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### What's Changed
+#### Features
+* feat: expose the joined space graph by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1251
+* feat: add image dimensions and thumbnails at send time by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1268
+* feat: add account-level insecure device exclusion by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1246
+* feat: browse nested spaces through unjoined branches by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1264
+* feat(api): report a redaction's arrival order on the row it redacted by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1276
+* feat(web): send video and audio as their own kinds, with posters, dimensions and duration by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1281
+* feat(web): navigate nested Matrix spaces by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1283
+#### Bug Fixes
+* fix(web): keep a jumped timeline paging forward on Firefox by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1265
+* fix(web): keep ready previews when a link stays in the draft by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1267
+* fix(web): focus the composer after picking a room from the list by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1274
+* fix(web): let a receipt name a redaction folded onto a displayed event by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1277
+* fix(tui): let a receipt name a redaction folded onto a displayed event by @ajkessel in https://github.com/matrix-axon/matrix-axon/pull/1278
+
+
+**Full Changelog**: https://github.com/matrix-axon/matrix-axon/compare/v0.2.1...v0.2.2
+
 ## v0.2.1 - 2026-11-25
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
