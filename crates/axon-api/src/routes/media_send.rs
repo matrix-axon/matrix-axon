@@ -26,10 +26,11 @@ const TXN_REMEMBERED_FOR: Duration = Duration::from_secs(10 * 60);
 /// The most `txn_id`s remembered per account.
 const TXNS_PER_ACCOUNT: usize = 256;
 /// The longest a retry waits for the send its `txn_id` names. Each step of
-/// that send is bounded (60 s for the send, plus 5 s and 10 s for a
-/// thumbnail), but its claims read the database and local disk untimed, so
-/// the wait gets a bound of its own: a retry that hits it gets a `504`, and
-/// the next one joins again or gets the event.
+/// that send is bounded (ADR 0142 section 8: 5 s for a client thumbnail, 60 s
+/// for the original's upload, 10 s for the thumbnail's and 30 s for the
+/// event, 105 s with the defaults), but its claims read the database and
+/// local disk untimed, so the wait gets a bound of its own: a retry that
+/// hits it gets a `504`, and the next one joins again or gets the event.
 const JOIN_WAIT: Duration = Duration::from_secs(120);
 
 /// The fields ADR 0142 adds to `send-media`, shared by both send paths.

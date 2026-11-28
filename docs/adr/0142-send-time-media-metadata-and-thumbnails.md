@@ -426,6 +426,30 @@ Both exceed the shipped web client's 65 s wait, so a late success remains possib
 The per-step bounds above arrive in the same release as delivery step 5 ([issue 1243](https://github.com/matrix-axon/matrix-axon/issues/1243)).
 When the original upload outlasts inspection, inspection adds no time to the send.
 
+**Amended 2026-11-26: the per-step bounds ship ([issue 1243](https://github.com/matrix-axon/matrix-axon/issues/1243)), after delivery step 5.**
+Delivery step 5 ([pull request 1281](https://github.com/matrix-axon/matrix-axon/pull/1281)) makes the web client wait 115 s for `send-media` and send a `txn_id` kept across retries.
+The per-step bounds merge after it, never before, so that `main` never pairs them with a client that gives up at 65 s.
+A send with an attachment then follows the table above, and the single budget of the previous amendment is gone:
+
+- The upload bound covers resolving the room, the first encryption check, any preview images, and the original's upload.
+  Inspection runs alongside the upload under its own 5 s and the step's bound together.
+  If the upload has finished and inspection is still running at the step's deadline, the send goes on without what inspection would have added.
+  Inspection starts with the upload, so that needs an upload that began in the bound's last 5 s and still finished before its deadline.
+  Inspection no longer pauses a budget, and it cannot carry the send past the table's sum.
+- The thumbnail's upload runs under its own 10 s, between the steps, and is charged to neither.
+- The event step starts its own `sync.send_mutation_timeout_secs` after the thumbnail.
+  It covers the reply lookup, a plaintext room's second encryption check, and the send.
+  Time left over from the upload step does not carry over.
+
+So Axon answers within 105 s with the defaults, plus up to 5 s for a preview slot when `send-media` carries `url_previews`, plus the untimed local reads.
+The web client's 115 s is that 110 s and its usual `PAST_AXON_MS` margin.
+A packaged shell built before delivery step 5 still waits 65 s, and the 2026-11-23 interim already exceeded that (about 75 s).
+The per-step bounds widen the gap to up to 100 s for such a client, which sends no client thumbnail.
+A text send with link previews has no attachment and keeps one upload budget for the whole send.
+The web client allows it only that budget (`AXON_PREVIEW_SEND_MS`), and a text send carries no `txn_id` ([issue 1223](https://github.com/matrix-axon/matrix-axon/issues/1223)).
+The TUI still gives up on `send-media` after 60 s and sends no `txn_id` ([issue 1212](https://github.com/matrix-axon/matrix-axon/issues/1212)).
+It never retries a send on its own, but a person who sends the file again after a late success posts it twice.
+
 A client that bounds `send-media` must allow for the new ceiling.
 The web client derives its timeout from the upstream upload bound (`AXON_UPSTREAM_UPLOAD_MS` in `clients/web/src/api/client.ts`).
 Step 5 of the delivery changes it to the sum above, keeping its existing `PAST_AXON_MS` margin for the untimed work and the network.

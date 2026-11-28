@@ -159,12 +159,21 @@ pub async fn send_message(
 ///
 /// The send runs in a task of its own, which settles every upload it
 /// claimed even if the client disconnects: consumed when the event is sent,
-/// released when it fails. Room resolution, the original upload and the
-/// event send share `media.upstream_upload_timeout_secs` (60 s by default).
-/// For images, Axon probes dimensions and can generate a thumbnail while the
-/// original uploads. Preparation of a supplied thumbnail and inspection of
-/// an image original each have a 5 s budget. Thumbnail uploads are
-/// best-effort with their own 10 s budget.
+/// released when it fails. Each step has its own budget (ADR 0142 section
+/// 8): preparing a supplied thumbnail 5 s; resolving the room and uploading
+/// the original `media.upstream_upload_timeout_secs` (60 s by default); the
+/// thumbnail's upload, which is best-effort, 10 s; and building and sending
+/// the event, including any reply lookup, `sync.send_mutation_timeout_secs`
+/// (30 s by default). A request with `url_previews` first waits up to 5 s
+/// for a preview slot. So Axon answers within 105 s with the defaults, or
+/// 110 s with `url_previews`, plus the time to read the staged files from
+/// disk. A client should wait longer than that, allowing for the network,
+/// and send a `txn_id`, so that a retry after it gives up joins the send
+/// instead of posting it again. For images, Axon probes dimensions and can
+/// generate a thumbnail while the original uploads, within a 5 s budget of
+/// its own and the original's step: inspection still running when that
+/// step's budget ends is given up, and the image goes without what it would
+/// have added.
 #[utoipa::path(
     post,
     path = "/v1/accounts/{account_id}/rooms/{room_id}/send-media",

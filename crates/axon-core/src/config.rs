@@ -323,8 +323,9 @@ pub struct SyncConfig {
     /// takes on a fresh device with a large key-backup import (ADR 0026),
     /// which can exceed a minute. A timeout here surfaces as a `504` instead
     /// of an indefinitely hung connection. Kept shorter than the TUI's own
-    /// 60 s client-side timeout so the server always answers first. Defaults
-    /// to 30.
+    /// 60 s client-side timeout so the server always answers first. Also
+    /// bounds a media send's event, after its upload (ADR 0142 section 8).
+    /// Defaults to 30.
     #[serde(default = "default_send_mutation_timeout_secs")]
     pub send_mutation_timeout_secs: u64,
     /// Per-call timeout for an outbound read receipt (ADR 0067), in seconds.
@@ -618,9 +619,10 @@ pub struct MediaConfig {
     /// 60.
     #[serde(default = "default_media_upload_request_timeout_secs")]
     pub upload_request_timeout_secs: u64,
-    /// Wall-clock budget for the later homeserver upload/send step, in seconds.
-    /// Declared with M15a so the config shape is stable before the M15b SDK
-    /// adapter consumes it. Defaults to 60.
+    /// Wall-clock budget for the later homeserver upload, in seconds: a media
+    /// send's room lookup and original upload (its event then has
+    /// `sync.send_mutation_timeout_secs`, ADR 0142 section 8), the whole of a
+    /// text send with link previews, and an avatar set. Defaults to 60.
     #[serde(default = "default_media_upstream_upload_timeout_secs")]
     pub upstream_upload_timeout_secs: u64,
     /// Generate thumbnails for staged image sends (ADR 0142). Image dimensions
