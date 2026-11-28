@@ -1,5 +1,6 @@
 import type { ApiClient } from '../api/client'
 import type { MediaService } from '../media/media-service'
+import type { MediaSendSupport } from './capabilities'
 import {
   createTimelineStore,
   type EventDto,
@@ -119,6 +120,7 @@ export function createTimelineStoreCache(
   api: ApiClient,
   media: MediaService,
   limit: number = TIMELINE_STORE_LIMIT,
+  support?: MediaSendSupport,
 ): TimelineStoreCache {
   /**
    * Insertion order is LRU order: a hit re-inserts, so the oldest live entry
@@ -189,7 +191,14 @@ export function createTimelineStoreCache(
         // Safe: `reusable` said no, so it holds no unsent work.
         warm.dispose()
       }
-      const store = createTimelineStore(api, media, accountId, roomId)
+      const store = createTimelineStore(
+        api,
+        media,
+        accountId,
+        roomId,
+        undefined,
+        support,
+      )
       stores.set(key, store)
       evict(key)
       return store

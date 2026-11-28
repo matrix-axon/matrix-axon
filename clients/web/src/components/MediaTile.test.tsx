@@ -105,6 +105,30 @@ describe('MediaTile', () => {
     )
   })
 
+  it('fetches an encrypted poster whole, since the server cannot thumbnail it', async () => {
+    // No `/thumbnail` handler: the server answers that with a 400 for
+    // encrypted media, and an unhandled request fails this test.
+    let fetched: string | undefined
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/media/:account/:server/:media`,
+        ({ params }) => {
+          fetched = String(params.media)
+          return new HttpResponse(new Uint8Array([1, 2, 3]), {
+            headers: { 'content-type': 'image/jpeg' },
+          })
+        },
+      ),
+    )
+    const { container } = renderAttachment(
+      video({ thumbnailUrl: 'mxc://hs/poster', encrypted: true }),
+    )
+    await waitFor(() =>
+      expect(container.querySelector('.media-tile-poster img')).toBeTruthy(),
+    )
+    expect(fetched).toBe('poster')
+  })
+
   it('keeps the filename, size and Download on the tile', () => {
     const { getByText, getByRole } = renderAttachment(video())
     expect(getByText('clip.mp4')).toBeTruthy()

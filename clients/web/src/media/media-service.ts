@@ -2,6 +2,7 @@ import { effect } from '@preact/signals'
 import { apiErrorCode, apiErrorMessage } from '../api/client'
 import type { AuthProvider } from '../auth/provider'
 import { browserPlatform, type Platform } from '../platform'
+import type { MediaUploadKind } from '../stores/capabilities'
 import { mxcToPath } from './parse-media'
 import { SNIFF_HEAD_BYTES, sniffImageFormat } from './sniff'
 
@@ -73,8 +74,11 @@ export interface MediaFailure {
 export type UploadResult =
   { ok: true; uploadId: string } | { ok: false; error: MediaFailure }
 
-/** The Matrix media kind a `File` will be staged as (ADR 0059's `kind` enum). */
-export type UploadKind = 'image' | 'file'
+/**
+ * The Matrix media kind a `File` will be staged as (ADR 0059's `kind` enum,
+ * widened by ADR 0142 § 1).
+ */
+export type UploadKind = MediaUploadKind
 
 export interface MediaHandle {
   result: MediaResult
@@ -154,8 +158,14 @@ export interface MediaService {
   /**
    * Stage a file's bytes for a later `send-media` (ADR 0065, the first step of
    * ADR 0059's two-step upload). Returns the `upload_id` the send claims.
+   * `kind` defaults to [`uploadKind`] with only the kinds every server
+   * accepts.
    */
-  upload(accountId: string, file: File): Promise<UploadResult>
+  upload(
+    accountId: string,
+    file: File,
+    kind?: UploadKind,
+  ): Promise<UploadResult>
   /**
    * Forget the cached object URL for `mxcUrl`, so the next `acquire()` refetches.
    *
@@ -353,13 +363,26 @@ export const MAX_UPLOAD_BYTES = 100 * 1024 * 1024
  * because a path on disk is all it has — the browser hands us the platform's
  * own MIME determination, so `kind` is read straight off it. That keeps `kind`
  * and `Content-Type` consistent by construction, which is the invariant the
- * server polices: `kind=image` with a non-`image/*` type is a 400
+ * server polices: a kind whose type does not match is a 400
  * (`axon-sync/src/gateway.rs`). A file whose type the browser could not
  * determine (`''`) stages as `file` with no `Content-Type` at all, which the
  * handler accepts.
+ *
+ * `video` and `audio` are used only when `accepted` lists them (ADR 0142 § 1):
+ * an older server rejects them while staging, and would lose a send it makes
+ * successfully as `file`. Without them, a video or audio file stages as
+ * `file`, and the server sends it as `m.file` with an octet-stream type, as
+ * it always has.
  */
-export function uploadKind(file: File): UploadKind {
-  return file.type.startsWith('image/') ? 'image' : 'file'
+export function uploadKind(
+  file: File,
+  accepted: readonly UploadKind[] | null = null,
+): UploadKind {
+  const major = file.type.split('/', 1)[0]
+  if (major === 'image') return 'image'
+  if ((major === 'video' || major === 'audio') && accepted?.includes(major))
+    return major
+  return 'file'
 }
 
 /** User-facing text for a failed upload. */
@@ -816,13 +839,17 @@ export function createMediaService(deps: {
    * per-host budget for many small thumbnails, and a large upload parked in it
    * would stall every image on screen.
    */
-  async function upload(accountId: string, file: File): Promise<UploadResult> {
+  async function upload(
+    accountId: string,
+    file: File,
+    kind: UploadKind = uploadKind(file),
+  ): Promise<UploadResult> {
     if (file.size > MAX_UPLOAD_BYTES) {
       return { ok: false, error: { kind: 'too_large' } }
     }
     const url =
       `${root}/v1/accounts/${encodeURIComponent(accountId)}/media/uploads` +
-      `?kind=${uploadKind(file)}&filename=${encodeURIComponent(file.name)}`
+      `?kind=${kind}&filename=${encodeURIComponent(file.name)}`
 
     try {
       const token = await deps.auth.getToken()

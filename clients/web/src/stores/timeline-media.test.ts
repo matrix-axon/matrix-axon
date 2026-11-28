@@ -10,9 +10,18 @@ import {
   it,
   vi,
 } from 'vitest'
+import { signal } from '@preact/signals'
 import { createApiClient } from '../api/client'
+import { probeAudio, probeVideo } from '../media/media-probe'
 import { createMediaService } from '../media/media-service'
+import type { MediaSendSupport, MediaUploadKind } from './capabilities'
 import { createTimelineStore, type EventDto } from './timeline'
+
+// jsdom decodes no media; `media-probe.test.ts` covers the probe itself.
+vi.mock('../media/media-probe', () => ({
+  probeVideo: vi.fn(),
+  probeAudio: vi.fn(),
+}))
 
 /**
  * The media-send path (ADR 0065): stage the bytes, claim them with
@@ -43,7 +52,7 @@ beforeEach(() => {
 })
 afterEach(() => vi.restoreAllMocks())
 
-function makeStore(threadRoot?: string) {
+function makeStore(threadRoot?: string, support?: MediaSendSupport) {
   const auth = {
     getToken: () => 'tok-test',
     onAuthFailure: () => {},
@@ -51,7 +60,7 @@ function makeStore(threadRoot?: string) {
   }
   const api = createApiClient(auth, BASE_URL)
   const media = createMediaService({ auth, baseUrl: BASE_URL })
-  return createTimelineStore(api, media, ACCOUNT, ROOM, threadRoot)
+  return createTimelineStore(api, media, ACCOUNT, ROOM, threadRoot, support)
 }
 
 function confirmed(id: string, body: string): EventDto {
@@ -196,6 +205,8 @@ describe('sendMedia', () => {
       caption: 'a caption',
       reply_to: null,
       thread_root: null,
+      // Sent to any server; only one with `send_media_thumbnails` uses it.
+      txn_id: expect.stringMatching(/^[A-Za-z0-9._~-]{1,64}$/),
     })
     // The echo is gone, replaced by the server's event — and its preview url
     // with it, since the confirmed event renders from the media proxy.
@@ -517,5 +528,294 @@ describe('sendMediaBatch', () => {
     const order = store.events.value.map((e) => e.body)
     expect(order).toHaveLength(3)
     expect(order[0]).toBe(firstEchoBody)
+  })
+})
+
+/**
+ * Video and audio (ADR 0142 §§ 1, 4 and 7, issue 24): their own kinds, and
+ * a probe's `info` and poster, only against a server that lists them.
+ */
+describe('video and audio sends', () => {
+  const POSTER_ID = '33333333-3333-4333-8333-333333333333'
+  const mov = () =>
+    new File(['moov'], 'IMG_9306.mov', { type: 'video/quicktime' })
+  const m4a = () => new File(['ftyp'], 'memo.m4a', { type: 'audio/mp4' })
+  const poster = () => new Blob(['jpeg'], { type: 'image/jpeg' })
+  const VIDEO_INFO = { width: 1920, height: 1080, duration_ms: 31251 }
+
+  function supporting(
+    kinds: readonly MediaUploadKind[] | null = [
+      'image',
+      'file',
+      'video',
+      'audio',
+    ],
+    thumbnails: boolean | null = true,
+  ): MediaSendSupport {
+    return {
+      mediaUploadKinds: signal(kinds),
+      sendMediaThumbnails: signal(thumbnails),
+    }
+  }
+
+  /** Every staging request's kind and type, and every send-media body. */
+  function serve(
+    options: {
+      posterStatus?: number
+      sendStatus?: () => number
+    } = {},
+  ) {
+    const staged: { kind: string | null; type: string | null }[] = []
+    const sends: Record<string, unknown>[] = []
+    server.use(
+      http.post(UPLOAD_PATH, ({ request }) => {
+        const url = new URL(request.url)
+        const kind = url.searchParams.get('kind')
+        staged.push({ kind, type: request.headers.get('content-type') })
+        if (url.searchParams.get('filename') === 'poster.jpg') {
+          return options.posterStatus === undefined
+            ? HttpResponse.json({ data: { upload_id: POSTER_ID } })
+            : HttpResponse.json(
+                { error: { code: 'x', message: 'no' } },
+                { status: options.posterStatus },
+              )
+        }
+        return HttpResponse.json({ data: { upload_id: UPLOAD_ID } })
+      }),
+      http.post(SEND_MEDIA_PATH, async ({ request }) => {
+        sends.push((await request.json()) as Record<string, unknown>)
+        const status = options.sendStatus?.() ?? 200
+        return status === 200
+          ? HttpResponse.json({ data: { event_id: '$vid' } })
+          : HttpResponse.json(
+              { error: { code: 'gateway_timeout', message: 'slow' } },
+              { status },
+            )
+      }),
+      http.get(EVENTS_PATH, () =>
+        HttpResponse.json({ data: confirmed('$vid', 'IMG_9306.mov') }),
+      ),
+    )
+    return { staged, sends }
+  }
+
+  beforeEach(() => {
+    vi.mocked(probeVideo).mockReset()
+    vi.mocked(probeAudio).mockReset()
+    vi.mocked(probeVideo).mockResolvedValue({
+      info: VIDEO_INFO,
+      poster: poster(),
+    })
+    vi.mocked(probeAudio).mockResolvedValue({
+      info: { duration_ms: 4200 },
+      poster: null,
+    })
+  })
+
+  it('sends a video as m.video with its info, poster and txn_id', async () => {
+    const seen = serve()
+    const store = makeStore(undefined, supporting())
+
+    const result = store.sendMedia(mov())
+    const echo = store.events.value[0]
+    expect(echo.localEcho?.media?.kind).toBe('video')
+    expect((echo.content as unknown as { msgtype: string }).msgtype).toBe(
+      'm.video',
+    )
+    expect(await result).toBe(true)
+
+    expect(probeVideo).toHaveBeenCalledTimes(1)
+    expect(seen.staged).toEqual(
+      expect.arrayContaining([
+        { kind: 'video', type: 'video/quicktime' },
+        { kind: 'image', type: 'image/jpeg' },
+      ]),
+    )
+    expect(seen.sends).toEqual([
+      {
+        upload_id: UPLOAD_ID,
+        caption: null,
+        reply_to: null,
+        thread_root: null,
+        info: VIDEO_INFO,
+        thumbnail_upload_id: POSTER_ID,
+        txn_id: expect.any(String),
+      },
+    ])
+  })
+
+  it('sends audio as m.audio with its duration and no thumbnail', async () => {
+    const seen = serve()
+    const store = makeStore(undefined, supporting())
+
+    expect(await store.sendMedia(m4a())).toBe(true)
+
+    expect(probeVideo).not.toHaveBeenCalled()
+    expect(seen.staged).toEqual([{ kind: 'audio', type: 'audio/mp4' }])
+    expect(seen.sends[0]).toMatchObject({ info: { duration_ms: 4200 } })
+    expect(seen.sends[0]).not.toHaveProperty('thumbnail_upload_id')
+  })
+
+  it('stages video as a file, and probes nothing, against an older server', async () => {
+    const seen = serve()
+    // A server without `media_upload_kinds` or `send_media_thumbnails`.
+    const store = makeStore(undefined, supporting(['image', 'file'], false))
+
+    expect(await store.sendMedia(mov())).toBe(true)
+
+    expect(store.events.value[0].localEcho).toBeUndefined()
+    expect(probeVideo).not.toHaveBeenCalled()
+    expect(seen.staged).toEqual([{ kind: 'file', type: 'video/quicktime' }])
+    expect(seen.sends[0]).not.toHaveProperty('info')
+    expect(seen.sends[0]).not.toHaveProperty('thumbnail_upload_id')
+  })
+
+  it('treats capabilities not yet known as an older server', async () => {
+    const seen = serve()
+    const store = makeStore(undefined, supporting(null, null))
+
+    await store.sendMedia(mov())
+
+    expect(probeVideo).not.toHaveBeenCalled()
+    expect(seen.staged).toEqual([{ kind: 'file', type: 'video/quicktime' }])
+  })
+
+  it('uses the new kinds without a poster when the server lists only them', async () => {
+    const seen = serve()
+    const store = makeStore(undefined, supporting(undefined, false))
+
+    await store.sendMedia(mov())
+
+    expect(probeVideo).not.toHaveBeenCalled()
+    expect(seen.staged).toEqual([{ kind: 'video', type: 'video/quicktime' }])
+    expect(seen.sends[0]).not.toHaveProperty('info')
+  })
+
+  it('sends without info or poster when the probe fails', async () => {
+    vi.mocked(probeVideo).mockResolvedValue(null)
+    const seen = serve()
+    const store = makeStore(undefined, supporting())
+
+    expect(await store.sendMedia(mov())).toBe(true)
+
+    expect(seen.staged).toEqual([{ kind: 'video', type: 'video/quicktime' }])
+    expect(seen.sends[0]).not.toHaveProperty('info')
+    expect(seen.sends[0]).not.toHaveProperty('thumbnail_upload_id')
+  })
+
+  it('keeps the info when only the poster upload fails', async () => {
+    const seen = serve({ posterStatus: 502 })
+    const store = makeStore(undefined, supporting())
+
+    expect(await store.sendMedia(mov())).toBe(true)
+
+    expect(seen.sends[0]).toMatchObject({ info: VIDEO_INFO })
+    expect(seen.sends[0]).not.toHaveProperty('thumbnail_upload_id')
+  })
+
+  it('retries with the same txn_id, info and poster, probing once', async () => {
+    let attempt = 0
+    const seen = serve({ sendStatus: () => (++attempt === 1 ? 504 : 200) })
+    const store = makeStore(undefined, supporting())
+
+    expect(await store.sendMedia(mov())).toBe(false)
+    const failed = store.events.value[0]
+    expect(failed.localEcho?.status).toBe('failed')
+
+    expect(await store.retrySend(failed.event_id)).toBe(true)
+
+    expect(probeVideo).toHaveBeenCalledTimes(1)
+    expect(seen.sends).toHaveLength(2)
+    const [first, second] = seen.sends
+    expect(second.txn_id).toBe(first.txn_id)
+    expect(second.info).toEqual(first.info)
+    expect(second.thumbnail_upload_id).toBe(POSTER_ID)
+    // The poster is staged again: the first one went with the failed send.
+    expect(seen.staged.filter((s) => s.kind === 'image')).toHaveLength(2)
+  })
+
+  it('does not add a thumbnail on retry that the first request lacked', async () => {
+    let attempt = 0
+    let posterStatus: number | undefined = 502
+    const seen = serve({
+      sendStatus: () => {
+        attempt += 1
+        posterStatus = undefined
+        return attempt === 1 ? 504 : 200
+      },
+      get posterStatus() {
+        return posterStatus
+      },
+    })
+    const store = makeStore(undefined, supporting())
+
+    expect(await store.sendMedia(mov())).toBe(false)
+    expect(await store.retrySend(store.events.value[0].event_id)).toBe(true)
+
+    // The server answers a retry whose thumbnail differs with a 409, so the
+    // retry matches what the first request carried.
+    expect(seen.sends[0]).not.toHaveProperty('thumbnail_upload_id')
+    expect(seen.sends[1]).not.toHaveProperty('thumbnail_upload_id')
+    expect(seen.sends[1].info).toEqual(VIDEO_INFO)
+    expect(seen.sends[1].txn_id).toBe(seen.sends[0].txn_id)
+  })
+
+  it('fails a retry that cannot re-stage the poster its first request carried', async () => {
+    let posterStatus: number | undefined
+    const seen = serve({
+      sendStatus: () => 504,
+      get posterStatus() {
+        return posterStatus
+      },
+    })
+    const store = makeStore(undefined, supporting())
+
+    // The first request carried a poster, and its outcome is unknown.
+    expect(await store.sendMedia(mov())).toBe(false)
+    expect(seen.sends).toHaveLength(1)
+
+    // Without the poster, the retry would differ from what the server may
+    // remember and be answered 409 forever; it fails before any send.
+    posterStatus = 502
+    expect(await store.retrySend(store.events.value[0].event_id)).toBe(false)
+    expect(seen.sends).toHaveLength(1)
+    expect(seen.staged.filter((s) => s.kind === 'video')).toHaveLength(1)
+
+    // The next Retry tries the poster again, and sends it.
+    posterStatus = undefined
+    await store.retrySend(store.events.value[0].event_id)
+    expect(seen.sends).toHaveLength(2)
+    expect(seen.sends[1]).toMatchObject({
+      thumbnail_upload_id: POSTER_ID,
+      txn_id: seen.sends[0].txn_id,
+      info: VIDEO_INFO,
+    })
+  })
+
+  it('retries bare after the server refuses the info or poster', async () => {
+    let attempt = 0
+    const seen = serve({ sendStatus: () => (++attempt === 1 ? 400 : 200) })
+    const store = makeStore(undefined, supporting())
+
+    expect(await store.sendMedia(mov())).toBe(false)
+    expect(await store.retrySend(store.events.value[0].event_id)).toBe(true)
+
+    expect(seen.sends[0]).toMatchObject({
+      info: VIDEO_INFO,
+      thumbnail_upload_id: POSTER_ID,
+    })
+    expect(seen.sends[1]).not.toHaveProperty('info')
+    expect(seen.sends[1]).not.toHaveProperty('thumbnail_upload_id')
+    expect(seen.staged.filter((s) => s.kind === 'image')).toHaveLength(1)
+  })
+
+  it('gives each send in a batch its own txn_id', async () => {
+    const seen = serve()
+    const store = makeStore(undefined, supporting())
+
+    await store.sendMediaBatch([mov(), mov()])
+
+    expect(seen.sends).toHaveLength(2)
+    expect(seen.sends[0].txn_id).not.toBe(seen.sends[1].txn_id)
   })
 })

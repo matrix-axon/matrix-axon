@@ -17,8 +17,8 @@ const TILE_MAX = 320
  * real poster would mean downloading the whole object just to scroll past it —
  * the cost ADR 0064 refused — and for encrypted media (the common case here)
  * the homeserver cannot generate one either, since it cannot decrypt the bytes.
- * When the sender did attach a thumbnail, that *is* shown; Element sends them
- * for video, ours does not yet (see the ADR's follow-up).
+ * When the sender did attach a thumbnail, that *is* shown. Element sends them
+ * for video, and so does Axon's web client (ADR 0142 § 7).
  */
 export function MediaTile({
   accountId,
@@ -40,10 +40,16 @@ export function MediaTile({
 }) {
   // Lazy, not eager: this is decoration on a card that may never be looked at,
   // so it waits for the tile to near the viewport like any other thumbnail.
+  // An encrypted poster is fetched whole: the server cannot thumbnail
+  // encrypted media and answers 400 (`resolve_thumbnail_spec`), as
+  // `useThumbnailFallback` already allows for images. A sender poster is at
+  // most 800 × 600 anyway.
   const { ref, state } = useMediaBlob<HTMLDivElement>(
     accountId,
     media.thumbnailUrl,
-    { thumbnail: { width: TILE_MAX, height: TILE_MAX, method: 'scale' } },
+    media.encrypted
+      ? undefined
+      : { thumbnail: { width: TILE_MAX, height: TILE_MAX, method: 'scale' } },
   )
   const poster =
     state.status === 'ready' && state.url !== undefined ? state.url : null

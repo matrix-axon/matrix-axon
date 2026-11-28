@@ -32,7 +32,7 @@ function echo(file: File, body: string, previewUrl: string | null = null) {
       status: 'pending',
       body,
       options: {},
-      media: { file, kind: 'image', previewUrl },
+      media: { file, kind: 'image', previewUrl, plan: { txnId: 'txn' } },
     },
   } as Partial<TimelineEvent>)
 }
@@ -108,7 +108,12 @@ describe('eventMedia', () => {
           status: 'pending',
           body: 'cat.png',
           options: {},
-          media: { file: png(), kind: 'image', previewUrl: null },
+          media: {
+            file: png(),
+            kind: 'image',
+            previewUrl: null,
+            plan: { txnId: 'txn' },
+          },
         },
       } as Partial<TimelineEvent>,
     )
