@@ -15,6 +15,47 @@ export interface ReceiptCandidate {
   arrival_order: number
   /** The thread this event belongs to, or `null` for the main timeline. */
   threadRoot: string | null
+  /**
+   * The redaction the server folded onto this event, and where it arrived
+   * (#1273). Both or neither: a row cached before the server reported the
+   * arrival order contributes no redaction position.
+   */
+  redaction_event_id?: string | null
+  redaction_arrival_order?: number | null
+}
+
+/**
+ * The redactions folded onto `events`, each as a receipt position of its own
+ * (#1273, ADR 0089 amendment).
+ *
+ * Timeline reads strip bare `m.room.redaction` events and report each one on
+ * the event it redacted, so a redaction is never an event of its own here. That
+ * is harmless until a room rule set to notify on every event counts the
+ * redaction: it is then the room's newest notification, and a receipt that
+ * stops at the redacted message leaves it counted forever.
+ *
+ * These are *not* displayed events. A redaction's content is visible on its
+ * target, but its arrival position is its own, usually well above the target's,
+ * and naming it acknowledges everything that arrived in between. So
+ * `computeRoomReceipt` bounds them like the read-thread extension rather than
+ * treating them as part of `displayed` (review).
+ */
+export function foldedRedactions(
+  events: readonly ReceiptCandidate[],
+): ReceiptCandidate[] {
+  const positions: ReceiptCandidate[] = []
+  for (const event of events) {
+    const redactionId = event.redaction_event_id
+    const redactionOrder = event.redaction_arrival_order
+    if (typeof redactionId === 'string' && typeof redactionOrder === 'number') {
+      positions.push({
+        event_id: redactionId,
+        arrival_order: redactionOrder,
+        threadRoot: event.threadRoot,
+      })
+    }
+  }
+  return positions
 }
 
 export interface RoomReceiptInput {
@@ -40,11 +81,23 @@ export interface RoomReceiptInput {
   knownUnreadCutoff: number | null
 }
 
-export interface RoomReceipt<T extends ReceiptCandidate> {
+/**
+ * A position a read receipt may name: an event id and where it arrived. Only a
+ * position, not an event: a folded redaction has no row of its own (review).
+ */
+export type ReceiptPosition = Pick<
+  ReceiptCandidate,
+  'event_id' | 'arrival_order'
+>
+
+export interface RoomReceipt {
   /** Exclusive arrival bound a thread panel may name up to. */
   blocker: number | null
-  /** The arrival-max event this view may name, or `null`. */
-  target: T | null
+  /**
+   * The arrival-max position this view may name, or `null`: an event it holds,
+   * or a redaction folded onto a displayed one, which has no event of its own.
+   */
+  target: ReceiptPosition | null
 }
 
 /**
@@ -74,17 +127,14 @@ export function summaryLooksUnread(
 /**
  * Pick the receipt bound and target for a room.
  *
+ * The base is the arrival-max of `displayed`, the events this view actually
+ * showed. Read thread replies and folded redactions above it are extensions.
  * Nothing above the main timeline's own target is claimable while anything in
  * the room is unread — or merely unknown. The bound below can only see replies
  * the client has loaded, while thread summaries know about replies it has not,
  * so both signals are consulted and either one shuts the extension.
  */
-export function computeRoomReceipt<T extends ReceiptCandidate>(
-  input: Omit<RoomReceiptInput, 'displayed' | 'loaded'> & {
-    displayed: readonly T[]
-    loaded: readonly T[]
-  },
-): RoomReceipt<T> {
+export function computeRoomReceipt(input: RoomReceiptInput): RoomReceipt {
   const base = maxByArrivalOrder(input.displayed)
   const baseOrder = base?.arrival_order ?? -1
 
@@ -129,11 +179,11 @@ export function computeRoomReceipt<T extends ReceiptCandidate>(
         : (marker.arrivalThrough ?? arrivalOf?.get(marker.eventId) ?? -1),
     )
   }
-  const isRead = (event: T): boolean =>
+  const isRead = (event: ReceiptCandidate): boolean =>
     event.threadRoot !== null &&
     (readThrough.get(event.threadRoot) ?? -1) >= event.arrival_order
 
-  const above: readonly T[] = input.loaded.filter(
+  const above: readonly ReceiptCandidate[] = input.loaded.filter(
     (event) =>
       event.arrival_order > baseOrder &&
       event.threadRoot !== null &&
@@ -149,8 +199,20 @@ export function computeRoomReceipt<T extends ReceiptCandidate>(
       null,
     )
   const claimable = maxByArrivalOrderBelow(above.filter(isRead), blocker)
+  // A folded redaction above the base is an extension too, under the same
+  // bound: everything that arrived between the base and the redaction is
+  // acknowledged with it, so it is reachable only once nothing in the room is
+  // unread or unknown, and only below the first unread foreign reply (#1273).
+  const redaction = maxByArrivalOrderBelow(
+    foldedRedactions(input.displayed).filter(
+      (position) => position.arrival_order > baseOrder,
+    ),
+    blocker,
+  )
   const target = maxByArrivalOrder(
-    [base, claimable].filter((event): event is T => event !== null),
+    [base, claimable, redaction].filter(
+      (position): position is ReceiptCandidate => position !== null,
+    ),
   )
   return { blocker, target }
 }

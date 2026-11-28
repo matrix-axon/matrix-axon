@@ -4,6 +4,7 @@ import type { ThreadSummaryDto } from '../stores/threads'
 import {
   computeRoomReceipt,
   summaryLooksUnread,
+  foldedRedactions,
   type ReceiptCandidate,
 } from './room-receipt'
 
@@ -185,5 +186,131 @@ describe('summaryLooksUnread', () => {
   it('compares against the read position when there is one', () => {
     expect(summaryLooksUnread(summary(ROOT_A, 10), 9, 'unread')).toBe(true)
     expect(summaryLooksUnread(summary(ROOT_A, 10), 10, 'unread')).toBe(false)
+  })
+})
+
+describe('folded redactions (#1273)', () => {
+  /** `$gone` was displayed redacted; its redaction arrived at `redactionAt`. */
+  const gone = (arrival: number, redactionAt: number): ReceiptCandidate => ({
+    ...ev('$gone', arrival),
+    redaction_event_id: '$redaction',
+    redaction_arrival_order: redactionAt,
+  })
+
+  it('reports each folded redaction in its own arrival position', () => {
+    expect(foldedRedactions([ev('$kept', 100), gone(101, 110)])).toEqual([
+      ev('$redaction', 110),
+    ])
+  })
+
+  it('reports nothing without both redaction fields', () => {
+    // An event cached before the server reported the arrival order.
+    const cached = { ...ev('$gone', 101), redaction_event_id: '$redaction' }
+    expect(foldedRedactions([cached])).toEqual([])
+  })
+
+  it('lets the room target reach a trailing redaction once caught up', () => {
+    const displayed = [ev('$main', 100), gone(101, 110)]
+    const { target, blocker } = computeRoomReceipt(
+      caughtUp({ displayed, loaded: displayed, threads: [] }),
+    )
+    expect(target).toEqual(ev('$redaction', 110))
+    expect(blocker).toBeNull()
+  })
+
+  // The review case: the redaction arrived after an unread reply, so naming it
+  // would acknowledge the reply. The base stays on the real displayed event.
+  it('does not lift the base over an unread thread reply below the redaction', () => {
+    const displayed = [ev('$main', 100), gone(101, 110)]
+    const { target, blocker } = computeRoomReceipt(
+      caughtUp({
+        displayed,
+        loaded: [...displayed, ev('$a1', 105, ROOT_A)],
+        // A summary with no marker of its own reads as unread.
+        threads: [{ summary: summary(ROOT_A, 50), marker: null }],
+      }),
+    )
+    expect(target?.event_id).toBe('$gone')
+    expect(blocker).toBe(102)
+  })
+
+  it('stops at an unread reply no summary knows about yet', () => {
+    const displayed = [ev('$main', 100), gone(101, 110)]
+    const { target, blocker } = computeRoomReceipt(
+      caughtUp({
+        displayed,
+        loaded: [...displayed, ev('$b1', 105, ROOT_B)],
+        threads: [],
+      }),
+    )
+    expect(target?.event_id).toBe('$gone')
+    expect(blocker).toBe(105)
+  })
+
+  it('names a redaction that sits below the first unread reply', () => {
+    const displayed = [ev('$main', 100), gone(101, 104)]
+    const { target, blocker } = computeRoomReceipt(
+      caughtUp({
+        displayed,
+        loaded: [...displayed, ev('$b1', 105, ROOT_B)],
+        threads: [],
+      }),
+    )
+    expect(target).toEqual(ev('$redaction', 104))
+    expect(blocker).toBe(105)
+  })
+
+  it('keeps the base over a redaction that arrived below it', () => {
+    // `$old` was redacted before `$main` arrived. Its redaction is no
+    // extension, and the final merge must not prefer it over the base.
+    const displayed = [{ ...gone(90, 95), event_id: '$old' }, ev('$main', 100)]
+    const { target, blocker } = computeRoomReceipt(
+      caughtUp({ displayed, loaded: displayed, threads: [] }),
+    )
+    expect(target).toEqual(ev('$main', 100))
+    expect(blocker).toBeNull()
+  })
+
+  it('does not name a redaction at the blocker itself', () => {
+    // Two real events never share an arrival order. The tie pins the bound
+    // as strict, the same `maxByArrivalOrderBelow` the thread extension uses.
+    const displayed = [ev('$main', 100), gone(101, 105)]
+    const { target, blocker } = computeRoomReceipt(
+      caughtUp({
+        displayed,
+        loaded: [...displayed, ev('$b1', 105, ROOT_B)],
+        threads: [],
+      }),
+    )
+    expect(blocker).toBe(105)
+    expect(target?.event_id).toBe('$gone')
+  })
+
+  it('does not extend while a thread is known unread from live events', () => {
+    // `displayed` already lacks the rows the cutoff withheld, such as a main
+    // timeline message arriving after it; the redaction must not cover them.
+    const displayed = [ev('$main', 100), gone(101, 110)]
+    const { target } = computeRoomReceipt(
+      caughtUp({
+        displayed,
+        loaded: displayed,
+        threads: [],
+        knownUnreadCutoff: 42,
+      }),
+    )
+    expect(target?.event_id).toBe('$gone')
+  })
+
+  it('does not extend while the thread stores are still loading', () => {
+    const displayed = [ev('$main', 100), gone(101, 110)]
+    const { target } = computeRoomReceipt(
+      caughtUp({
+        displayed,
+        loaded: displayed,
+        threads: [],
+        storesLoaded: false,
+      }),
+    )
+    expect(target?.event_id).toBe('$gone')
   })
 })
