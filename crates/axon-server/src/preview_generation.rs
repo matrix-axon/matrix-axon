@@ -109,6 +109,7 @@ impl PreviewGenerator for PreviewGenerationService {
                         kind: MediaUploadKindDto::Image,
                         filename: "preview".into(),
                         content_type: Some(mime),
+                        declared_bytes: None,
                     };
                     let body =
                         Box::pin(futures_util::stream::once(async { Ok(image.bytes.into()) }));

@@ -483,6 +483,12 @@ impl SyncEngine {
 
     /// Live megolm-backup snapshot handle (ADR 0098) for `AccountDto.backup`.
     /// Cheap to clone (store + client-manager handles).
+    /// Each account's homeserver upload limit (ADR 0143 section 6), for the
+    /// account reads and upload staging.
+    pub fn upload_limits(&self) -> crate::upload_limits::UploadLimits {
+        crate::upload_limits::UploadLimits::new(self.manager.clone())
+    }
+
     pub fn backup_health(&self) -> crate::backup::BackupHealth {
         crate::backup::BackupHealth::new(self.store.clone(), self.manager.clone())
     }

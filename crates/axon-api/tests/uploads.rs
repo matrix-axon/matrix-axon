@@ -104,6 +104,37 @@ async fn stage_upload_streams_body_and_normalizes_metadata() {
     assert_eq!(calls[0].bytes, b"abc");
 }
 
+/// ADR 0143 section 5: the request's `Content-Length` reaches the service,
+/// which refuses a known oversized body before staging it. An absent or
+/// unparseable header is no length at all.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn stage_upload_passes_the_declared_length() {
+    let store = store().await;
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app(store, uploads.clone());
+    let account_id = Uuid::new_v4();
+    for (header, expected) in [(Some("3"), Some(3)), (None, None), (Some("lots"), None)] {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/v1/accounts/{account_id}/media/uploads?kind=file&filename=file.bin"
+            ))
+            .header("authorization", format!("Bearer {TEST_TOKEN}"));
+        if let Some(header) = header {
+            builder = builder.header("content-length", header);
+        }
+        let resp = app
+            .clone()
+            .oneshot(builder.body(Body::from("abc")).unwrap())
+            .await
+            .expect("request");
+        assert_eq!(resp.status(), StatusCode::OK, "{header:?}");
+        let last = uploads.calls().pop().expect("a staging call");
+        assert_eq!(last.declared_bytes, expected, "{header:?}");
+    }
+}
+
 /// ADR 0142 section 1: staging accepts `video` and `audio`, passes the kind
 /// and declared type through unchanged, and still refuses an unknown kind.
 #[tokio::test]

@@ -287,6 +287,7 @@ pub struct UploadCall {
     pub kind: axon_api::MediaUploadKindDto,
     pub filename: String,
     pub content_type: Option<String>,
+    pub declared_bytes: Option<u64>,
     pub bytes: Vec<u8>,
 }
 
@@ -2301,6 +2302,7 @@ impl StagedUploadService for StubUploads {
             kind: request.kind,
             filename: request.filename.clone(),
             content_type: request.content_type.clone(),
+            declared_bytes: request.declared_bytes,
             bytes,
         });
         match &self.outcome {

@@ -19,17 +19,21 @@ use crate::extract::{Json, Path};
 use crate::lifecycle::AccountLifecycle;
 use crate::response::{ApiError, ApiResponse};
 use crate::sync_state::SyncStateProvider;
+use crate::upload_limit::UploadLimitProvider;
 
-/// Live `AccountDto` for a stored row: sync-state plus a bounded backup snapshot.
+/// Live `AccountDto` for a stored row: sync-state, a bounded backup snapshot
+/// and the cached effective upload limit (ADR 0143 section 6).
 async fn account_dto(
     account: Account,
     sync_state: &dyn SyncStateProvider,
     backup_state: &dyn BackupStateProvider,
+    upload_limits: &dyn UploadLimitProvider,
 ) -> AccountDto {
     let id = account.account_id;
     let state = sync_state.sync_state(id).into();
     let backup = backup_state.snapshot(id).await;
-    AccountDto::from_account(account, state, backup)
+    let upload_limit = upload_limits.upload_limit(id).map(Into::into);
+    AccountDto::from_account(account, state, backup, upload_limit)
 }
 
 /// List accounts
@@ -54,6 +58,7 @@ pub async fn list_accounts(
     State(store): State<Store>,
     State(sync_state): State<Arc<dyn SyncStateProvider>>,
     State(backup_state): State<Arc<dyn BackupStateProvider>>,
+    State(upload_limits): State<Arc<dyn UploadLimitProvider>>,
 ) -> Result<ApiResponse<Vec<AccountDto>>, ApiError> {
     let accounts = store.list_client_visible_accounts().await?;
     // Fan out backup probes so a hung account cannot pin the whole list
@@ -61,7 +66,16 @@ pub async fn list_accounts(
     let dtos = futures_util::future::join_all(accounts.into_iter().map(|a| {
         let sync_state = Arc::clone(&sync_state);
         let backup_state = Arc::clone(&backup_state);
-        async move { account_dto(a, sync_state.as_ref(), backup_state.as_ref()).await }
+        let upload_limits = Arc::clone(&upload_limits);
+        async move {
+            account_dto(
+                a,
+                sync_state.as_ref(),
+                backup_state.as_ref(),
+                upload_limits.as_ref(),
+            )
+            .await
+        }
     }))
     .await;
     Ok(ApiResponse::new(dtos))
@@ -111,6 +125,7 @@ pub async fn login(
     State(lifecycle): State<Arc<dyn AccountLifecycle>>,
     State(sync_state): State<Arc<dyn SyncStateProvider>>,
     State(backup_state): State<Arc<dyn BackupStateProvider>>,
+    State(upload_limits): State<Arc<dyn UploadLimitProvider>>,
     Json(req): Json<LoginRequest>,
 ) -> Result<ApiResponse<AccountDto>, ApiError> {
     let account_id = lifecycle
@@ -124,7 +139,13 @@ pub async fn login(
         .await?
         .ok_or_else(ApiError::internal)?;
     Ok(ApiResponse::new(
-        account_dto(account, sync_state.as_ref(), backup_state.as_ref()).await,
+        account_dto(
+            account,
+            sync_state.as_ref(),
+            backup_state.as_ref(),
+            upload_limits.as_ref(),
+        )
+        .await,
     ))
 }
 
@@ -169,6 +190,7 @@ pub async fn import_token(
     State(lifecycle): State<Arc<dyn AccountLifecycle>>,
     State(sync_state): State<Arc<dyn SyncStateProvider>>,
     State(backup_state): State<Arc<dyn BackupStateProvider>>,
+    State(upload_limits): State<Arc<dyn UploadLimitProvider>>,
     Json(req): Json<ImportTokenRequest>,
 ) -> Result<ApiResponse<AccountDto>, ApiError> {
     let account_id = lifecycle
@@ -187,7 +209,13 @@ pub async fn import_token(
         .await?
         .ok_or_else(ApiError::internal)?;
     Ok(ApiResponse::new(
-        account_dto(account, sync_state.as_ref(), backup_state.as_ref()).await,
+        account_dto(
+            account,
+            sync_state.as_ref(),
+            backup_state.as_ref(),
+            upload_limits.as_ref(),
+        )
+        .await,
     ))
 }
 
@@ -221,6 +249,7 @@ pub async fn logout(
     State(lifecycle): State<Arc<dyn AccountLifecycle>>,
     State(sync_state): State<Arc<dyn SyncStateProvider>>,
     State(backup_state): State<Arc<dyn BackupStateProvider>>,
+    State(upload_limits): State<Arc<dyn UploadLimitProvider>>,
     Path(account_id): Path<Uuid>,
 ) -> Result<ApiResponse<AccountDto>, ApiError> {
     lifecycle.logout(account_id).await?;
@@ -231,7 +260,13 @@ pub async fn logout(
         .await?
         .ok_or_else(ApiError::internal)?;
     Ok(ApiResponse::new(
-        account_dto(account, sync_state.as_ref(), backup_state.as_ref()).await,
+        account_dto(
+            account,
+            sync_state.as_ref(),
+            backup_state.as_ref(),
+            upload_limits.as_ref(),
+        )
+        .await,
     ))
 }
 
@@ -278,6 +313,7 @@ pub async fn recover(
     State(lifecycle): State<Arc<dyn AccountLifecycle>>,
     State(sync_state): State<Arc<dyn SyncStateProvider>>,
     State(backup_state): State<Arc<dyn BackupStateProvider>>,
+    State(upload_limits): State<Arc<dyn UploadLimitProvider>>,
     Path(account_id): Path<Uuid>,
     Json(req): Json<RecoverRequest>,
 ) -> Result<ApiResponse<RecoverResponseDto>, ApiError> {
@@ -290,7 +326,13 @@ pub async fn recover(
         .await?
         .ok_or_else(ApiError::internal)?;
     Ok(ApiResponse::new(RecoverResponseDto {
-        account: account_dto(account, sync_state.as_ref(), backup_state.as_ref()).await,
+        account: account_dto(
+            account,
+            sync_state.as_ref(),
+            backup_state.as_ref(),
+            upload_limits.as_ref(),
+        )
+        .await,
         redecrypt: RedecryptUtdsResponse::from(result.redecrypt),
         backup_action: result.backup_action.into(),
     }))
@@ -326,6 +368,7 @@ pub async fn enable_backup(
     State(lifecycle): State<Arc<dyn AccountLifecycle>>,
     State(sync_state): State<Arc<dyn SyncStateProvider>>,
     State(backup_state): State<Arc<dyn BackupStateProvider>>,
+    State(upload_limits): State<Arc<dyn UploadLimitProvider>>,
     Path(account_id): Path<Uuid>,
     Json(req): Json<EnableBackupRequest>,
 ) -> Result<ApiResponse<EnableBackupResponseDto>, ApiError> {
@@ -340,7 +383,13 @@ pub async fn enable_backup(
         .await?
         .ok_or_else(ApiError::internal)?;
     Ok(ApiResponse::new(EnableBackupResponseDto {
-        account: account_dto(account, sync_state.as_ref(), backup_state.as_ref()).await,
+        account: account_dto(
+            account,
+            sync_state.as_ref(),
+            backup_state.as_ref(),
+            upload_limits.as_ref(),
+        )
+        .await,
         backup_action: backup_action.into(),
     }))
 }
@@ -437,6 +486,7 @@ pub async fn get_account(
     State(store): State<Store>,
     State(sync_state): State<Arc<dyn SyncStateProvider>>,
     State(backup_state): State<Arc<dyn BackupStateProvider>>,
+    State(upload_limits): State<Arc<dyn UploadLimitProvider>>,
     Path(account_id): Path<Uuid>,
 ) -> Result<ApiResponse<AccountDto>, ApiError> {
     let account = store
@@ -444,6 +494,12 @@ pub async fn get_account(
         .await?
         .ok_or_else(|| ApiError::not_found(format!("account {account_id} not found")))?;
     Ok(ApiResponse::new(
-        account_dto(account, sync_state.as_ref(), backup_state.as_ref()).await,
+        account_dto(
+            account,
+            sync_state.as_ref(),
+            backup_state.as_ref(),
+            upload_limits.as_ref(),
+        )
+        .await,
     ))
 }

@@ -723,7 +723,7 @@ async fn upload_media_source_with_encryption(
             .client()
             .upload_encrypted_file(&mut cursor)
             .await
-            .map_err(map_sdk_err)?;
+            .map_err(map_upload_err)?;
         Ok(MediaSource::Encrypted(Box::new(file)))
     } else {
         let resp = room
@@ -731,9 +731,31 @@ async fn upload_media_source_with_encryption(
             .media()
             .upload(content_type, bytes, None)
             .await
-            .map_err(map_sdk_err)?;
+            .map_err(map_upload_err)?;
         Ok(MediaSource::Plain(resp.content_uri))
     }
+}
+
+/// [`map_sdk_err`], except that an upload refused as too large is
+/// [`GatewayError::UploadTooLarge`]: a `413` from the homeserver or a proxy in
+/// front of it, whatever its body, or the SDK's own refusal against the
+/// `m.upload.size` it cached when the client first uploaded.
+fn map_upload_err(err: matrix_sdk::Error) -> GatewayError {
+    if is_upload_too_large(&err) {
+        GatewayError::UploadTooLarge(err.to_string())
+    } else {
+        map_sdk_err(err)
+    }
+}
+
+fn is_upload_too_large(err: &matrix_sdk::Error) -> bool {
+    use matrix_sdk::ruma::exports::http::StatusCode;
+    matches!(
+        err,
+        matrix_sdk::Error::Media(matrix_sdk::media::MediaError::MediaTooLargeToUpload { .. })
+    ) || err
+        .as_client_api_error()
+        .is_some_and(|api| api.status_code == StatusCode::PAYLOAD_TOO_LARGE)
 }
 
 /// Cached NotEncrypted is insufficient for a media or preview upload: a
@@ -1243,6 +1265,7 @@ async fn upload_thumbnail(
             let error_kind = match error {
                 GatewayError::Timeout(_) => "timeout",
                 GatewayError::EventTooLarge => "too_large",
+                GatewayError::UploadTooLarge(_) => "upload_too_large",
                 _ => "upload_failed",
             };
             tracing::warn!(%room_id, error_kind, "media thumbnail upload failed; sending without it");
@@ -1817,7 +1840,7 @@ impl SdkGateway {
         let clock = MediaClock::start(bounds);
         let room = clock.run(self.room(account_id, room_id)).await?;
         // Boxed for the same reason as `send_with_previews`.
-        send_media_in_room(
+        let result = send_media_in_room(
             (&room, account_id),
             attachment,
             caption,
@@ -1827,7 +1850,16 @@ impl SdkGateway {
             clock,
         )
         .boxed()
-        .await
+        .await;
+        if let Err(GatewayError::UploadTooLarge(error)) = &result {
+            // The advertised limit may be out of date: look it up again on
+            // the next account read or staging call (ADR 0143 section 6).
+            tracing::warn!(%account_id, %room_id, error_kind = "upload_too_large", %error, "homeserver refused a media upload as too large; refreshing its upload limit");
+            self.manager
+                .upload_limit_cache()
+                .mark_refresh_due(account_id);
+        }
+        result
     }
 
     /// Edit a message by sending an `m.replace` replacement of `event_id`.
@@ -3542,6 +3574,57 @@ mod tests {
             .await
             .unwrap();
         (room, server)
+    }
+
+    /// ADR 0143 section 6: an upload refused as too large is told apart, so
+    /// the send path can look up the homeserver's limit again. Both the
+    /// homeserver's (or a proxy's) `413`, whatever its body, and the SDK's
+    /// own pre-upload check against `m.upload.size` count; another failure
+    /// does not.
+    #[tokio::test]
+    async fn an_upload_refused_as_too_large_is_its_own_error() {
+        use axum::{http::StatusCode, response::IntoResponse, Json, Router};
+        for (upload_size, upload_status, too_large) in [
+            // A reverse proxy's HTML 413.
+            (1024 * 1024, StatusCode::PAYLOAD_TOO_LARGE, true),
+            // The SDK refuses before sending: 3 bytes over a 2-byte limit.
+            (2, StatusCode::OK, true),
+            // Another refusal. (Not a 5xx: the SDK retries those.)
+            (1024 * 1024, StatusCode::FORBIDDEN, false),
+        ] {
+            let router = Router::new().fallback(move |uri: axum::http::Uri| async move {
+                let path = uri.path();
+                if path.contains("/join") {
+                    return Json(json!({"room_id":"!preview:localhost"})).into_response();
+                }
+                if path.ends_with("/media/config") {
+                    return Json(json!({"m.upload.size": upload_size})).into_response();
+                }
+                if upload_status == StatusCode::OK {
+                    return Json(json!({"content_uri":"mxc://localhost/uploaded"})).into_response();
+                }
+                (
+                    upload_status,
+                    "<html><body>413 Request Entity Too Large</body></html>",
+                )
+                    .into_response()
+            });
+            let (room, server) = preview_test_room(router).await;
+            let error = super::upload_media_source_with_encryption(
+                &room,
+                &mime::APPLICATION_OCTET_STREAM,
+                b"abc".to_vec(),
+                false,
+            )
+            .await
+            .expect_err("the upload is refused");
+            assert_eq!(
+                matches!(error, GatewayError::UploadTooLarge(_)),
+                too_large,
+                "{upload_size} / {upload_status}: {error:?}"
+            );
+            server.abort();
+        }
     }
 
     #[tokio::test]

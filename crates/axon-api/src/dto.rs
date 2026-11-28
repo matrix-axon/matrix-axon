@@ -2172,10 +2172,44 @@ pub struct AccountDto {
     /// skipped or failed. GET uses a cached homeserver answer that may lag
     /// another client's backup creation.
     pub backup: BackupSnapshotDto,
+    /// The largest media upload this account can stage (ADR 0143 section 6).
+    /// `POST …/media/uploads` refuses a larger body with `413`. Absent on a
+    /// server that predates the field, in which case a client keeps its own
+    /// fallback limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(required = false, nullable = false)]
+    pub media_upload_limit: Option<MediaUploadLimitDto>,
     /// Row creation time, RFC 3339.
     pub created_at: String,
     /// Last update time, RFC 3339.
     pub updated_at: String,
+}
+
+/// An account's effective media upload limit (`AccountDto.media_upload_limit`,
+/// ADR 0143 section 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+pub struct MediaUploadLimitDto {
+    /// The largest upload, in bytes, that Axon stages for this account: the
+    /// lower of the server's `media.max_upload_bytes` and the homeserver's
+    /// `m.upload.size`, or `media.max_upload_bytes` alone when
+    /// `homeserver_max_bytes` is `null`. It can change between reads.
+    pub max_bytes: u64,
+    /// The homeserver's `m.upload.size`, in bytes. `null` when it is unknown,
+    /// for example because the homeserver did not answer, has not been asked
+    /// yet, or does not report one. Axon then applies only its own cap, and
+    /// the homeserver may still refuse an upload below `max_bytes`. Always
+    /// sent, so `null` is distinct from an absent field.
+    #[schema(required = true)]
+    pub homeserver_max_bytes: Option<u64>,
+}
+
+impl From<crate::upload_limit::UploadLimit> for MediaUploadLimitDto {
+    fn from(limit: crate::upload_limit::UploadLimit) -> Self {
+        Self {
+            max_bytes: limit.max_bytes,
+            homeserver_max_bytes: limit.homeserver_max_bytes,
+        }
+    }
 }
 
 impl AccountDto {
@@ -2183,8 +2217,14 @@ impl AccountDto {
     /// (ADR 0030) and megolm-backup snapshot (ADR 0098). Neither is a stored
     /// column — they're read from ports at request time — so every
     /// construction site supplies them explicitly rather than risk a stale
-    /// default value.
-    pub fn from_account(a: Account, sync_state: SyncStateDto, backup: BackupSnapshotDto) -> Self {
+    /// default value. `media_upload_limit` is `None` when the server
+    /// advertises no limit.
+    pub fn from_account(
+        a: Account,
+        sync_state: SyncStateDto,
+        backup: BackupSnapshotDto,
+        media_upload_limit: Option<MediaUploadLimitDto>,
+    ) -> Self {
         AccountDto {
             account_id: a.account_id,
             user_id: a.user_id,
@@ -2198,6 +2238,7 @@ impl AccountDto {
             exclude_insecure_devices: a.exclude_insecure_devices,
             sync_state,
             backup,
+            media_upload_limit,
             created_at: a.created_at.to_rfc3339(),
             updated_at: a.updated_at.to_rfc3339(),
         }

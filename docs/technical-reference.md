@@ -215,6 +215,31 @@ Holes that existed before this release have no rows, so a one-time verification 
 
 `scripts/gap-fill-test.sh` exercises the whole path against a local Synapse ([integration testing](integration-testing.md#gap-fill-adr-0140)).
 
+## Upload limit
+
+A client can upload a file only if Axon's `media.max_upload_bytes` (default 100 MiB) and the homeserver's `m.upload.size` both allow it ([ADR 0143](adr/0143-stream-staged-media-uploads.md) section 6).
+Axon reads each account's `m.upload.size` from `GET /_matrix/client/v1/media/config`, or the legacy `/_matrix/media/v3/config` on a homeserver older than Matrix 1.11.
+It advertises the lower of the two as `media_upload_limit` on `GET /v1/accounts` and `GET /v1/accounts/{account_id}`:
+
+```json
+"media_upload_limit": { "max_bytes": 52428800, "homeserver_max_bytes": 52428800 }
+```
+
+- `max_bytes` is the largest body `POST /v1/accounts/{account_id}/media/uploads` accepts.
+  A larger one is a `413`, refused before staging when its `Content-Length` already says so, and otherwise as soon as the streamed body passes the limit.
+  A send rechecks the limit when it claims the staged file, in case the limit dropped after staging.
+- `homeserver_max_bytes` is `null` when the homeserver's limit is unknown, and `max_bytes` is then `media.max_upload_bytes`.
+  It's unknown when no answer has arrived yet, when the lookup failed, when the homeserver sent no `m.upload.size`, or when the account has no connected client.
+- A server older than this field omits `media_upload_limit`, and clients keep their own fallback limit.
+
+Account reads never wait for the homeserver.
+A missing or hour-old answer starts one lookup for that account, under the homeserver's load gate, with a 10 s request timeout.
+A failed lookup is retried after a minute.
+A homeserver or proxy `413` on a media send, or the SDK's own refusal against the `m.upload.size` it cached, asks for a fresh lookup.
+Lookups log under `upload limit:`, at `INFO` when the homeserver's limit changes and at `WARN` when a lookup fails.
+
+Raising the limit takes more than `media.max_upload_bytes`: the homeserver's own limit and any reverse proxy in front of either server must allow the size too.
+
 ## Image sends
 
 For staged sends, `media.send_thumbnails` defaults to `true`.

@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use axon_api::{
     ClaimedUpload, SendThumbnail, StageUploadError, StageUploadRequest, StagedUpload,
-    StagedUploadService, UploadStream,
+    StagedUploadService, UploadLimitProvider, UploadStream,
 };
 use axon_core::MediaConfig;
 use axon_store::{AccountState, MediaUploadKind, NewMediaUpload, Store};
@@ -123,6 +123,9 @@ pub struct FilesystemStagedUploads {
     store: Store,
     root: PathBuf,
     max_upload_bytes: u64,
+    /// Each account's effective limit (ADR 0143 section 6). `None` stages up
+    /// to `max_upload_bytes` for every account.
+    upload_limits: Option<Arc<dyn UploadLimitProvider>>,
     upload_timeout: Duration,
     ttl: Duration,
     concurrent_uploads: Arc<Semaphore>,
@@ -223,6 +226,7 @@ impl FilesystemStagedUploads {
             store,
             root: config.uploads_dir.clone(),
             max_upload_bytes: config.max_upload_bytes,
+            upload_limits: None,
             upload_timeout: Duration::from_secs(config.upload_request_timeout_secs),
             ttl: Duration::from_secs(config.staged_upload_ttl_secs),
             concurrent_uploads: Arc::new(Semaphore::new(config.max_concurrent_uploads)),
@@ -231,11 +235,31 @@ impl FilesystemStagedUploads {
         })
     }
 
+    /// Stage and claim against each account's effective limit, the lower of
+    /// `media.max_upload_bytes` and the homeserver's `m.upload.size` (ADR 0143
+    /// section 6).
+    pub fn with_upload_limits(mut self, limits: Arc<dyn UploadLimitProvider>) -> Self {
+        self.upload_limits = Some(limits);
+        self
+    }
+
+    /// The largest upload `account_id` may stage or send now. Never above
+    /// `media.max_upload_bytes`, whatever the provider says.
+    fn upload_cap(&self, account_id: Uuid) -> u64 {
+        self.upload_limits
+            .as_ref()
+            .and_then(|limits| limits.upload_limit(account_id))
+            .map_or(self.max_upload_bytes, |limit| {
+                limit.max_bytes.min(self.max_upload_bytes)
+            })
+    }
+
     async fn stage_upload_inner(
         &self,
         request: StageUploadRequest,
         mut body: UploadStream,
         generated: bool,
+        cap: u64,
     ) -> Result<StagedUpload, StageUploadError> {
         let account = self
             .store
@@ -272,13 +296,9 @@ impl FilesystemStagedUploads {
             let chunk = chunk.map_err(|err| StageUploadError::Invalid(err.to_string()))?;
             size = size
                 .checked_add(chunk.len() as u64)
-                .ok_or(StageUploadError::TooLarge {
-                    cap: self.max_upload_bytes,
-                })?;
-            if size > self.max_upload_bytes {
-                return Err(StageUploadError::TooLarge {
-                    cap: self.max_upload_bytes,
-                });
+                .ok_or(StageUploadError::TooLarge { cap })?;
+            if size > cap {
+                return Err(StageUploadError::TooLarge { cap });
             }
             file.write_all(&chunk).await.map_err(internal)?;
         }
@@ -304,9 +324,7 @@ impl FilesystemStagedUploads {
             },
             filename: &request.filename,
             content_type: request.content_type.as_deref(),
-            size_bytes: i64::try_from(size).map_err(|_| StageUploadError::TooLarge {
-                cap: self.max_upload_bytes,
-            })?,
+            size_bytes: i64::try_from(size).map_err(|_| StageUploadError::TooLarge { cap })?,
             path: &path,
             expires_at,
         };
@@ -345,7 +363,10 @@ impl FilesystemStagedUploads {
             .acquire_owned()
             .await
             .map_err(|_| StageUploadError::Internal("upload capacity closed".into()))?;
-        self.stage_upload_inner(request, body, true).await
+        // Generated previews are server-made images well under any limit, so
+        // they keep Axon's own cap.
+        self.stage_upload_inner(request, body, true, self.max_upload_bytes)
+            .await
     }
 
     fn to_api_kind(kind: MediaUploadKind) -> axon_api::MediaUploadKindDto {
@@ -715,6 +736,20 @@ impl StagedUploadService for FilesystemStagedUploads {
         body: UploadStream,
     ) -> Result<StagedUpload, StageUploadError> {
         let account_id = request.account_id;
+        let cap = self.upload_cap(account_id);
+        // A body that says it is too large is refused before it takes a
+        // writer. The streamed count is enforced either way, so a wrong or
+        // absent length changes nothing but when the refusal comes.
+        if let Some(declared) = request.declared_bytes.filter(|declared| *declared > cap) {
+            tracing::info!(
+                account_id = %account_id,
+                declared_bytes = declared,
+                max_bytes = cap,
+                local_max_bytes = self.max_upload_bytes,
+                "stage_upload refused: declared length exceeds the upload limit"
+            );
+            return Err(StageUploadError::TooLarge { cap });
+        }
         let queued_at = Instant::now();
         let available_permits = self.concurrent_uploads.available_permits();
         let _permit = self
@@ -738,7 +773,7 @@ impl StagedUploadService for FilesystemStagedUploads {
         }
         tracing::debug!(account_id = %account_id, filename = %request.filename, "stage_upload: permit acquired, starting write");
         let started_at = Instant::now();
-        let result = tokio::time::timeout(self.upload_timeout, self.stage_upload_inner(request, body, false))
+        let result = tokio::time::timeout(self.upload_timeout, self.stage_upload_inner(request, body, false, cap))
             .await
             .map_err(|_| {
                 tracing::warn!(
@@ -763,6 +798,7 @@ impl StagedUploadService for FilesystemStagedUploads {
             Err(err) => tracing::warn!(
                 account_id = %account_id,
                 elapsed_ms = started_at.elapsed().as_millis(),
+                max_bytes = cap,
                 error = ?err,
                 "stage_upload failed"
             ),
@@ -792,7 +828,9 @@ impl StagedUploadService for FilesystemStagedUploads {
         account_id: Uuid,
         upload_id: Uuid,
     ) -> Result<ClaimedUpload, StageUploadError> {
-        self.claim_bounded(account_id, upload_id, self.max_upload_bytes)
+        // The limit can drop after staging (the homeserver's answer arrives
+        // or changes), so recheck the latest known one before the send.
+        self.claim_bounded(account_id, upload_id, self.upload_cap(account_id))
             .await
     }
 
@@ -1061,6 +1099,7 @@ mod tests {
             kind: axon_api::MediaUploadKindDto::Image,
             filename: "preview.png".into(),
             content_type: Some("image/png".into()),
+            declared_bytes: None,
         };
         let upload = service
             .stage_upload(
@@ -1140,6 +1179,7 @@ mod tests {
             kind: axon_api::MediaUploadKindDto::Image,
             filename: "thumb".into(),
             content_type: Some(content_type.into()),
+            declared_bytes: None,
         };
         service
             .stage_upload(
@@ -1273,6 +1313,7 @@ mod tests {
                     kind: axon_api::MediaUploadKindDto::Image,
                     filename: "preview.png".into(),
                     content_type: Some("image/png".into()),
+                    declared_bytes: None,
                 },
                 Box::pin(futures_util::stream::once(async {
                     Ok(preview_png().into())
@@ -1655,5 +1696,231 @@ mod tests {
 
         store.delete_account_row(account_id).await.expect("cleanup");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A provider whose answer a test sets: `None` advertises no limit.
+    #[derive(Default)]
+    struct FixedLimit(std::sync::Mutex<Option<axon_api::UploadLimit>>);
+
+    impl FixedLimit {
+        fn set(&self, local: u64, homeserver: Option<u64>) {
+            *self.0.lock().unwrap() = Some(axon_api::UploadLimit::effective(local, homeserver));
+        }
+    }
+
+    impl axon_api::UploadLimitProvider for FixedLimit {
+        fn upload_limit(&self, _account_id: Uuid) -> Option<axon_api::UploadLimit> {
+            *self.0.lock().unwrap()
+        }
+    }
+
+    fn limited_uploads(
+        store: axon_store::Store,
+        root: PathBuf,
+        local_max: u64,
+    ) -> (super::FilesystemStagedUploads, std::sync::Arc<FixedLimit>) {
+        let limit = std::sync::Arc::new(FixedLimit::default());
+        let service = super::FilesystemStagedUploads::new(
+            store,
+            &axon_core::MediaConfig {
+                uploads_dir: root,
+                max_upload_bytes: local_max,
+                max_concurrent_uploads: 1,
+                ..axon_core::MediaConfig::default()
+            },
+        )
+        .expect("configure staged uploads")
+        .with_upload_limits(limit.clone());
+        (service, limit)
+    }
+
+    /// Stage `chunks` as one body that declares `declared` as its length.
+    async fn stage_body(
+        service: &super::FilesystemStagedUploads,
+        account_id: Uuid,
+        declared: Option<u64>,
+        chunks: Vec<&'static [u8]>,
+    ) -> Result<axon_api::StagedUpload, StageUploadError> {
+        use axon_api::StagedUploadService;
+        service
+            .stage_upload(
+                axon_api::StageUploadRequest {
+                    account_id,
+                    kind: axon_api::MediaUploadKindDto::File,
+                    filename: "file.bin".into(),
+                    content_type: None,
+                    declared_bytes: declared,
+                },
+                Box::pin(futures_util::stream::iter(
+                    chunks
+                        .into_iter()
+                        .map(|chunk| Ok(bytes::Bytes::from_static(chunk))),
+                )),
+            )
+            .await
+    }
+
+    fn assert_too_large<T: std::fmt::Debug>(result: Result<T, StageUploadError>, cap: u64) {
+        match result {
+            Err(StageUploadError::TooLarge { cap: got }) => assert_eq!(got, cap),
+            other => panic!("expected TooLarge {{ cap: {cap} }}, got {other:?}"),
+        }
+    }
+
+    /// The account's staged files, ignoring in-progress temporaries.
+    fn staged_files(root: &Path, account_id: Uuid) -> usize {
+        std::fs::read_dir(root.join(account_id.to_string()))
+            .map(|dir| dir.count())
+            .unwrap_or(0)
+    }
+
+    /// ADR 0143 section 6: staging refuses above the effective limit, which
+    /// is whichever of Axon's cap and the homeserver's is lower, and falls
+    /// back to Axon's own cap when the homeserver's is unknown or no limit
+    /// is advertised.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn staging_refuses_above_the_effective_limit() {
+        let store = connect_store().await;
+        let account_id = test_account(&store).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (service, limit) = limited_uploads(store.clone(), dir.path().into(), 8);
+
+        // No limit advertised: Axon's own cap.
+        assert_too_large(
+            stage_body(&service, account_id, None, vec![b"123456789"]).await,
+            8,
+        );
+        stage_body(&service, account_id, None, vec![b"12345678"])
+            .await
+            .expect("exactly Axon's cap");
+
+        // The homeserver's limit is lower.
+        limit.set(8, Some(4));
+        assert_too_large(
+            stage_body(&service, account_id, None, vec![b"12345"]).await,
+            4,
+        );
+        stage_body(&service, account_id, None, vec![b"1234"])
+            .await
+            .expect("exactly the homeserver's limit");
+
+        // Axon's cap is lower.
+        limit.set(8, Some(1024));
+        assert_too_large(
+            stage_body(&service, account_id, None, vec![b"123456789"]).await,
+            8,
+        );
+
+        // The homeserver did not answer.
+        limit.set(8, None);
+        assert_too_large(
+            stage_body(&service, account_id, None, vec![b"123456789"]).await,
+            8,
+        );
+        stage_body(&service, account_id, None, vec![b"12345678"])
+            .await
+            .expect("Axon's cap when the homeserver's is unknown");
+
+        // A provider can never raise the limit above Axon's own cap.
+        *limit.0.lock().unwrap() = Some(axon_api::UploadLimit {
+            max_bytes: 1024,
+            homeserver_max_bytes: Some(1024),
+        });
+        assert_too_large(
+            stage_body(&service, account_id, None, vec![b"123456789"]).await,
+            8,
+        );
+
+        assert_eq!(
+            staged_files(dir.path(), account_id),
+            3,
+            "refused bodies leave no file"
+        );
+        store.delete_account_row(account_id).await.expect("cleanup");
+    }
+
+    /// ADR 0143 section 5: a body that declares a length over the limit is
+    /// refused before it takes a writer, and the limit holds on the streamed
+    /// count whether the declared length is low, absent or right.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn the_declared_length_is_only_a_hint() {
+        let store = connect_store().await;
+        let account_id = test_account(&store).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (service, limit) = limited_uploads(store.clone(), dir.path().into(), 1024);
+        limit.set(1024, Some(4));
+
+        // Every writer busy: a declared oversize is still refused at once.
+        let held = service
+            .concurrent_uploads
+            .clone()
+            .acquire_owned()
+            .await
+            .unwrap();
+        let refused = tokio::time::timeout(
+            Duration::from_secs(5),
+            stage_body(&service, account_id, Some(5), vec![b"1"]),
+        )
+        .await
+        .expect("refused without waiting for a writer");
+        assert_too_large(refused, 4);
+        drop(held);
+
+        // A length that understates the body.
+        assert_too_large(
+            stage_body(&service, account_id, Some(2), vec![b"12", b"345"]).await,
+            4,
+        );
+        // No length at all.
+        assert_too_large(
+            stage_body(&service, account_id, None, vec![b"12", b"345"]).await,
+            4,
+        );
+        // A length that overstates a body that fits is not this check's
+        // business: only an oversized one is refused early.
+        stage_body(&service, account_id, Some(4), vec![b"12"])
+            .await
+            .expect("a body within the limit");
+
+        assert_eq!(staged_files(dir.path(), account_id), 1);
+        store.delete_account_row(account_id).await.expect("cleanup");
+    }
+
+    /// ADR 0143 section 6: the limit can drop after staging, so a claim for
+    /// a send rechecks it and releases a file that no longer fits.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn a_claim_rechecks_the_latest_limit() {
+        use axon_api::StagedUploadService;
+        let store = connect_store().await;
+        let account_id = test_account(&store).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (service, limit) = limited_uploads(store.clone(), dir.path().into(), 1024);
+
+        let staged = stage_body(&service, account_id, Some(8), vec![b"12345678"])
+            .await
+            .expect("staged before the homeserver answered");
+        limit.set(1024, Some(4));
+        assert_too_large(service.claim_upload(account_id, staged.upload_id).await, 4);
+        let row = store
+            .get_media_upload(account_id, staged.upload_id)
+            .await
+            .unwrap()
+            .expect("the row is kept");
+        assert_eq!(
+            row.state,
+            axon_store::MediaUploadState::Staged,
+            "an over-limit claim is released"
+        );
+
+        limit.set(1024, Some(8));
+        let claimed = service
+            .claim_upload(account_id, staged.upload_id)
+            .await
+            .expect("fits again");
+        assert_eq!(claimed.bytes, b"12345678");
+        store.delete_account_row(account_id).await.expect("cleanup");
     }
 }

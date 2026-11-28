@@ -27,6 +27,11 @@ pub struct StageUploadRequest {
     pub kind: MediaUploadKindDto,
     pub filename: String,
     pub content_type: Option<String>,
+    /// The request's `Content-Length`, when it sent one. Only a hint: a
+    /// known oversized length is refused before staging starts, and the
+    /// streamed byte count is enforced either way, so a wrong or absent
+    /// length cannot get past the limit (ADR 0143 section 5).
+    pub declared_bytes: Option<u64>,
 }
 
 /// Normalized metadata returned after a successful stage operation.
@@ -112,7 +117,8 @@ pub enum StageUploadError {
     NotFound(String),
     /// The account exists but cannot accept mutations. -> `403`.
     Forbidden(String),
-    /// The body exceeded the configured cap. -> `413`.
+    /// The body exceeded the account's effective upload limit (ADR 0143
+    /// section 6). -> `413`.
     TooLarge { cap: u64 },
     /// The client upload timed out. -> `503`.
     Timeout(String),

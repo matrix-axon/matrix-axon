@@ -170,6 +170,8 @@ pub struct ClientManager {
     /// Each running account's room-detail acquisition queue (ADR 0126).
     acquisitions: crate::acquisition::RoomDetailAcquisitions,
     room_identity_changes: crate::room_identity::RoomIdentityChanges,
+    /// Each account's homeserver upload limit (ADR 0143 section 6).
+    upload_limits: crate::upload_limits::HomeserverUploadLimitCache,
 }
 
 impl ClientManager {
@@ -186,6 +188,7 @@ impl ClientManager {
             gates: HomeserverGates::default(),
             acquisitions: Default::default(),
             room_identity_changes: Default::default(),
+            upload_limits: Default::default(),
         }
     }
 
@@ -202,6 +205,11 @@ impl ClientManager {
     /// Each running account's room-detail acquisition queue (ADR 0126).
     pub(crate) fn room_detail_acquisitions(&self) -> crate::acquisition::RoomDetailAcquisitions {
         self.acquisitions.clone()
+    }
+
+    /// Each account's homeserver upload limit (ADR 0143 section 6).
+    pub(crate) fn upload_limit_cache(&self) -> crate::upload_limits::HomeserverUploadLimitCache {
+        self.upload_limits.clone()
     }
 
     pub(crate) fn room_identity_changes(&self) -> crate::room_identity::RoomIdentityChanges {

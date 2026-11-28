@@ -342,9 +342,18 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             config.media.fetch_timeout_secs,
         )),
     ));
+    // The effective upload limit (ADR 0143 section 6): Axon's own cap and
+    // each account's cached homeserver `m.upload.size`, the same for account
+    // reads and staging.
+    let upload_limits: Arc<dyn axon_api::UploadLimitProvider> =
+        Arc::new(status::UploadLimitAdapter {
+            limits: sync_engine.upload_limits(),
+            local_max_bytes: config.media.max_upload_bytes,
+        });
     let uploads = Arc::new(
         FilesystemStagedUploads::new(store.clone(), &config.media)
-            .context("configuring staged media uploads")?,
+            .context("configuring staged media uploads")?
+            .with_upload_limits(upload_limits.clone()),
     );
     // M15c reconcile (ADR 0059, GH #286): resets crash-wedged `sending` rows,
     // prunes row-less staged-upload files, and sweeps already-expired staged
@@ -401,6 +410,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     .with_room_detail_acquisition(room_details)
     .with_sync_state(sync_state)
     .with_backup_state(backup_state)
+    .with_upload_limits(upload_limits)
     .with_matrix_oauth_acquire(matrix_oauth_acquire)
     .with_matrix_oauth_browser(matrix_oauth_browser)
     .with_matrix_oauth_grant(matrix_oauth_grant)

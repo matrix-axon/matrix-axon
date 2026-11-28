@@ -222,6 +222,8 @@ request_timeout_secs = 15
 # stall_timeout_secs = 30
 # max_concurrent_streams = 4
 # max_stream_bytes = 2147483648
+# Largest staged upload. Accounts advertise the lower of this and their
+# homeserver's m.upload.size, and staging refuses anything larger.
 # max_upload_bytes = 104857600
 # upload_request_timeout_secs = 60
 # upstream_upload_timeout_secs = 60

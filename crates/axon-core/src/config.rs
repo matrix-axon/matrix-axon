@@ -611,7 +611,9 @@ pub struct MediaConfig {
     #[serde(default)]
     pub max_stream_bytes: Option<u64>,
     /// Maximum accepted client upload body, in bytes. Enforced while streaming
-    /// the request to the staging directory. Defaults to 100 MiB.
+    /// the request to the staging directory. Defaults to 100 MiB. Each account
+    /// stages at most the lower of this and its homeserver's `m.upload.size`,
+    /// which it advertises as `media_upload_limit` (ADR 0143 section 6).
     #[serde(default = "default_media_max_upload_bytes")]
     pub max_upload_bytes: u64,
     /// Wall-clock budget for accepting one upload request, in seconds. Bounds a

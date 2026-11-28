@@ -2,8 +2,9 @@
 //! [`SyncHealth`] to `axon-api`'s status ports (M10), so `GET /v1/status`
 //! reports the engine's disk-space health and each account's sync-service
 //! state, and binds [`HomeserverGates`] to the homeserver load-gate port (ADR
-//! 0122). Also binds [`BackupHealth`] to `AccountDto.backup` (ADR 0098), and
-//! [`RoomDetailAcquisitions`] to the room-detail acquisition port (ADR 0126).
+//! 0122). Also binds [`BackupHealth`] to `AccountDto.backup` (ADR 0098),
+//! [`RoomDetailAcquisitions`] to the room-detail acquisition port (ADR 0126),
+//! and [`UploadLimits`] to the effective upload-limit port (ADR 0143).
 //! This binary is the one place that knows both crates; `axon-api` and
 //! `axon-sync` never depend on each other.
 
@@ -12,11 +13,11 @@ use axon_api::{
     AccountSyncSnapshot, BackfillStatusProvider, BackfillStatusSnapshot, BackupSnapshotDto,
     BackupStateDto, BackupStateProvider, HomeserverBreakerSnapshot, HomeserverGateSnapshot,
     HomeserverStatusProvider, RecoveryStateDto, RoomDetailAcquirer, SyncStateProvider,
-    SyncStatusProvider,
+    SyncStatusProvider, UploadLimit, UploadLimitProvider,
 };
 use axon_sync::{
     BackfillHealth, BackupHealth, BackupSnapshot, BackupStateView, BreakerSnapshot,
-    HomeserverGates, RecoveryStateView, RoomDetailAcquisitions, SyncHealth,
+    HomeserverGates, RecoveryStateView, RoomDetailAcquisitions, SyncHealth, UploadLimits,
 };
 use uuid::Uuid;
 
@@ -117,6 +118,24 @@ pub struct SyncStateAdapter(pub SyncHealth);
 impl SyncStateProvider for SyncStateAdapter {
     fn sync_state(&self, account_id: Uuid) -> &'static str {
         self.0.sync_state(account_id)
+    }
+}
+
+/// Wraps the sync engine's cached homeserver upload limits so they satisfy
+/// the API's [`UploadLimitProvider`] port (ADR 0143 section 6), combined with
+/// the server's own `media.max_upload_bytes`. Shared by the account reads and
+/// upload staging, so both see the same limit.
+pub struct UploadLimitAdapter {
+    pub limits: UploadLimits,
+    pub local_max_bytes: u64,
+}
+
+impl UploadLimitProvider for UploadLimitAdapter {
+    fn upload_limit(&self, account_id: Uuid) -> Option<UploadLimit> {
+        Some(UploadLimit::effective(
+            self.local_max_bytes,
+            self.limits.homeserver_max_bytes(account_id),
+        ))
     }
 }
 

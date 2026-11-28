@@ -2466,7 +2466,7 @@
           "media"
         ],
         "summary": "Stage a media upload",
-        "description": "Stage raw upload bytes for a later room-aware media send.",
+        "description": "Stage raw upload bytes for a later room-aware media send. The body may be\nat most the account's `media_upload_limit.max_bytes` (`GET\n/v1/accounts/{account_id}`).",
         "operationId": "stage_upload",
         "parameters": [
           {
@@ -2569,7 +2569,7 @@
             }
           },
           "413": {
-            "description": "Upload too large",
+            "description": "Upload larger than the account's `media_upload_limit.max_bytes`: the lower of the server's own cap and the homeserver's `m.upload.size`. Refused before staging when `Content-Length` already exceeds it.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6329,7 +6329,7 @@
             }
           },
           "413": {
-            "description": "Definite event_too_large, preview_too_large or payload_too_large validation rejection; preview-aware content uses a 40960-byte budget including 12288 bytes reserved for media fields. No preflight upload claims or event dispatch.",
+            "description": "Definite event_too_large, preview_too_large or payload_too_large validation rejection; preview-aware content uses a 40960-byte budget including 12288 bytes reserved for media fields. payload_too_large also covers an upload that is now over the account's `media_upload_limit.max_bytes`, which can drop after staging. No preflight upload claims or event dispatch.",
             "content": {
               "application/json": {
                 "schema": {
@@ -11602,6 +11602,10 @@
             "type": "string",
             "description": "Homeserver base URL."
           },
+          "media_upload_limit": {
+            "$ref": "#/components/schemas/MediaUploadLimitDto",
+            "description": "The largest media upload this account can stage (ADR 0143 section 6).\n`POST …/media/uploads` refuses a larger body with `413`. Absent on a\nserver that predates the field, in which case a client keeps its own\nfallback limit."
+          },
           "own_identity_changed": {
             "type": "boolean",
             "description": "Whether Axon's device still needs to be cross-signed after a master-key\nreplacement (ADR 0136). The first observed identity establishes the baseline.\nUpdates are pushed on `/v1/ws` as `account.own_identity_changed`.\nCurrent servers always send this field. Treat it as false when absent on\nan older server."
@@ -11712,6 +11716,10 @@
               "homeserver_url": {
                 "type": "string",
                 "description": "Homeserver base URL."
+              },
+              "media_upload_limit": {
+                "$ref": "#/components/schemas/MediaUploadLimitDto",
+                "description": "The largest media upload this account can stage (ADR 0143 section 6).\n`POST …/media/uploads` refuses a larger body with `413`. Absent on a\nserver that predates the field, in which case a client keeps its own\nfallback limit."
               },
               "own_identity_changed": {
                 "type": "boolean",
@@ -13838,6 +13846,10 @@
                 "homeserver_url": {
                   "type": "string",
                   "description": "Homeserver base URL."
+                },
+                "media_upload_limit": {
+                  "$ref": "#/components/schemas/MediaUploadLimitDto",
+                  "description": "The largest media upload this account can stage (ADR 0143 section 6).\n`POST …/media/uploads` refuses a larger body with `413`. Absent on a\nserver that predates the field, in which case a client keeps its own\nfallback limit."
                 },
                 "own_identity_changed": {
                   "type": "boolean",
@@ -17877,6 +17889,31 @@
           "video",
           "audio"
         ]
+      },
+      "MediaUploadLimitDto": {
+        "type": "object",
+        "description": "An account's effective media upload limit (`AccountDto.media_upload_limit`,\nADR 0143 section 6).",
+        "required": [
+          "max_bytes",
+          "homeserver_max_bytes"
+        ],
+        "properties": {
+          "homeserver_max_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The homeserver's `m.upload.size`, in bytes. `null` when it is unknown,\nfor example because the homeserver did not answer, has not been asked\nyet, or does not report one. Axon then applies only its own cap, and\nthe homeserver may still refuse an upload below `max_bytes`. Always\nsent, so `null` is distinct from an absent field.",
+            "minimum": 0
+          },
+          "max_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The largest upload, in bytes, that Axon stages for this account: the\nlower of the server's `media.max_upload_bytes` and the homeserver's\n`m.upload.size`, or `media.max_upload_bytes` alone when\n`homeserver_max_bytes` is `null`. It can change between reads.",
+            "minimum": 0
+          }
+        }
       },
       "MemberActionRequest": {
         "type": "object",
