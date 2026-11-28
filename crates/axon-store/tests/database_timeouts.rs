@@ -61,6 +61,50 @@ async fn ordinary_statements_and_connection_replacements_inherit_deadlines() {
     assert_eq!(settings(store.pool()).await, (1000, 2000, 3000));
 }
 
+async fn jit(pool: &PgPool) -> String {
+    sqlx_core::query_scalar::query_scalar("SELECT current_setting('jit')")
+        .fetch_one(pool)
+        .await
+        .expect("jit setting")
+}
+
+/// JIT compiled the media lookup for about 2.4 s on a large store, a statement
+/// that runs in about 50 ms (#1294), so no Axon pool may leave it on.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn every_pool_and_connection_replacement_turns_jit_off() {
+    // Control: without the server's own default left on, this test proves nothing.
+    assert_eq!(
+        jit(&raw_pool().await).await,
+        "on",
+        "the test database must leave jit at its default"
+    );
+    let store = bounded_store(DatabaseTimeouts::default()).await;
+    let config = DatabaseConfig {
+        url: std::env::var("DATABASE_URL").expect("DATABASE_URL"),
+        max_connections: 1,
+        timeouts: DatabaseTimeouts::default(),
+    };
+    let migration = Store::migration_pool(&config).expect("migration pool");
+    for pool in [
+        store.pool(),
+        store.read_pool(),
+        store.status_pool(),
+        &migration,
+    ] {
+        assert_eq!(jit(pool).await, "off");
+    }
+    store
+        .read_pool()
+        .acquire()
+        .await
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+    assert_eq!(jit(store.read_pool()).await, "off");
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn pool_waits_and_bootstrap_lock_waits_are_bounded() {

@@ -138,6 +138,8 @@ Search-outbox pruning commits batches of at most 1000 rows so interruptions leav
 Stale refresh-token cleanup runs in the background at most once per minute, with one sweep in flight across the server's store handles; cleanup failure does not reject token issuance or rotation.
 Refresh tokens beyond the 30-day retention horizon are treated as unknown even if physical cleanup is delayed.
 Session settings are initialized after connection, supporting direct PostgreSQL and session-mode poolers without a startup `options` parameter.
+Besides the deadlines above, every Axon connection sets `jit = off`.
+Axon's queries are short and index-driven, so JIT compilation only adds time: on a store of about 2.6 million events it added about 2.4 seconds to each media request (#1294).
 For PgBouncer, retain sqlx’s existing `ignore_startup_parameters = extra_float_digits` setting; ignoring `options` is unnecessary.
 Transaction-mode poolers are unsupported: session deadlines and session advisory locks require a stable backend connection, as described in [PgBouncer’s feature matrix](https://www.pgbouncer.org/features.html).
 See [ADR 0112](adr/0112-bounded-database-work-and-pool-isolation.md) for the pool topology, transaction audit, and remaining maintenance tradeoffs.
