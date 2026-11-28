@@ -325,10 +325,17 @@ impl Store {
                     // Session initialization avoids poolers' unsupported startup
                     // `options` parameter. Every replacement passes this hook before
                     // becoming available to callers; acquisition bounds initialization.
+                    //
+                    // JIT is off because Axon's queries are short and index-driven,
+                    // and on a large store the planner overestimates some of them
+                    // past `jit_optimize_above_cost`: the media lookup then spent
+                    // about 2.4 s compiling a statement that ran in about 50 ms,
+                    // while it held a pool slot (#1294).
                     sqlx_core::query::query(
                         "SELECT set_config('statement_timeout', $1, false), \
                      set_config('lock_timeout', $2, false), \
-                     set_config('idle_in_transaction_session_timeout', $3, false)",
+                     set_config('idle_in_transaction_session_timeout', $3, false), \
+                     set_config('jit', 'off', false)",
                     )
                     .bind(format!("{statement_secs}s"))
                     .bind(format!("{lock_secs}s"))
