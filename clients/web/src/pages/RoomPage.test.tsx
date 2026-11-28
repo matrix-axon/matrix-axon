@@ -585,23 +585,24 @@ describe('RoomPage', () => {
   it('shows joined parent spaces from their child relationships', async () => {
     const parentSpace = '!engineering:hs'
     server.use(
+      http.get(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/spaces/graph`, () =>
+        HttpResponse.json({
+          data: {
+            links: [
+              {
+                parent_room_id: parentSpace,
+                child_room_id: ROOM,
+                source: 'child',
+                origin_ts: 0,
+                canonical: false,
+              },
+            ],
+          },
+        }),
+      ),
       http.get(
-        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/space/children`,
-        ({ params }) =>
-          HttpResponse.json({
-            data:
-              params.roomId === parentSpace
-                ? [
-                    {
-                      room_id: ROOM,
-                      name: 'Ops',
-                      room_type: null,
-                      suggested: false,
-                      via: ['hs'],
-                    },
-                  ]
-                : [],
-          }),
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/spaces/discovered`,
+        () => HttpResponse.json({ data: { memberships: [] } }),
       ),
       http.get(
         `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/space/parents`,

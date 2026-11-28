@@ -40,9 +40,15 @@ before starting a milestone.
   (`useServices()`). Tests build the same graph over msw + in-memory
   storage via `src/test/services.ts` — components never construct services.
 - **Space visibility** comes from `spaces.visible`, independent of room filters and sort.
-  Hide only confirmed empty direct joined-room projections; keep unknown and failed roots available.
-  Keep cached empty roots hidden during background refetches; joined subspaces are independent picker roots, not recursive membership.
-  Continue fetching hidden roots on child updates and reconnect so they can reappear.
+  The picker uses the joined graph and cached browse memberships, scoped to the account.
+  Keep joined branches, including parents whose only children are subspaces.
+  Expansion preferences survive sign-out and cache restore.
+  Prune paths only against confirmed joined rooms.
+  Hide only isolated spaces with confirmed empty membership, and keep unknown or failed roots available.
+  Refresh both account reads on reconnect and on graph invalidation.
+  Browse invalidations refresh cached browse memberships.
+  Cached browse memberships expire locally, and the picker never requests homeserver discovery.
+  The legacy children read supplies the shallow picker on servers without the graph route.
 - **State is @preact/signals** in plain store factories
   (`src/stores/*.ts`), unit-testable without rendering. Direct
   `signal.value = x` writes are the idiom; the `react-hooks/immutability`

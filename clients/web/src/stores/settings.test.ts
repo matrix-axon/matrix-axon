@@ -79,8 +79,11 @@ describe('createSettingsStore', () => {
       activeAccountId: null,
       pinnedRooms: [],
       spaceOrder: [],
+      expandedSpacePaths: [],
       spacesPaneCollapsed: false,
       spacesPaneAutoHide: true,
+      showSpaceNames: false,
+      spacesPaneWidth: 160,
       sidebarWidth: 420,
       roomSort: 'recent',
       roomFilter: 'all',
@@ -187,10 +190,26 @@ describe('room-list settings (ADRs 0038/0042)', () => {
     expect(store.spaceOrder.value).toEqual([])
     expect(store.spacesPaneCollapsed.value).toBe(false)
     expect(store.spacesPaneAutoHide.value).toBe(true)
+    expect(store.showSpaceNames.value).toBe(false)
+    expect(store.spacesPaneWidth.value).toBe(160)
     expect(store.sidebarWidth.value).toBe(420)
     expect(store.roomSort.value).toBe('recent')
     expect(store.roomFilter.value).toBe('all')
     expect(store.theme.value).toBe('dark')
+  })
+
+  it('restores expanded space paths from local settings', () => {
+    const storage = memoryStorage()
+    const store = createSettingsStore(storage)
+    const otherTab = createSettingsStore(storage)
+    expect(store.expandedSpacePaths.value).toEqual([])
+    const paths = [
+      '"account/!root:hs"',
+      '"account/!root:hs"/"account/!child:hs"',
+    ]
+    store.expandedSpacePaths.value = paths
+    otherTab.theme.value = 'dark'
+    expect(createSettingsStore(storage).expandedSpacePaths.value).toEqual(paths)
   })
 
   it('persists browser-local space ordering', () => {
@@ -202,6 +221,8 @@ describe('room-list settings (ADRs 0038/0042)', () => {
     store.moveSpace('account/!two:hs', 0, shown)
     store.spacesPaneCollapsed.value = true
     store.spacesPaneAutoHide.value = false
+    store.showSpaceNames.value = true
+    store.spacesPaneWidth.value = 208
     store.sidebarWidth.value = 480
     expect(store.spaceOrder.value).toEqual([
       'account/!two:hs',
@@ -213,6 +234,8 @@ describe('room-list settings (ADRs 0038/0042)', () => {
     ])
     expect(createSettingsStore(storage).spacesPaneCollapsed.value).toBe(true)
     expect(createSettingsStore(storage).spacesPaneAutoHide.value).toBe(false)
+    expect(createSettingsStore(storage).showSpaceNames.value).toBe(true)
+    expect(createSettingsStore(storage).spacesPaneWidth.value).toBe(208)
     expect(createSettingsStore(storage).sidebarWidth.value).toBe(480)
   })
 

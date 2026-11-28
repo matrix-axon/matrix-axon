@@ -29,6 +29,7 @@ import {
   roomDiscovery,
   snapshot,
   spaceDiscovery,
+  spaceReadHandlers,
   unknownSnapshot,
 } from '../test/room-details'
 import { TEST_BASE_URL, testServices } from '../test/services'
@@ -38,7 +39,7 @@ const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
 const FIRST = '!first:hs'
 const SECOND = '!second:hs'
 
-const server = setupServer()
+const server = setupServer(...spaceReadHandlers(TEST_BASE_URL, 404))
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
   cleanup()

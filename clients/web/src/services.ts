@@ -1482,10 +1482,12 @@ export function connectCacheReset(
 export function connectRoomsSessionReset(
   auth: CompositeAuthProvider,
   rooms: RoomsStore,
+  spaces?: SpacesStore,
 ): () => void {
   return effect(() => {
     if (!auth.signedIn.value) {
       rooms.resetSession()
+      spaces?.resetSession()
     }
   })
 }
@@ -2026,6 +2028,7 @@ export function createServices(
     live,
     settings.roomAccountFilter,
     accounts,
+    settings.expandedSpacePaths,
   )
   const roomDetails = createRoomDetailsStore(api, live)
   const invites = createInvitesStore(api, rooms)
@@ -2137,7 +2140,7 @@ export function createServices(
   connectTimelineCacheReset(auth, timelines)
   connectRoomCachesReset(auth, { memberStores, memberDirectory, threadStores })
   connectCacheReset(auth, cache)
-  connectRoomsSessionReset(auth, rooms)
+  connectRoomsSessionReset(auth, rooms, spaces)
   connectMatrixOAuthQrSessionReset(
     auth,
     matrixOAuthQr,

@@ -1,6 +1,7 @@
 import { cleanup, render, waitFor } from '@testing-library/preact'
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
+import { spaceReadHandlers } from '../test/room-details'
 import { LocationProvider } from 'preact-iso'
 import { afterAll, afterEach, beforeAll, expect, it } from 'vitest'
 import { ServicesContext } from '../services'
@@ -28,7 +29,7 @@ const OPS = {
 }
 const LOUNGE = { ...OPS, room_id: '!lounge:hs', name: 'Lounge' }
 
-const server = setupServer()
+const server = setupServer(...spaceReadHandlers(TEST_BASE_URL, 404))
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
   cleanup()

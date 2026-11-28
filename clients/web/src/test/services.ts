@@ -267,6 +267,7 @@ export function testServices(
     live,
     settings.roomAccountFilter,
     accounts,
+    settings.expandedSpacePaths,
   )
   const roomDetails = createRoomDetailsStore(api, live)
   const updates = createUpdateChecker({
@@ -300,7 +301,7 @@ export function testServices(
   connectTimelineCacheReset(auth, timelines)
   connectRoomCachesReset(auth, { memberStores, memberDirectory, threadStores })
   connectCacheReset(auth, cache)
-  connectRoomsSessionReset(auth, rooms)
+  connectRoomsSessionReset(auth, rooms, spaces)
   connectMatrixOAuthQrSessionReset(
     auth,
     matrixOAuthQr,

@@ -572,7 +572,10 @@ Unjoined-room discovery ([issue 622](https://github.com/matrix-axon/matrix-axon/
 The discovery cache, progressive updates, and acquisition budgets follow ADR 0111 and are not implemented by the cached state endpoint.
 The web client's Room Information panel reads `/metadata`, `/homeserver_details`, and member counts, and re-reads each on the `room_details.changed` source that names it ([ADR 0133](adr/0133-web-room-information-metadata-and-discovery.md) decisions 1–5).
 For a space it pages the children from `space/hierarchy`, sending `enrich=true` only on the read that opening the panel makes for a joined space (plus one read to resume a paused crawl and a timer read after a transient failure), and its join dialog and Matrix-link prompt preview one unjoined room from `/discovery` (decisions 6–8).
-The web spaces store still reads `space/children` ([issue 1054](https://github.com/matrix-axon/matrix-axon/issues/1054)).
+The web Spaces picker pages `spaces/graph` for joined subspaces and `spaces/discovered` for cached joined descendants through unjoined branches.
+Both reads run on startup, after reconnect, and after the account's `space_graph` invalidation.
+A `space_browse` invalidation refreshes the cached browse memberships.
+The picker expires cached browse memberships locally and uses `space/children` on older servers without the graph route.
 The TUI sidebar pages `space/hierarchy` with `enrich=false` through its existing four-worker pool ([ADR 0135](adr/0135-tui-room-details-and-discovery.md)).
 It deduplicates direct child IDs and intersects them with the same account's joined-room list; unjoined discoveries never enter sidebar navigation.
 Walks are bounded to 100 children per page, 200 pages, 2 MiB per response, 16 MiB in total, and 60 seconds overall.

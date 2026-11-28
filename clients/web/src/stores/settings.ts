@@ -54,6 +54,10 @@ export const LINK_PREVIEW_SETTINGS: readonly LinkPreviewSetting[] = [
   'device+homeserver',
 ]
 
+/** Width bounds for the named Spaces pane in CSS pixels. */
+export const SPACES_PANE_WIDTH_MIN = 128
+export const SPACES_PANE_WIDTH_MAX = 320
+
 /** Desktop sidebar bounds in CSS pixels. Keep the room list readable. */
 export const SIDEBAR_WIDTH_MIN = 360
 export const SIDEBAR_WIDTH_MAX = 640
@@ -78,10 +82,16 @@ export interface SettingsV1 {
   pinnedRooms: string[]
   /** Personal ordering for the joined-space picker, keyed like pinned rooms. */
   spaceOrder: string[]
+  /** Expanded picker paths, scoped by the account keys in each path. */
+  expandedSpacePaths: readonly string[]
   /** Whether the desktop sidebar hides the spaces avatar rail. */
   spacesPaneCollapsed: boolean
   /** Keep the rail hidden while there is no meaningful space choice. */
   spacesPaneAutoHide: boolean
+  /** Show names in the Spaces picker on wider displays. */
+  showSpaceNames: boolean
+  /** Preferred width of the named Spaces pane, in CSS pixels. */
+  spacesPaneWidth: number
   /** Browser-local desktop sidebar width in CSS pixels. */
   sidebarWidth: number
   /** Persisted room-list sort mode (ADR 0042). */
@@ -239,8 +249,11 @@ const DEFAULTS: SettingsV1 = {
   activeAccountId: null,
   pinnedRooms: [],
   spaceOrder: [],
+  expandedSpacePaths: [],
   spacesPaneCollapsed: false,
   spacesPaneAutoHide: true,
+  showSpaceNames: false,
+  spacesPaneWidth: 160,
   sidebarWidth: 420,
   roomSort: 'recent',
   roomFilter: 'all',
@@ -341,6 +354,20 @@ export function writeStoredZoom(storage: Storage, zoom: number): void {
   }
 }
 
+function parsePaneWidth(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  fallback: number,
+): number {
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= minimum &&
+    value <= maximum
+    ? Math.round(value)
+    : fallback
+}
+
 function parse(
   raw: string | null,
   defaults: SettingsV1 = DEFAULTS,
@@ -373,6 +400,11 @@ function parse(
     spaceOrder: Array.isArray(v1.spaceOrder)
       ? v1.spaceOrder.filter((key): key is string => typeof key === 'string')
       : [],
+    expandedSpacePaths: Array.isArray(v1.expandedSpacePaths)
+      ? v1.expandedSpacePaths.filter(
+          (path): path is string => typeof path === 'string',
+        )
+      : [],
     spacesPaneCollapsed:
       typeof v1.spacesPaneCollapsed === 'boolean'
         ? v1.spacesPaneCollapsed
@@ -381,13 +413,22 @@ function parse(
       typeof v1.spacesPaneAutoHide === 'boolean'
         ? v1.spacesPaneAutoHide
         : DEFAULTS.spacesPaneAutoHide,
-    sidebarWidth:
-      typeof v1.sidebarWidth === 'number' &&
-      Number.isFinite(v1.sidebarWidth) &&
-      v1.sidebarWidth >= SIDEBAR_WIDTH_MIN &&
-      v1.sidebarWidth <= SIDEBAR_WIDTH_MAX
-        ? Math.round(v1.sidebarWidth)
-        : DEFAULTS.sidebarWidth,
+    showSpaceNames:
+      typeof v1.showSpaceNames === 'boolean'
+        ? v1.showSpaceNames
+        : DEFAULTS.showSpaceNames,
+    spacesPaneWidth: parsePaneWidth(
+      v1.spacesPaneWidth,
+      SPACES_PANE_WIDTH_MIN,
+      SPACES_PANE_WIDTH_MAX,
+      DEFAULTS.spacesPaneWidth,
+    ),
+    sidebarWidth: parsePaneWidth(
+      v1.sidebarWidth,
+      SIDEBAR_WIDTH_MIN,
+      SIDEBAR_WIDTH_MAX,
+      DEFAULTS.sidebarWidth,
+    ),
     roomSort: oneOf(ROOM_SORTS, v1.roomSort, DEFAULTS.roomSort),
     roomFilter: oneOf(ROOM_FILTERS, v1.roomFilter, DEFAULTS.roomFilter),
     // The legacy favorites-only category becomes All with promotion enabled
@@ -502,8 +543,11 @@ export interface SettingsStore {
   activeAccountId: Signal<string | null>
   pinnedRooms: Signal<string[]>
   spaceOrder: Signal<string[]>
+  expandedSpacePaths: Signal<readonly string[]>
   spacesPaneCollapsed: Signal<boolean>
   spacesPaneAutoHide: Signal<boolean>
+  showSpaceNames: Signal<boolean>
+  spacesPaneWidth: Signal<number>
   sidebarWidth: Signal<number>
   roomSort: Signal<RoomSort>
   roomFilter: Signal<RoomFilter>
@@ -575,8 +619,11 @@ export function createSettingsStore(
   const activeAccountId = signal<string | null>(initial.activeAccountId)
   const pinnedRooms = signal<string[]>(initial.pinnedRooms)
   const spaceOrder = signal<string[]>(initial.spaceOrder)
+  const expandedSpacePaths = signal(initial.expandedSpacePaths)
   const spacesPaneCollapsed = signal<boolean>(initial.spacesPaneCollapsed)
   const spacesPaneAutoHide = signal<boolean>(initial.spacesPaneAutoHide)
+  const showSpaceNames = signal(initial.showSpaceNames)
+  const spacesPaneWidth = signal(initial.spacesPaneWidth)
   const sidebarWidth = signal<number>(initial.sidebarWidth)
   const roomSort = signal<RoomSort>(initial.roomSort)
   const roomFilter = signal<RoomFilter>(initial.roomFilter)
@@ -634,8 +681,11 @@ export function createSettingsStore(
       activeAccountId: activeAccountId.value,
       pinnedRooms: pinnedRooms.value,
       spaceOrder: spaceOrder.value,
+      expandedSpacePaths: expandedSpacePaths.value,
       spacesPaneCollapsed: spacesPaneCollapsed.value,
       spacesPaneAutoHide: spacesPaneAutoHide.value,
+      showSpaceNames: showSpaceNames.value,
+      spacesPaneWidth: spacesPaneWidth.value,
       sidebarWidth: sidebarWidth.value,
       roomSort: roomSort.value,
       roomFilter: roomFilter.value,
@@ -684,8 +734,11 @@ export function createSettingsStore(
     activeAccountId,
     pinnedRooms,
     spaceOrder,
+    expandedSpacePaths,
     spacesPaneCollapsed,
     spacesPaneAutoHide,
+    showSpaceNames,
+    spacesPaneWidth,
     sidebarWidth,
     roomSort,
     roomFilter,

@@ -166,13 +166,19 @@ paths to `index.html` (the Vite dev server already does). ADR 0030's
 `sync_state` is rendered when present, but the server does not emit it yet —
 see the note in `src/stores/accounts.ts`.
 
-The Spaces picker hides spaces once a successful membership read confirms they have no joined child rooms.
-Spaces with unknown membership and failed reads remain visible, and Retry remains available for failed reads.
-Confirmed empty spaces stay hidden during background refreshes.
-The picker checks direct child rooms only; a parent containing only subspaces is hidden, while each populated joined subspace appears independently.
-A stale or failed room-list read also keeps spaces visible until joined membership can be confirmed.
-If the selected space becomes empty, the picker returns to All rooms.
-Hidden spaces retain their saved order and can reappear after membership updates.
+The Spaces picker lets you expand joined subspaces and select any space to see its reachable joined chat rooms.
+The room list keeps its usual filters and sort, including when it includes cached rooms reached through unjoined branches.
+Each room contributes once to a selected list and once to each containing space's unread badge.
+Subspaces follow Matrix sibling order, and top-level spaces keep their saved order.
+Colored lines connect each expanded space to its subspaces, with a different color at each depth.
+On tablet and desktop widths, use the **Aa** button in the Spaces picker to show or hide names.
+When names are shown beside the room list, drag the Spaces divider or focus it and use the arrow keys to resize the pane.
+The browser remembers expanded branches, the names setting, and the pane width on this device.
+A confirmed room-list refresh removes saved expansion for branches through spaces you are no longer joined to.
+The picker hides isolated spaces with confirmed empty membership and keeps unknown or failed roots available.
+Retry is available for failed reads.
+If the selected space becomes empty and disappears from the picker, the room list returns to All rooms.
+Older servers without the joined graph use the shallow picker.
 
 Received custom reaction images render in room and thread reaction chips through the authenticated media proxy.
 Tooltips and accessible labels use the optional reaction `shortcode` when a server supplies it, and fall back to “Custom reaction” for older servers or missing names.

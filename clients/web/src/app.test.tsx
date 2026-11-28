@@ -24,9 +24,13 @@ import { layoutMode, SINGLE_PANE_QUERY } from './layout'
 import type { NotificationClick } from './platform'
 import type { Account } from './stores/accounts'
 import type { EventDto } from './stores/timeline'
-import { discoveredRoom, roomDiscovery } from './test/room-details'
+import {
+  discoveredRoom,
+  roomDiscovery,
+  emptyRoomInfoHandler,
+  spaceReadHandlers,
+} from './test/room-details'
 import { memoryStorage } from './test/memory-storage'
-import { emptyRoomInfoHandler } from './test/room-details'
 import { TEST_BASE_URL, UNKNOWN_BACKUP, testServices } from './test/services'
 import { createIncomingShareStore } from './incoming-share/store'
 import type { IncomingShare } from './incoming-share/types'
@@ -49,6 +53,7 @@ const ACCOUNT_DTO: Account = {
 }
 
 const server = setupServer(
+  ...spaceReadHandlers(TEST_BASE_URL),
   emptyRoomInfoHandler(TEST_BASE_URL),
   http.get(`${TEST_BASE_URL}/v1/accounts`, () =>
     HttpResponse.json({ data: [ACCOUNT_DTO] }),
