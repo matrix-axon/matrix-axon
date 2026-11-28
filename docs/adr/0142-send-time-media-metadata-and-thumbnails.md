@@ -434,7 +434,7 @@ A send with an attachment then follows the table above, and the single budget of
 - The upload bound covers resolving the room, the first encryption check, any preview images, and the original's upload.
   Inspection runs alongside the upload under its own 5 s and the step's bound together.
   If the upload has finished and inspection is still running at the step's deadline, the send goes on without what inspection would have added.
-  That can happen only when the upload began in the bound's last 5 s.
+  Inspection starts with the upload, so that needs an upload that began in the bound's last 5 s and still finished before its deadline.
   Inspection no longer pauses a budget, and it cannot carry the send past the table's sum.
 - The thumbnail's upload runs under its own 10 s, between the steps, and is charged to neither.
 - The event step starts its own `sync.send_mutation_timeout_secs` after the thumbnail.

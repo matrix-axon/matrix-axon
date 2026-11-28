@@ -1259,9 +1259,10 @@ async fn upload_thumbnail(
 /// within the upload step's bound. Inspection also has its own 5 s, so a slow
 /// decoder cannot fail the send: when the upload has finished and inspection
 /// is still running at the step's deadline, the send goes on without what
-/// inspection would have added (dimensions, a generated thumbnail). That can
-/// happen only when the upload began in the last 5 s of the bound, and it
-/// keeps the step, and so the whole send, inside ADR 0142 section 8's sum.
+/// inspection would have added (dimensions, a generated thumbnail). Inspection
+/// starts with the upload, so that needs an upload that began in the bound's
+/// last 5 s and still finished before its deadline. The cutoff keeps the
+/// step, and so the whole send, inside ADR 0142 section 8's sum.
 async fn upload_original(
     room: &Room,
     send: MediaSend,
@@ -1282,11 +1283,27 @@ async fn upload_original(
     ));
     let source = if let Some(image) = image {
         let deadline = clock.deadline;
-        let inspect = async move {
+        let started = tokio::time::Instant::now();
+        // When the upload ended, so a cut-off inspection can say how long it
+        // ran past it. A `OnceLock` because the send future must be `Send`.
+        let uploaded_at = std::sync::OnceLock::<tokio::time::Instant>::new();
+        let upload = async {
+            let source = upload.await?;
+            let _ = uploaded_at.set(tokio::time::Instant::now());
+            Ok::<_, GatewayError>(source)
+        };
+        let inspect = async {
             Ok(tokio::time::timeout_at(deadline, image)
                 .await
                 .unwrap_or_else(|_| {
-                    tracing::warn!(room_id = %room.room_id(), error_kind = "inspection_past_upload_bound", "image inspection outlasted the upload step; sending without its metadata");
+                    let upload_ms = uploaded_at.get().map(|at| (*at - started).as_millis());
+                    tracing::warn!(
+                        room_id = %room.room_id(),
+                        error_kind = "inspection_past_upload_bound",
+                        inspection_ms = started.elapsed().as_millis(),
+                        upload_ms,
+                        "image inspection outlasted the upload step; sending without its metadata"
+                    );
                     axon_core::SendImageMetadata::default()
                 }))
         };
