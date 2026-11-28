@@ -320,7 +320,7 @@ dependencies = [
 
 [[package]]
 name = "axon-api"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "axon-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -376,14 +376,14 @@ dependencies = [
 
 [[package]]
 name = "axon-crypto"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axon-core",
 ]
 
 [[package]]
 name = "axon-itest"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "matrix-sdk",
@@ -397,7 +397,7 @@ dependencies = [
 
 [[package]]
 name = "axon-media"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "axon-core",
@@ -414,7 +414,7 @@ dependencies = [
 
 [[package]]
 name = "axon-search"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axon-core",
  "axon-store",
@@ -430,7 +430,7 @@ dependencies = [
 
 [[package]]
 name = "axon-server"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -473,7 +473,7 @@ dependencies = [
 
 [[package]]
 name = "axon-smoke-local-stack"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "axon-smoke-matrix-oauth"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -504,7 +504,7 @@ dependencies = [
 
 [[package]]
 name = "axon-smoke-server"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -518,7 +518,7 @@ dependencies = [
 
 [[package]]
 name = "axon-smoke-tui"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -536,7 +536,7 @@ dependencies = [
 
 [[package]]
 name = "axon-store"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axon-core",
  "chrono",
@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "axon-sync"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "aes",
  "async-trait",
@@ -588,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "axon-test-support"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
@@ -596,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "axon-tui"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -628,7 +628,7 @@ dependencies = [
 
 [[package]]
 name = "axon-web"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "axum"
