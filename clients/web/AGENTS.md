@@ -42,6 +42,8 @@ before starting a milestone.
 - **Space visibility** comes from `spaces.visible`, independent of room filters and sort.
   The picker uses the joined graph and cached browse memberships, scoped to the account.
   Keep joined branches, including parents whose only children are subspaces.
+  Expansion preferences survive sign-out and cache restore.
+  Prune paths only against confirmed joined rooms.
   Hide only isolated spaces with confirmed empty membership, and keep unknown or failed roots available.
   Refresh both account reads on reconnect and on graph invalidation.
   Browse invalidations refresh cached browse memberships.

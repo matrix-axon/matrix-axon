@@ -243,6 +243,35 @@ export function createSpacesStore(
     }
   })
 
+  effect(() => {
+    // The room store clears confirmation before dropping rows on sign-out.
+    // A cached or failed read cannot establish that a space was left.
+    if (
+      !rooms.confirmed.value ||
+      rooms.stale.value ||
+      rooms.error.value !== null
+    )
+      return
+    const joined = catalog.value
+    const saved = expandedPaths.peek()
+    if (saved.length === 0) return
+    const spaceKeys = new Set<string>()
+    for (const [key, room] of joined) {
+      if (room.room_type === 'm.space') spaceKeys.add(JSON.stringify(key))
+    }
+    const retained = saved.filter((path) => {
+      // Picker paths join JSON-quoted keys with "/", which also occurs inside
+      // room keys. Match the quoted segments before checking membership.
+      const keys = path.match(/"(?:[^"\\]|\\.)*"/g)
+      return (
+        keys !== null &&
+        keys.join('/') === path &&
+        keys.every((key) => spaceKeys.has(key))
+      )
+    })
+    if (retained.length !== saved.length) expandedPaths.value = retained
+  })
+
   const now = signal(Date.now())
   effect(() => {
     const time = now.value

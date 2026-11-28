@@ -53,6 +53,7 @@ const plainRoom = (roomId: string): RoomDto =>
  *  reachable from it. */
 function harness() {
   const rooms = signal<RoomDto[]>([space()])
+  const confirmed = signal(false)
   const stale = signal(false)
   const error = signal<string | null>(null)
   const reconnects = signal(0)
@@ -77,6 +78,7 @@ function harness() {
     api,
     {
       rooms,
+      confirmed,
       stale,
       error,
       unreadCount: (key: string) => counts.value.get(key) ?? 0,
@@ -86,6 +88,7 @@ function harness() {
   return {
     store,
     rooms,
+    confirmed,
     stale,
     error,
     counts,
@@ -767,4 +770,45 @@ it('cycles from the position of a selected child inside a collapsed branch', asy
   store.selected.value = key(nested)
   expect(adjacentSpace(store, order, titles, -1)).toBe(key(SPACE))
   expect(adjacentSpace(store, order, titles, 1)).toBe(key(after))
+})
+
+it('prunes saved paths through departed spaces only once the room catalog is confirmed', async () => {
+  const child = '!child/"quoted:hs'
+  const grandchild = '!grandchild:hs'
+  server.use(
+    http.get(graphUrl, () =>
+      HttpResponse.json({
+        data: { links: [link(SPACE, child), link(child, grandchild)] },
+      }),
+    ),
+  )
+  const { store, rooms, confirmed, stale, error } = harness()
+  const root = JSON.stringify(key(SPACE))
+  const branch = `${root}/${JSON.stringify(key(child))}`
+  const nested = `${branch}/${JSON.stringify(key(grandchild))}`
+  const other = JSON.stringify(`${OTHER}/${SPACE}`)
+  for (const path of [root, branch, nested, other]) {
+    store.setExpanded(path, true)
+  }
+
+  stale.value = true
+  confirmed.value = true
+  expect(store.expanded.value).toEqual(new Set([root, branch, nested, other]))
+
+  // The successful refresh supplies a room absent from the cache.
+  rooms.value = [space(), space(child), space(grandchild)]
+  stale.value = false
+  expect(store.expanded.value).toEqual(new Set([root, branch, nested]))
+
+  error.value = 'offline'
+  rooms.value = [space(), space(grandchild)]
+  expect(store.expanded.value).toEqual(new Set([root, branch, nested]))
+  error.value = null
+  expect(store.expanded.value).toEqual(new Set([root]))
+
+  confirmed.value = false
+  rooms.value = []
+  store.resetSession()
+  expect(store.expanded.value).toEqual(new Set([root]))
+  await vi.waitFor(() => expect(store.loading.value.size).toBe(0))
 })
