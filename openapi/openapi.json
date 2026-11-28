@@ -12104,12 +12104,20 @@
                 "type": "boolean",
                 "description": "`true` when this event has been redacted (content/body masked)."
               },
+              "redaction_arrival_order": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "The arrival order of the redaction named by `redaction_event_id`, on the\nsame scale as `arrival_order`. Set exactly when `redaction_event_id` is\nset; when several redactions match, it is the one that arrived last.\nTimeline reads never return a redaction as an event of its own, so this\nis the only place its position appears. See ADR 0089 for when a client\nmay name it in a read receipt."
+              },
               "redaction_event_id": {
                 "type": [
                   "string",
                   "null"
                 ],
-                "description": "The `event_id` of the redaction that masked this event, if redacted."
+                "description": "The `event_id` of the redaction that masked this event, if redacted.\nWhen several redactions match, the one that arrived last."
               },
               "relates_to": {
                 "type": [
@@ -13962,12 +13970,20 @@
                   "type": "boolean",
                   "description": "`true` when this event has been redacted (content/body masked)."
                 },
+                "redaction_arrival_order": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64",
+                  "description": "The arrival order of the redaction named by `redaction_event_id`, on the\nsame scale as `arrival_order`. Set exactly when `redaction_event_id` is\nset; when several redactions match, it is the one that arrived last.\nTimeline reads never return a redaction as an event of its own, so this\nis the only place its position appears. See ADR 0089 for when a client\nmay name it in a read receipt."
+                },
                 "redaction_event_id": {
                   "type": [
                     "string",
                     "null"
                   ],
-                  "description": "The `event_id` of the redaction that masked this event, if redacted."
+                  "description": "The `event_id` of the redaction that masked this event, if redacted.\nWhen several redactions match, the one that arrived last."
                 },
                 "relates_to": {
                   "type": [
@@ -16688,12 +16704,20 @@
             "type": "boolean",
             "description": "`true` when this event has been redacted (content/body masked)."
           },
+          "redaction_arrival_order": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The arrival order of the redaction named by `redaction_event_id`, on the\nsame scale as `arrival_order`. Set exactly when `redaction_event_id` is\nset; when several redactions match, it is the one that arrived last.\nTimeline reads never return a redaction as an event of its own, so this\nis the only place its position appears. See ADR 0089 for when a client\nmay name it in a read receipt."
+          },
           "redaction_event_id": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The `event_id` of the redaction that masked this event, if redacted."
+            "description": "The `event_id` of the redaction that masked this event, if redacted.\nWhen several redactions match, the one that arrived last."
           },
           "relates_to": {
             "type": [

@@ -213,7 +213,13 @@ pub struct TimelineRow {
     /// For a redaction event, the `event_id` it redacts.
     pub redacts: Option<String>,
     /// The `event_id` of the redaction that masked this row, if it was redacted.
+    /// When several redactions match, the one that arrived last.
     pub redaction_event_id: Option<String>,
+    /// The arrival order (`events.id`) of
+    /// [`redaction_event_id`](Self::redaction_event_id), so a client can name the
+    /// redaction in a read receipt (#1273). The timeline strips bare redaction
+    /// rows, so this is the only place a client learns where one arrived.
+    pub redaction_arrival_order: Option<i64>,
     /// The sender-trust verdict snapshot from the crypto sibling (M7c), if one
     /// was recorded: `verified`, `unverified`, `unknown`, or
     /// `verification_violation`. `None` for unencrypted events and rows decrypted
@@ -291,6 +297,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for TimelineRow {
             relates_to: row.try_get("relates_to")?,
             redacts: row.try_get("redacts")?,
             redaction_event_id: row.try_get("redaction_event_id")?,
+            redaction_arrival_order: row.try_get("redaction_arrival_order")?,
             sender_trust: row.try_get("sender_trust")?,
             utd_reason: axon_core::UtdReason::from_columns(
                 row.try_get::<Option<String>, _>("utd_reason")?.as_deref(),
@@ -371,7 +378,9 @@ pub(crate) fn latest_edit_lateral() -> String {
 /// * `r` — the redaction match (`LIMIT 1` so a multiply-redacted row stays a
 ///   single row; a plain JOIN would duplicate it and corrupt page size). When
 ///   set, `content`/`decrypted_body_text` are masked to `NULL` and
-///   `redaction_event_id` is the redaction's id.
+///   `redaction_event_id` / `redaction_arrival_order` are the redaction's id and
+///   `events.id`. Ordered by arrival, newest first, so a multiply-redacted row
+///   reports the redaction a read receipt must name to cover all of them (#1273).
 /// * `edit` — the latest *valid* `m.replace` targeting `e`, resolved by the M8
 ///   rules: edit and target must be in the same room (relations are room-local);
 ///   edit `sender` must equal `e`'s sender (authorship, unenforced upstream per
@@ -420,6 +429,7 @@ pub(crate) static TIMELINE_SELECT: LazyLock<String> = LazyLock::new(|| {
                  WHEN edit.new_body IS NOT NULL THEN edit.new_body \
                  ELSE e.decrypted_body_text END AS decrypted_body_text, \
             e.relates_to, e.redacts, r.event_id AS redaction_event_id, \
+            r.id AS redaction_arrival_order, \
             sd.sender_trust, \
             CASE WHEN r.event_id IS NULL AND e.content IS NULL THEN e.utd_reason END \
                 AS utd_reason, \
@@ -433,8 +443,9 @@ pub(crate) static TIMELINE_SELECT: LazyLock<String> = LazyLock::new(|| {
      FROM events e \
      JOIN accounts ac ON ac.account_id = e.account_id \
      LEFT JOIN LATERAL ( \
-         SELECT rr.event_id FROM events rr \
+         SELECT rr.event_id, rr.id FROM events rr \
          WHERE {root_redaction} \
+         ORDER BY rr.id DESC \
          LIMIT 1 \
      ) r ON TRUE \
      {latest_edit} \

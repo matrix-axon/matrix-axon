@@ -1289,6 +1289,8 @@ export function RoomPage() {
       threadRoot: threadRootId(event),
     })
     return computeRoomReceipt({
+      // Each candidate carries the redaction folded onto it, if any, which
+      // `computeRoomReceipt` may name as a bounded extension (#1273).
       displayed: displayed.map(candidate),
       loaded: timeline.events.value
         .filter(

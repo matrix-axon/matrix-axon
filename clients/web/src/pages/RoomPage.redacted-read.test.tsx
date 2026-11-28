@@ -59,10 +59,12 @@ const READ = event('$read', T0 - 2 * MINUTE, 2957578)
  */
 const DELETED = { ...event('$deleted', T0, 2957579), redacted: true }
 /**
- * The redaction itself — arrival-newest of all, and rendered by nothing: no
- * body, no media, so `isUnsupportedBodylessEvent` drops it whatever the
- * hide-redacted setting says. It must stay unnameable, or the fix would be
- * "name the newest thing regardless", which is a different and wrong rule.
+ * The redaction itself, as a bare row — arrival-newest of all, and rendered by
+ * nothing: no body, no media, so `isUnsupportedBodylessEvent` drops it whatever
+ * the hide-redacted setting says. As a row of its own it must stay unnameable,
+ * or the fix would be "name the newest thing regardless", which is a different
+ * and wrong rule. (The server never sends this row; it folds the redaction onto
+ * its target instead, which is the shape the #1273 tests below use.)
  */
 const REDACTION: EventDto = {
   ...event('$redaction', T0 + 5_000, 2957580),
@@ -81,8 +83,9 @@ afterEach(() => {
 })
 afterAll(() => server.close())
 
-function renderRoom(options: { hideRedacted: boolean }) {
-  const roomEvents = [REDACTION, DELETED, READ]
+function renderRoom(options: { hideRedacted: boolean; events?: EventDto[] }) {
+  const roomEvents = options.events ?? [REDACTION, DELETED, READ]
+  const newest = roomEvents[0]
   const reads: string[] = []
   server.use(
     http.post(
@@ -111,8 +114,8 @@ function renderRoom(options: { hideRedacted: boolean }) {
             topic: null,
             avatar_url: null,
             canonical_alias: null,
-            last_activity_ts: REDACTION.origin_ts,
-            last_event_id: REDACTION.event_id,
+            last_activity_ts: newest.origin_ts,
+            last_event_id: newest.event_id,
             // The stuck count itself: without it any claim about clearing the
             // badge is vacuous.
             notification_count: 1,
@@ -208,5 +211,65 @@ describe('a trailing redacted event does not pin the unread count (#337)', () =>
     // was always a legal target.
     expect(reads).toContain(DELETED.event_id)
     expect(reads).not.toContain(REDACTION.event_id)
+  })
+})
+
+/**
+ * Issue #1273 — the receipt reached the redacted message, and stopped one event
+ * short of the redaction behind it.
+ *
+ * Off the same production instance as #337, in a room with a per-room push
+ * rule set to notify on every event. Such a rule matches redactions too, so the
+ * redaction was itself the counted notification. The server strips bare
+ * redactions from the timeline and folds each onto its target, so the only way
+ * a client can name one is through the target's `redaction_arrival_order`.
+ */
+describe('a trailing redaction folded onto its target is acknowledged (#1273)', () => {
+  /** The server's real shape: no bare redaction row, the redaction folded in. */
+  const FOLDED = {
+    ...DELETED,
+    redaction_event_id: REDACTION.event_id,
+    redaction_arrival_order: REDACTION.arrival_order,
+  } as EventDto
+
+  for (const hideRedacted of [true, false]) {
+    it(`receipts the redaction with hide-redacted ${hideRedacted ? 'on' : 'off'}`, async () => {
+      const { reads, findByText } = renderRoom({
+        hideRedacted,
+        events: [FOLDED, READ],
+      })
+
+      await findByText('body of $read')
+      await waitFor(() => expect(reads).toContain(REDACTION.event_id))
+      await settleReceipts()
+
+      // The redaction is the room's newest event, so it is the last word: a
+      // receipt naming only the redacted message leaves the redaction counted.
+      expect(reads.at(-1)).toBe(REDACTION.event_id)
+    })
+  }
+
+  it('does not name the redaction of an event the room view does not display', async () => {
+    // A thread reply, redacted. The room view hides thread members, so neither
+    // the reply nor the redaction folded onto it is the room's to claim.
+    const reply = {
+      ...event('$reply', T0, 2957579),
+      relates_to: { rel_type: 'm.thread', event_id: '$root' },
+      redacted: true,
+      redaction_event_id: '$reply-redaction',
+      redaction_arrival_order: 2957580,
+    } as unknown as EventDto
+    const { reads, findByText } = renderRoom({
+      hideRedacted: true,
+      events: [reply, READ],
+    })
+
+    await findByText('body of $read')
+    await waitFor(() => expect(reads.length).toBeGreaterThan(0))
+    await settleReceipts()
+
+    expect(reads).toContain(READ.event_id)
+    expect(reads).not.toContain('$reply-redaction')
+    expect(reads).not.toContain(reply.event_id)
   })
 })

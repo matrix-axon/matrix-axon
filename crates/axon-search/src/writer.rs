@@ -447,6 +447,7 @@ mod tests {
             relates_to,
             redacts: None,
             redaction_event_id: None,
+            redaction_arrival_order: None,
             sender_trust: None,
             utd_reason: None,
             edited: false,
