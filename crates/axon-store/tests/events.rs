@@ -465,6 +465,94 @@ async fn room_timeline_collapses_standalone_redaction_events() {
     common::cleanup_account(&pool, account_id).await;
 }
 
+/// A redacted row reports where its redaction arrived (#1273). The timeline
+/// strips the redaction's own row, so this is the only way a client can name
+/// it in a read receipt. A row redacted twice reports the redaction that
+/// arrived *last*, even when its `origin_ts` is older, because a receipt for
+/// that one covers both.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn room_timeline_reports_the_latest_redactions_arrival_order() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+
+    let user = format!("@redord-{}:localhost", Uuid::new_v4());
+    let account_id = store
+        .upsert_account(&user, "https://hs.example.org")
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+
+    let kept = insert_message(&store, account_id, &room_id, 1_700_000_000_000, "kept").await;
+    let target = insert_message(&store, account_id, &room_id, 1_700_000_000_100, "gone").await;
+
+    let redact = |redaction_id: String, origin_ts: i64| {
+        let store = &store;
+        let room_id = &room_id;
+        let target = &target;
+        async move {
+            let arrival = store
+                .upsert_event(&NewEvent {
+                    event_id: &redaction_id,
+                    room_id,
+                    account_id,
+                    sender: "@alice:localhost",
+                    origin_ts,
+                    event_type: "m.room.redaction",
+                    content: Some(json!({})),
+                    raw_event: json!({ "type": "m.room.redaction", "redacts": target }),
+                    megolm_session_id: None,
+                    redacts: Some(target),
+                    relates_to: None,
+                    decrypted_body_text: None,
+                })
+                .await
+                .expect("insert redaction");
+            (redaction_id, arrival)
+        }
+    };
+    let (_first, first_arrival) = redact(
+        format!("$red1-{}:localhost", Uuid::new_v4()),
+        1_700_000_000_900,
+    )
+    .await;
+    // Arrives later but is stamped earlier, so only arrival order picks it.
+    let (second, second_arrival) = redact(
+        format!("$red2-{}:localhost", Uuid::new_v4()),
+        1_700_000_000_500,
+    )
+    .await;
+    assert!(second_arrival > first_arrival);
+
+    let timeline = store
+        .room_timeline(account_id, &room_id, None, 10)
+        .await
+        .expect("timeline");
+
+    let redacted = timeline
+        .iter()
+        .find(|r| r.event_id == target)
+        .expect("target present");
+    assert_eq!(
+        redacted.redaction_event_id.as_deref(),
+        Some(second.as_str())
+    );
+    assert_eq!(redacted.redaction_arrival_order, Some(second_arrival));
+    // ADR 0089's amendment rests on this: a redaction arrives above the row it
+    // redacted, so naming it acknowledges more than the row did.
+    assert!(redacted.id < second_arrival);
+
+    let untouched = timeline
+        .iter()
+        .find(|r| r.event_id == kept)
+        .expect("unredacted row present");
+    assert_eq!(untouched.redaction_event_id, None);
+    assert_eq!(untouched.redaction_arrival_order, None);
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
 /// The crypto sibling tables upsert from EncryptionInfo and cascade-delete with
 /// their event row.
 #[tokio::test]

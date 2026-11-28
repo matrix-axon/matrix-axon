@@ -3151,7 +3151,20 @@ export interface components {
                 } | null;
                 /** @description `true` when this event has been redacted (content/body masked). */
                 redacted: boolean;
-                /** @description The `event_id` of the redaction that masked this event, if redacted. */
+                /**
+                 * Format: int64
+                 * @description The arrival order of the redaction named by `redaction_event_id`, on the
+                 *     same scale as `arrival_order`. Set exactly when `redaction_event_id` is
+                 *     set; when several redactions match, it is the one that arrived last.
+                 *     Timeline reads never return a redaction as an event of its own, so this
+                 *     is the only place its position appears. See ADR 0089 for when a client
+                 *     may name it in a read receipt.
+                 */
+                redaction_arrival_order?: number | null;
+                /**
+                 * @description The `event_id` of the redaction that masked this event, if redacted.
+                 *     When several redactions match, the one that arrived last.
+                 */
                 redaction_event_id?: string | null;
                 /** @description The event's `m.relates_to` object, if any. */
                 relates_to?: Record<string, never> | null;
@@ -4095,7 +4108,20 @@ export interface components {
                 } | null;
                 /** @description `true` when this event has been redacted (content/body masked). */
                 redacted: boolean;
-                /** @description The `event_id` of the redaction that masked this event, if redacted. */
+                /**
+                 * Format: int64
+                 * @description The arrival order of the redaction named by `redaction_event_id`, on the
+                 *     same scale as `arrival_order`. Set exactly when `redaction_event_id` is
+                 *     set; when several redactions match, it is the one that arrived last.
+                 *     Timeline reads never return a redaction as an event of its own, so this
+                 *     is the only place its position appears. See ADR 0089 for when a client
+                 *     may name it in a read receipt.
+                 */
+                redaction_arrival_order?: number | null;
+                /**
+                 * @description The `event_id` of the redaction that masked this event, if redacted.
+                 *     When several redactions match, the one that arrived last.
+                 */
                 redaction_event_id?: string | null;
                 /** @description The event's `m.relates_to` object, if any. */
                 relates_to?: Record<string, never> | null;
@@ -5385,7 +5411,20 @@ export interface components {
             } | null;
             /** @description `true` when this event has been redacted (content/body masked). */
             redacted: boolean;
-            /** @description The `event_id` of the redaction that masked this event, if redacted. */
+            /**
+             * Format: int64
+             * @description The arrival order of the redaction named by `redaction_event_id`, on the
+             *     same scale as `arrival_order`. Set exactly when `redaction_event_id` is
+             *     set; when several redactions match, it is the one that arrived last.
+             *     Timeline reads never return a redaction as an event of its own, so this
+             *     is the only place its position appears. See ADR 0089 for when a client
+             *     may name it in a read receipt.
+             */
+            redaction_arrival_order?: number | null;
+            /**
+             * @description The `event_id` of the redaction that masked this event, if redacted.
+             *     When several redactions match, the one that arrived last.
+             */
             redaction_event_id?: string | null;
             /** @description The event's `m.relates_to` object, if any. */
             relates_to?: Record<string, never> | null;
