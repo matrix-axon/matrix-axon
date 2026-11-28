@@ -611,8 +611,10 @@ final class ComposerLifecycleTests: XCTestCase {
     }
     defer { subscription.cancel() }
     model.start([fixture.item])
-    wait(for: [started], timeout: 5)
-    if !stalled { wait(for: [loaded], timeout: 5) }
+    // Setup, not the behaviour under test: each composer normally gets here in
+    // under 0.1 s, but one of seven took over 5 s on a loaded hosted runner.
+    wait(for: [started], timeout: 15)
+    if !stalled { wait(for: [loaded], timeout: 15) }
     XCTAssertEqual(try store.list().count, 1)
     if !stalled {
       let destination = try XCTUnwrap(model.rooms.first)

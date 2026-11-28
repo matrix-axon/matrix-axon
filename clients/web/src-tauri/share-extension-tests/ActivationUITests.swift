@@ -20,20 +20,53 @@ final class ActivationUITests: XCTestCase {
     app.descendants(matching: .any).matching(NSPredicate(format: "label == 'AxonShareTest'"))
       .firstMatch
   }
+  /// Polls until `format` holds for `element`. The share sheet and the extension
+  /// are other processes that animate in and out, so one read of the AX tree can
+  /// land mid-transition.
+  private func waitFor(
+    _ element: XCUIElement, _ format: String, timeout: TimeInterval? = nil
+  ) -> Bool {
+    let condition = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: format), object: element)
+    return XCTWaiter.wait(for: [condition], timeout: timeout ?? uiTimeout) == .completed
+  }
+  /// Taps a text field and waits for keyboard focus before the caller types.
+  /// On a loaded runner (CI run 46078372331) the tap placed the cursor but the
+  /// software keyboard never appeared, and typeText failed three times with
+  /// "Neither element nor any descendant has keyboard focus". Tap again
+  /// instead of typing blind.
+  private func focus(_ field: XCUIElement, app: XCUIApplication) {
+    for attempt in 1...3 {
+      field.tap()
+      if waitFor(field, "hasKeyboardFocus == true", timeout: 10) { return }
+      print("[focus] tap \(attempt) left \(field.identifier) without keyboard focus")
+    }
+    XCTFail("\(field.identifier) never took keyboard focus\n\(app.debugDescription)")
+  }
   private func showAllActivities(_ app: XCUIApplication) {
     let more = app.descendants(matching: .any)
       .matching(NSPredicate(format: "label == 'More' OR label == 'More Apps'")).firstMatch
     let cell = app.cells.matching(identifier: "shareCell").firstMatch
     XCTAssertTrue(cell.waitForExistence(timeout: uiTimeout))
-    let y = cell.frame.midY
+    // The first cell exists while the sheet is still sliding up. On a standard
+    // iPhone, More is in the first row once the sheet settles, so wait for that
+    // before swiping; only a narrow phone pushes it off the end of the row.
+    let hittable = "exists == true AND hittable == true"
     for _ in 0..<8 {
-      if more.exists && more.isHittable { break }
+      if waitFor(more, hittable, timeout: 5) { break }
+      // Read the row's position before every swipe, not once: a read taken
+      // during the slide-up gave midY 55.9, so every swipe hit the status bar.
+      let y = cell.frame.midY
       let origin = app.coordinate(withNormalizedOffset: .zero)
       origin.withOffset(CGVector(dx: app.frame.width * 0.85, dy: y)).press(
         forDuration: 0.05,
         thenDragTo: origin.withOffset(CGVector(dx: app.frame.width * 0.15, dy: y)))
     }
-    XCTAssertTrue(more.exists && more.isHittable)
+    // The last swipe may still be decelerating, so give it the same settle wait
+    // as the earlier ones rather than a one-shot read.
+    XCTAssertTrue(
+      waitFor(more, hittable, timeout: 5),
+      "More never became hittable; first shareCell at \(cell.frame)\n\(app.debugDescription)")
     more.tap()
     XCTAssertTrue(app.navigationBars.firstMatch.waitForExistence(timeout: uiTimeout))
   }
@@ -62,7 +95,9 @@ final class ActivationUITests: XCTestCase {
       XCTAssertFalse(app.buttons["Keep draft in Axon"].exists)
       XCTAssertTrue(app.staticTexts["share-status"].label.contains("No draft was saved"))
       cancel(app)
-      XCTAssertFalse(composer.exists)
+      // The extension is still tearing down when Cancel's tap returns; a single
+      // read here failed with kAXErrorServerNotFound while the bar was on screen.
+      XCTAssertTrue(waitFor(composer, "exists == false"), "Composer stayed open for \(name)")
     }
     app.terminate()
   }
@@ -136,7 +171,7 @@ final class ActivationUITests: XCTestCase {
     let original = filename.value as? String ?? ""
     XCTAssertFalse(original.isEmpty)
     XCTAssertFalse(app.staticTexts["ready"].exists)
-    filename.tap()
+    focus(filename, app: app)
     XCTAssertTrue(app.navigationBars["Share to Axon"].exists)
     XCTAssertFalse(app.navigationBars["Rename photo"].exists)
     filename.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: original.count) + "Coast holiday.heic")
@@ -164,7 +199,7 @@ final class ActivationUITests: XCTestCase {
     let master = app.textViews["share-master-caption"]
     XCTAssertTrue(master.waitForExistence(timeout: uiTimeout))
     reveal(master, app: app)
-    master.tap()
+    focus(master, app: app)
     master.typeText("Together")
     app.buttons["share-photo-caption-done"].tap()
     let fields = app.textViews.matching(NSPredicate(format: "identifier BEGINSWITH 'share-photo-caption-'"))
@@ -180,16 +215,68 @@ final class ActivationUITests: XCTestCase {
     // and the second was below the 874-point viewport, outside the AX snapshot.
     if handles.count < 2 { app.swipeUp() }
     XCTAssertEqual(handles.count, 2, app.debugDescription)
-    reveal(handles.element(boundBy: 1), app: app)
-    let first = handles.element(boundBy: 0)
-    let last = handles.element(boundBy: 1)
-    first.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.5, thenDragTo: last.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9)))
+    // In edit mode each row keeps its remove button, identified by photo ID, so
+    // the order can be read right after a drop without leaving edit mode.
+    let photoID = String(firstID.dropFirst("share-photo-caption-".count))
+    let removes = app.buttons.matching(
+      NSPredicate(format: "identifier BEGINSWITH 'share-photo-remove-'"))
+    // On a loaded hosted runner a synthesized drag sometimes shows the rows
+    // swapping and still ends with the order unchanged (CI runs 45737930099 and
+    // 45737948628, even with the fixed drop points below). The cause is not
+    // known, so the drag is retried in place and each miss is logged with the
+    // "[drag-reorder]" tag to keep the miss rate visible in CI logs. A
+    // reorder that never works still fails.
+    var moved = false
+    for attempt in 1...3 {
+      // A reorder can land after the previous attempt's 5-second wait on a slow
+      // runner. Dragging again would then swap the rows back, so read the order
+      // once more before each retry.
+      if attempt > 1 && removes.firstMatch.identifier != "share-photo-remove-\(photoID)" {
+        print("[drag-reorder] attempt \(attempt - 1) landed late")
+        moved = true
+        break
+      }
+      reveal(handles.element(boundBy: 1), app: app)
+      // Both handles have the same label, so only their position tells them
+      // apart, and XCTest looks up an element's coordinate again while the drag
+      // runs. Once the first row lifts, "index 1" is no longer the second row:
+      // on CI it came back with an infinite frame, which raised an exception
+      // inside XCTest. Read both frames now and drag between fixed points.
+      let from = handles.element(boundBy: 0).frame
+      let to = handles.element(boundBy: 1).frame
+      XCTAssertFalse(
+        from.isInfinite || from.isEmpty || to.isInfinite || to.isEmpty,
+        "Handle frames \(from) and \(to)\n\(app.debugDescription)")
+      // Drop well past the second row's center but inside that row. The old
+      // drop, at 0.9 of the second handle's height, was only 18 points past
+      // its center. Half a row past is no good either: it reaches the row's
+      // bottom edge (y=733 for 142-point rows), and every drop there was
+      // cancelled locally, since the List is a collection view and the next
+      // section begins below that edge.
+      let dropY = to.midY + (to.midY - from.midY) * 0.35
+      let origin = app.coordinate(withNormalizedOffset: .zero)
+      origin.withOffset(CGVector(dx: from.midX, dy: from.midY)).press(
+        forDuration: 0.5,
+        thenDragTo: origin.withOffset(CGVector(dx: to.midX, dy: dropY)),
+        withVelocity: .default, thenHoldForDuration: 0.3)
+      if waitFor(removes.firstMatch, "identifier != 'share-photo-remove-\(photoID)'", timeout: 5) {
+        moved = true
+        break
+      }
+      let order = removes.allElementsBoundByIndex.map {
+        String($0.identifier.dropFirst("share-photo-remove-".count))
+      }
+      print("[drag-reorder] attempt \(attempt) left \(photoID) first; order \(order)")
+    }
+    XCTAssertTrue(moved, "Three drags left \(photoID) first\n\(app.debugDescription)")
     // The status row is virtualized above the viewport here. Verify the saved
     // photo IDs after ending edit mode instead of polling an absent AX row.
     reveal(reorder, app: app, down: true)
     reorder.tap()
     reveal(fields.firstMatch, app: app)
-    XCTAssertNotEqual(fields.firstMatch.identifier, firstID)
+    XCTAssertTrue(
+      waitFor(fields.firstMatch, "identifier != '\(firstID)'", timeout: 10),
+      "The drag left \(firstID) first")
     XCTAssertEqual(fields.firstMatch.value as? String, "Together")
     reveal(reorder, app: app, down: true)
     reorder.tap()
@@ -216,7 +303,7 @@ final class ActivationUITests: XCTestCase {
     let first = app.textViews[firstID]
     reveal(first, app: app)
     XCTAssertLessThanOrEqual(first.frame.height, 45)
-    first.tap()
+    focus(first, app: app)
     XCTAssertEqual(first.value as? String ?? "", "")
     first.typeText("First coast\nSecond line")
     app.buttons["share-photo-caption-done"].tap()
@@ -225,7 +312,7 @@ final class ActivationUITests: XCTestCase {
     reveal(other, app: app)
     let secondID = other.identifier
     let second = app.textViews[secondID]
-    second.tap()
+    focus(second, app: app)
     XCTAssertEqual(second.value as? String ?? "", "")
     second.typeText("Second mountain")
     app.buttons["share-photo-caption-done"].tap()
