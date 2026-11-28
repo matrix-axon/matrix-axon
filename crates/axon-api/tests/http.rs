@@ -2516,6 +2516,83 @@ async fn accounts_sync_state_reflects_the_provider() {
         .expect("cleanup");
 }
 
+/// `AccountDto.media_upload_limit` (ADR 0143 section 6) is the injected
+/// provider's answer on the by-id read and the list, with a `null`
+/// `homeserver_max_bytes` when the homeserver's limit is unknown, and is
+/// omitted when no limit is advertised.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn accounts_media_upload_limit_reflects_the_provider() {
+    struct StubUploadLimit(Option<u64>);
+    impl axon_api::UploadLimitProvider for StubUploadLimit {
+        fn upload_limit(&self, _account_id: Uuid) -> Option<axon_api::UploadLimit> {
+            Some(axon_api::UploadLimit::effective(100, self.0))
+        }
+    }
+
+    let store = store().await;
+    let pool = store.pool().clone();
+    let user_id = format!("@upload-limit-{}:localhost", Uuid::new_v4());
+    let account = store
+        .upsert_account(&user_id, "https://hs.example.org")
+        .await
+        .expect("upsert");
+    let app_with = |limit: Option<Arc<StubUploadLimit>>| {
+        let (live, _rx) = tokio::sync::broadcast::channel(16);
+        let state = AppState::new(
+            store.clone(),
+            live,
+            Arc::new(StubSender::ok("$unused:localhost")),
+            Arc::new(StubLifecycle::ok(account.account_id)),
+            Arc::new(StubVerification::ok("$unused-flow")),
+            Arc::new(StubTrust::ok()),
+            Arc::new(StubDeviceList::ok()),
+            Arc::new(StubTokenVerifier::ok()),
+            Arc::new(StubMediaProxy),
+            None,
+        );
+        axon_api::router(match limit {
+            Some(limit) => state.with_upload_limits(limit),
+            None => state,
+        })
+    };
+    let read = |app: axum::Router| async move {
+        let (status, one) = get(&app, &format!("/v1/accounts/{}", account.account_id)).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, list) = get(&app, "/v1/accounts").await;
+        assert_eq!(status, StatusCode::OK);
+        let row = list["data"]
+            .as_array()
+            .expect("data array")
+            .iter()
+            .find(|a| a["account_id"] == account.account_id.to_string())
+            .cloned()
+            .expect("account listed");
+        assert_eq!(
+            one["data"].get("media_upload_limit"),
+            row.get("media_upload_limit")
+        );
+        row.get("media_upload_limit").cloned()
+    };
+
+    assert_eq!(
+        read(app_with(Some(Arc::new(StubUploadLimit(Some(40)))))).await,
+        Some(json!({"max_bytes": 40, "homeserver_max_bytes": 40}))
+    );
+    assert_eq!(
+        read(app_with(Some(Arc::new(StubUploadLimit(None))))).await,
+        Some(json!({"max_bytes": 100, "homeserver_max_bytes": null})),
+        "an unknown homeserver limit is null, not absent"
+    );
+    assert_eq!(read(app_with(None)).await, None, "no provider, no field");
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account.account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
 // ---- Bearer-token auth gate (M7b) ----
 //
 // The gate is a single middleware layer over every `/v1/` route, so one route

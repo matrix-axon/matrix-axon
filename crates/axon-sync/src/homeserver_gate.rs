@@ -939,7 +939,8 @@ impl GateError for GatewayError {
             | GatewayError::MediaNotFound(_)
             | GatewayError::Forbidden(_)
             | GatewayError::Invalid(_)
-            | GatewayError::Upstream(_) => Outcome::Refused,
+            | GatewayError::Upstream(_)
+            | GatewayError::UploadTooLarge(_) => Outcome::Refused,
             GatewayError::UnknownAccount(_)
             | GatewayError::AccountNotActive(_)
             | GatewayError::NotConnected(_)

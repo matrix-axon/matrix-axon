@@ -666,7 +666,9 @@ export interface paths {
         put?: never;
         /**
          * Stage a media upload
-         * @description Stage raw upload bytes for a later room-aware media send.
+         * @description Stage raw upload bytes for a later room-aware media send. The body may be
+         *     at most the account's `media_upload_limit.max_bytes` (`GET
+         *     /v1/accounts/{account_id}`).
          */
         post: operations["stage_upload"];
         delete?: never;
@@ -2788,6 +2790,13 @@ export interface components {
             /** @description Homeserver base URL. */
             homeserver_url: string;
             /**
+             * @description The largest media upload this account can stage (ADR 0143 section 6).
+             *     `POST …/media/uploads` refuses a larger body with `413`. Absent on a
+             *     server that predates the field, in which case a client keeps its own
+             *     fallback limit.
+             */
+            media_upload_limit?: components["schemas"]["MediaUploadLimitDto"];
+            /**
              * @description Whether Axon's device still needs to be cross-signed after a master-key
              *     replacement (ADR 0136). The first observed identity establishes the baseline.
              *     Updates are pushed on `/v1/ws` as `account.own_identity_changed`.
@@ -2882,6 +2891,13 @@ export interface components {
                 exclude_insecure_devices?: boolean;
                 /** @description Homeserver base URL. */
                 homeserver_url: string;
+                /**
+                 * @description The largest media upload this account can stage (ADR 0143 section 6).
+                 *     `POST …/media/uploads` refuses a larger body with `413`. Absent on a
+                 *     server that predates the field, in which case a client keeps its own
+                 *     fallback limit.
+                 */
+                media_upload_limit?: components["schemas"]["MediaUploadLimitDto"];
                 /**
                  * @description Whether Axon's device still needs to be cross-signed after a master-key
                  *     replacement (ADR 0136). The first observed identity establishes the baseline.
@@ -3999,6 +4015,13 @@ export interface components {
                 exclude_insecure_devices?: boolean;
                 /** @description Homeserver base URL. */
                 homeserver_url: string;
+                /**
+                 * @description The largest media upload this account can stage (ADR 0143 section 6).
+                 *     `POST …/media/uploads` refuses a larger body with `413`. Absent on a
+                 *     server that predates the field, in which case a client keeps its own
+                 *     fallback limit.
+                 */
+                media_upload_limit?: components["schemas"]["MediaUploadLimitDto"];
                 /**
                  * @description Whether Axon's device still needs to be cross-signed after a master-key
                  *     replacement (ADR 0136). The first observed identity establishes the baseline.
@@ -6104,6 +6127,32 @@ export interface components {
          * @enum {string}
          */
         MediaUploadKindDto: "image" | "file" | "video" | "audio";
+        /**
+         * @description An account's effective media upload limit (`AccountDto.media_upload_limit`,
+         *     ADR 0143 section 6).
+         */
+        MediaUploadLimitDto: {
+            /**
+             * Format: int64
+             * @description The homeserver's `m.upload.size`, in bytes, as this account's Matrix
+             *     client can use it: when the homeserver raised its limit after the
+             *     client first uploaded, the client keeps refusing above the old one
+             *     until it is rebuilt, and this is that old one. `null` when it is
+             *     unknown, for example because the homeserver did not answer, has not
+             *     been asked yet, or does not report one. Axon then applies only its own
+             *     cap, and the homeserver may still refuse an upload below `max_bytes`.
+             *     Always sent, so `null` is distinct from an absent field.
+             */
+            homeserver_max_bytes: number | null;
+            /**
+             * Format: int64
+             * @description The largest upload, in bytes, that Axon stages for this account: the
+             *     lower of the server's `media.max_upload_bytes` and the homeserver's
+             *     `m.upload.size`, or `media.max_upload_bytes` alone when
+             *     `homeserver_max_bytes` is `null`. It can change between reads.
+             */
+            max_bytes: number;
+        };
         /**
          * @description Request body shared by the user-targeted membership actions that carry an
          *     optional reason — `kick`, `ban`, `unban` (ADR 0068 M19b). Matrix models all
@@ -9498,7 +9547,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Upload too large */
+            /** @description Upload larger than the account's `media_upload_limit.max_bytes`: the lower of the server's own cap and the homeserver's `m.upload.size`. Refused before staging when `Content-Length` already exceeds it. */
             413: {
                 headers: {
                     [name: string]: unknown;
@@ -12187,7 +12236,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Definite event_too_large, preview_too_large or payload_too_large validation rejection; preview-aware content uses a 40960-byte budget including 12288 bytes reserved for media fields. No preflight upload claims or event dispatch. */
+            /** @description Definite event_too_large, preview_too_large or payload_too_large validation rejection; preview-aware content uses a 40960-byte budget including 12288 bytes reserved for media fields. payload_too_large also covers a staged upload that is now over the account's `media_upload_limit.max_bytes`, which can drop after staging: its claim is released, the upload stays staged and retryable, and nothing is sent. Otherwise no preflight upload claims or event dispatch. */
             413: {
                 headers: {
                     [name: string]: unknown;

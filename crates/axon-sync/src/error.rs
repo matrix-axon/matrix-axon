@@ -61,6 +61,13 @@ pub enum GatewayError {
     #[error("upstream homeserver error: {0}")]
     Overloaded(String),
 
+    /// The homeserver, or a proxy in front of it, refused a media upload as
+    /// too large (`413`). A `502` like [`Upstream`](Self::Upstream) at the API
+    /// boundary; kept apart so the send path can look up the homeserver's
+    /// upload limit again (ADR 0143 section 6).
+    #[error("homeserver refused the upload as too large: {0}")]
+    UploadTooLarge(String),
+
     /// The SDK's own request timeout ran out before the homeserver answered.
     /// Deliberately *not* [`Upstream`](Self::Upstream), for the reason the
     /// adapter's outer deadline is a `504` (ADR 0121 decision 5): giving up

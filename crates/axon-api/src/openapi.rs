@@ -242,6 +242,7 @@ fn unauthorized_response() -> RefOr<Response> {
         crate::routes::insecure_devices::InsecureDevicesSettingDto,
         crate::routes::insecure_devices::SetInsecureDevicesRequest,
         crate::dto::BackupSnapshotDto,
+        crate::dto::MediaUploadLimitDto,
         crate::dto::BackupStateDto,
         crate::dto::RecoveryStateDto,
         crate::dto::BackupActionDto,

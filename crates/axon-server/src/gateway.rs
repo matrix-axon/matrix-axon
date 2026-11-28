@@ -218,7 +218,9 @@ fn map_err(err: GatewayError) -> SendError {
         GatewayError::Forbidden(msg) => SendError::Forbidden(msg),
         GatewayError::NotConnected(msg) => SendError::Unavailable(msg),
         GatewayError::Invalid(msg) => SendError::Invalid(msg),
-        GatewayError::Upstream(msg) | GatewayError::Overloaded(msg) => SendError::Upstream(msg),
+        GatewayError::Upstream(msg)
+        | GatewayError::Overloaded(msg)
+        | GatewayError::UploadTooLarge(msg) => SendError::Upstream(msg),
         GatewayError::Timeout(msg) => SendError::Timeout(msg),
         // Unreachable on this path: mutations upload attachments, they never
         // download and decrypt one, so only the media proxy can produce this.

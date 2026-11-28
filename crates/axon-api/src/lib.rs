@@ -44,6 +44,7 @@ mod stream_tickets;
 mod sync_state;
 mod sync_status;
 mod trust;
+mod upload_limit;
 mod uploads;
 mod verification;
 mod web;
@@ -109,6 +110,7 @@ pub use state::{AppState, BootstrapConfig, ManagementConfig, WebClientConfig};
 pub use sync_state::SyncStateProvider;
 pub use sync_status::{AccountSyncSnapshot, SyncStatusProvider};
 pub use trust::{CurrentTrust, SenderTrustService, TrustBundle, TrustError, TrustSnapshot};
+pub use upload_limit::{UploadLimit, UploadLimitProvider};
 pub use uploads::{
     ClaimedUpload, SendThumbnail, SendThumbnailer, StageUploadError, StageUploadRequest,
     StagedUpload, StagedUploadService, UploadStream,

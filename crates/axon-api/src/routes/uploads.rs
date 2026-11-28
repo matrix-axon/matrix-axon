@@ -17,7 +17,9 @@ const MAX_CONTENT_TYPE_CHARS: usize = 255;
 
 /// Stage a media upload
 ///
-/// Stage raw upload bytes for a later room-aware media send.
+/// Stage raw upload bytes for a later room-aware media send. The body may be
+/// at most the account's `media_upload_limit.max_bytes` (`GET
+/// /v1/accounts/{account_id}`).
 #[utoipa::path(
     post,
     path = "/v1/accounts/{account_id}/media/uploads",
@@ -35,7 +37,7 @@ const MAX_CONTENT_TYPE_CHARS: usize = 255;
         (status = 400, description = "Malformed request", body = crate::response::ErrorResponse),
         (status = 403, description = "Account cannot accept media mutations", body = crate::response::ErrorResponse),
         (status = 404, description = "Account not found", body = crate::response::ErrorResponse),
-        (status = 413, description = "Upload too large", body = crate::response::ErrorResponse),
+        (status = 413, description = "Upload larger than the account's `media_upload_limit.max_bytes`: the lower of the server's own cap and the homeserver's `m.upload.size`. Refused before staging when `Content-Length` already exceeds it.", body = crate::response::ErrorResponse),
         (status = 503, description = "Upload timed out", body = crate::response::ErrorResponse),
     ),
     tag = "media",
@@ -56,6 +58,7 @@ pub async fn stage_upload(
                 kind: query.kind,
                 filename,
                 content_type,
+                declared_bytes: declared_length(&headers),
             },
             Box::pin(body.into_data_stream()),
         )
@@ -93,6 +96,18 @@ pub async fn delete_upload(
 ) -> Result<ApiResponse<serde_json::Value>, ApiError> {
     uploads.delete_upload(account_id, upload_id).await?;
     Ok(ApiResponse::new(serde_json::json!({})))
+}
+
+/// The request's `Content-Length`. A header that does not parse is ignored
+/// here: the body is counted as it streams anyway.
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(axum::http::header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 fn normalize_filename(input: &str) -> Result<String, ApiError> {

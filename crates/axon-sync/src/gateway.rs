@@ -67,6 +67,7 @@ use uuid::Uuid;
 use crate::error::GatewayError;
 use crate::homeserver_gate::{GateError, InteractiveCall, Outcome};
 use crate::manager::{ClientManager, ClientRequest};
+use crate::upload_limits::UploadRefusals;
 
 /// Map an SDK error from a send/fetch into a [`GatewayError`]. A homeserver
 /// `M_FORBIDDEN` (e.g. redacting without the required power level) becomes
@@ -711,11 +712,14 @@ fn thread_member_root(relation: Relation<'_>) -> Result<Option<OwnedEventId>, Ga
 /// `encrypted`, a plain one otherwise. The caller decides `encrypted` once per
 /// send, so an attachment and its thumbnail always agree, as they did inside
 /// `Room::send_attachment` (matrix-sdk 0.19 `prepare_and_send_attachment`).
+/// A refusal as too large is reported to `refusals` here, before a caller
+/// that tolerates the failure (a thumbnail) can discard it.
 async fn upload_media_source_with_encryption(
     room: &Room,
     content_type: &mime::Mime,
     bytes: Vec<u8>,
     encrypted: bool,
+    refusals: &UploadRefusals,
 ) -> Result<MediaSource, GatewayError> {
     if encrypted {
         let mut cursor = std::io::Cursor::new(bytes);
@@ -723,7 +727,7 @@ async fn upload_media_source_with_encryption(
             .client()
             .upload_encrypted_file(&mut cursor)
             .await
-            .map_err(map_sdk_err)?;
+            .map_err(|err| map_upload_err(err, refusals))?;
         Ok(MediaSource::Encrypted(Box::new(file)))
     } else {
         let resp = room
@@ -731,9 +735,35 @@ async fn upload_media_source_with_encryption(
             .media()
             .upload(content_type, bytes, None)
             .await
-            .map_err(map_sdk_err)?;
+            .map_err(|err| map_upload_err(err, refusals))?;
         Ok(MediaSource::Plain(resp.content_uri))
     }
+}
+
+/// [`map_sdk_err`] for a media upload (only the upload: an event's own `413`
+/// is [`GatewayError::EventTooLarge`]), except that one refused as too large
+/// is [`GatewayError::UploadTooLarge`] and is reported to `refusals` (ADR 0143
+/// section 6):
+/// - a `413` from the homeserver or a proxy in front of it, whatever its
+///   body, asks for a fresh look at the homeserver's limit;
+/// - the SDK's own refusal names the `m.upload.size` it cached on the
+///   client's first upload and keeps for the client's life, which caps the
+///   advertised limit instead, since no lookup changes it.
+fn map_upload_err(err: matrix_sdk::Error, refusals: &UploadRefusals) -> GatewayError {
+    use matrix_sdk::media::MediaError;
+    use matrix_sdk::ruma::exports::http::StatusCode;
+    if let matrix_sdk::Error::Media(MediaError::MediaTooLargeToUpload { max, .. }) = &err {
+        refusals.client_refused(u64::from(*max));
+        return GatewayError::UploadTooLarge(err.to_string());
+    }
+    if err
+        .as_client_api_error()
+        .is_some_and(|api| api.status_code == StatusCode::PAYLOAD_TOO_LARGE)
+    {
+        refusals.homeserver_refused();
+        return GatewayError::UploadTooLarge(err.to_string());
+    }
+    map_sdk_err(err)
 }
 
 /// Cached NotEncrypted is insufficient for a media or preview upload: a
@@ -885,6 +915,7 @@ async fn preview_entry(
     room: &Room,
     preview: axon_core::link_preview::LinkPreview,
     encrypted: bool,
+    refusals: &UploadRefusals,
 ) -> Result<Value, GatewayError> {
     use axon_core::link_preview::{MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS};
     let Some(image) = preview.image else {
@@ -903,7 +934,8 @@ async fn preview_entry(
         .map_err(|_| GatewayError::Invalid("invalid preview image MIME".into()))?;
     let entry = preview_image_info(&preview.metadata, &image);
     let source =
-        upload_media_source_with_encryption(room, &mimetype, image.bytes, encrypted).await?;
+        upload_media_source_with_encryption(room, &mimetype, image.bytes, encrypted, refusals)
+            .await?;
     set_preview_source(entry, source)
 }
 
@@ -1015,7 +1047,7 @@ async fn send_with_previews_in_room(
     let entries = clock
         .run(
             futures_util::stream::iter(message.previews)
-                .map(|preview| preview_entry(room, preview, encrypted).boxed())
+                .map(|preview| preview_entry(room, preview, encrypted, &clock.refusals).boxed())
                 .buffered(2)
                 .try_collect::<Vec<_>>(),
         )
@@ -1152,6 +1184,9 @@ pub(crate) struct MediaClock {
     /// The bound `deadline` was set from, for the timeout's message.
     limit: std::time::Duration,
     bounds: MediaSendBounds,
+    /// Where the send's uploads report a refusal as too large. Records
+    /// nothing unless [`recording`](Self::recording) set it.
+    refusals: UploadRefusals,
 }
 
 impl MediaClock {
@@ -1160,7 +1195,14 @@ impl MediaClock {
             deadline: tokio::time::Instant::now() + bounds.upload,
             limit: bounds.upload,
             bounds,
+            refusals: UploadRefusals::default(),
         }
+    }
+
+    /// Report the send's upload refusals to `refusals`.
+    pub(crate) fn recording(mut self, refusals: UploadRefusals) -> Self {
+        self.refusals = refusals;
+        self
     }
 
     /// Start the event step's own bound, once the original and any
@@ -1196,7 +1238,14 @@ impl MediaClock {
         thumbnail: axon_core::MediaThumbnail,
         encrypted: bool,
     ) -> Option<(MediaSource, Box<ThumbnailInfo>)> {
-        upload_thumbnail(room, thumbnail, encrypted, self.bounds.thumbnail).await
+        upload_thumbnail(
+            room,
+            thumbnail,
+            encrypted,
+            self.bounds.thumbnail,
+            &self.refusals,
+        )
+        .await
     }
 }
 
@@ -1225,6 +1274,7 @@ async fn upload_thumbnail(
     thumbnail: axon_core::MediaThumbnail,
     encrypted: bool,
     limit: std::time::Duration,
+    refusals: &UploadRefusals,
 ) -> Option<(MediaSource, Box<ThumbnailInfo>)> {
     let room_id = room.room_id();
     let Ok(mimetype) = thumbnail.mimetype.parse::<mime::Mime>() else {
@@ -1236,13 +1286,15 @@ async fn upload_thumbnail(
     info.height = Some(UInt::from(thumbnail.height));
     info.size = UInt::new(thumbnail.bytes.len() as u64);
     info.mimetype = Some(thumbnail.mimetype);
-    let upload = upload_media_source_with_encryption(room, &mimetype, thumbnail.bytes, encrypted);
+    let upload =
+        upload_media_source_with_encryption(room, &mimetype, thumbnail.bytes, encrypted, refusals);
     match tokio::time::timeout(limit, upload).await {
         Ok(Ok(source)) => Some((source, Box::new(info))),
         Ok(Err(error)) => {
             let error_kind = match error {
                 GatewayError::Timeout(_) => "timeout",
                 GatewayError::EventTooLarge => "too_large",
+                GatewayError::UploadTooLarge(_) => "upload_too_large",
                 _ => "upload_failed",
             };
             tracing::warn!(%room_id, error_kind, "media thumbnail upload failed; sending without it");
@@ -1280,6 +1332,7 @@ async fn upload_original(
         content_type,
         bytes,
         encrypted,
+        &clock.refusals,
     ));
     let source = if let Some(image) = image {
         let deadline = clock.deadline;
@@ -1692,6 +1745,11 @@ impl SdkGateway {
         map.entry(key).or_default().clone()
     }
 
+    /// Where `account_id`'s media uploads report a refusal as too large.
+    fn upload_refusals(&self, account_id: Uuid) -> UploadRefusals {
+        UploadRefusals::for_account(self.manager.upload_limit_cache(), account_id)
+    }
+
     /// Resolve the joined [`Room`] for `(account_id, room_id)`, connecting the
     /// account's client on demand. A malformed room id is a `400`-class
     /// [`GatewayError::Invalid`]; a room the client doesn't know is a `404`-class
@@ -1725,7 +1783,7 @@ impl SdkGateway {
         use futures_util::FutureExt;
         // The upload step's bound starts before the room is resolved, as the
         // adapter's single timeout did.
-        let clock = MediaClock::start(bounds);
+        let clock = MediaClock::start(bounds).recording(self.upload_refusals(account_id));
         let room = clock.run(self.room(account_id, room_id)).await?;
         // Boxed as a trait object: the send future is deep enough that,
         // nested once more inside the server's adapter, proving it `Send`
@@ -1814,7 +1872,7 @@ impl SdkGateway {
         bounds: MediaSendBounds,
     ) -> Result<String, GatewayError> {
         use futures_util::FutureExt;
-        let clock = MediaClock::start(bounds);
+        let clock = MediaClock::start(bounds).recording(self.upload_refusals(account_id));
         let room = clock.run(self.room(account_id, room_id)).await?;
         // Boxed for the same reason as `send_with_previews`.
         send_media_in_room(
@@ -1946,13 +2004,17 @@ impl SdkGateway {
         let has_uploads = planned
             .iter()
             .any(|p| matches!(p, Planned::New(preview) if preview.image.is_some()));
+        let refusals = self.upload_refusals(account_id);
         let entries = futures_util::stream::iter(planned)
             .map(|p| {
                 let room = &room;
+                let refusals = &refusals;
                 async move {
                     match p {
                         Planned::Kept(entry) => Ok(entry),
-                        Planned::New(preview) => preview_entry(room, preview, encrypted).await,
+                        Planned::New(preview) => {
+                            preview_entry(room, preview, encrypted, refusals).await
+                        }
                     }
                 }
                 .boxed()
@@ -2478,7 +2540,18 @@ impl SdkGateway {
             GatewayError::Invalid("avatar upload must declare a content type".to_owned())
         })?;
         let content_type = effective_mime(MediaSendKind::Image, Some(content_type))?;
-        room.upload_avatar(&content_type, attachment.bytes, None)
+        // `Room::upload_avatar`'s two steps, so the upload's refusal as too
+        // large is told apart from the state event's.
+        let upload = room
+            .client()
+            .media()
+            .upload(&content_type, attachment.bytes, None)
+            .await
+            .map_err(|err| map_upload_err(err, &self.upload_refusals(account_id)))?;
+        let mut info = matrix_sdk::ruma::events::room::avatar::ImageInfo::new();
+        info.blurhash = upload.blurhash;
+        info.mimetype = Some(content_type.to_string());
+        room.set_avatar_url(&upload.content_uri, Some(info))
             .await
             .map_err(map_sdk_err)?;
         Ok(())
@@ -2668,9 +2741,15 @@ impl SdkGateway {
             GatewayError::Invalid("avatar upload must declare a content type".to_owned())
         })?;
         let content_type = effective_mime(MediaSendKind::Image, Some(content_type))?;
+        // `Account::upload_avatar`'s two steps, as for a room avatar.
+        let upload = client
+            .media()
+            .upload(&content_type, attachment.bytes, None)
+            .await
+            .map_err(|err| map_upload_err(err, &self.upload_refusals(account_id)))?;
         client
             .account()
-            .upload_avatar(&content_type, attachment.bytes)
+            .set_avatar_url(Some(&upload.content_uri))
             .await
             .map_err(map_sdk_err)?;
         Ok(())
@@ -3542,6 +3621,114 @@ mod tests {
             .await
             .unwrap();
         (room, server)
+    }
+
+    /// ADR 0143 section 6: an upload refused as too large is told apart and
+    /// recorded against the account. The homeserver's (or a proxy's) `413`,
+    /// whatever its body, asks for a fresh lookup; the SDK's own refusal
+    /// against the `m.upload.size` it cached caps the advertised limit at
+    /// that size, since no lookup changes it; another failure records
+    /// nothing. A thumbnail's refusal is recorded before it is dropped.
+    #[tokio::test]
+    async fn an_upload_refused_as_too_large_is_its_own_error_and_is_recorded() {
+        use crate::upload_limits::{
+            HomeserverUploadLimitCache, Identity, Lookup, Read, UploadRefusals,
+        };
+        use axum::{http::StatusCode, response::IntoResponse, Json, Router};
+        use tokio::time::Instant;
+        use uuid::Uuid;
+
+        const GIB: u64 = 1024 * 1024 * 1024;
+        // What the account's next read finds: the refresh a 413 asks for,
+        // or the SDK's limit.
+        let refreshes = Read {
+            max_bytes: Some(GIB),
+            start_refresh: true,
+        };
+        let capped = Read {
+            max_bytes: Some(2),
+            start_refresh: false,
+        };
+        let untouched = Read {
+            max_bytes: Some(GIB),
+            start_refresh: false,
+        };
+        for (upload_size, upload_status, thumbnail, expected) in [
+            // A reverse proxy's HTML 413.
+            (GIB, StatusCode::PAYLOAD_TOO_LARGE, false, &refreshes),
+            (GIB, StatusCode::PAYLOAD_TOO_LARGE, true, &refreshes),
+            // The SDK refuses before sending: 3 bytes over a 2-byte limit.
+            (2, StatusCode::OK, false, &capped),
+            (2, StatusCode::OK, true, &capped),
+            // Another refusal. (Not a 5xx: the SDK retries those.)
+            (GIB, StatusCode::FORBIDDEN, false, &untouched),
+        ] {
+            let router = Router::new().fallback(move |uri: axum::http::Uri| async move {
+                let path = uri.path();
+                if path.contains("/join") {
+                    return Json(json!({"room_id":"!preview:localhost"})).into_response();
+                }
+                if path.ends_with("/media/config") {
+                    return Json(json!({"m.upload.size": upload_size})).into_response();
+                }
+                if upload_status == StatusCode::OK {
+                    return Json(json!({"content_uri":"mxc://localhost/uploaded"})).into_response();
+                }
+                (
+                    upload_status,
+                    "<html><body>413 Request Entity Too Large</body></html>",
+                )
+                    .into_response()
+            });
+            let (room, server) = preview_test_room(router).await;
+            let case = format!("{upload_size} / {upload_status} / thumbnail {thumbnail}");
+
+            // The account's limit is known and fresh.
+            let cache = HomeserverUploadLimitCache::default();
+            let account = Uuid::new_v4();
+            let identity = Identity::of(&room.client());
+            assert!(cache.read(account, &identity, Instant::now()).start_refresh);
+            cache.finish(account, &identity, Lookup::Answered(GIB), Instant::now());
+            let refusals = UploadRefusals::for_account(cache.clone(), account);
+
+            if thumbnail {
+                let dropped = super::upload_thumbnail(
+                    &room,
+                    axon_core::MediaThumbnail {
+                        bytes: b"abc".to_vec(),
+                        mimetype: "image/png".into(),
+                        width: 1,
+                        height: 1,
+                    },
+                    false,
+                    std::time::Duration::from_secs(10),
+                    &refusals,
+                )
+                .await;
+                assert!(dropped.is_none(), "{case}: the event goes without it");
+            } else {
+                let error = super::upload_media_source_with_encryption(
+                    &room,
+                    &mime::APPLICATION_OCTET_STREAM,
+                    b"abc".to_vec(),
+                    false,
+                    &refusals,
+                )
+                .await
+                .expect_err("the upload is refused");
+                assert_eq!(
+                    matches!(error, GatewayError::UploadTooLarge(_)),
+                    expected != &untouched,
+                    "{case}: {error:?}"
+                );
+            }
+            assert_eq!(
+                &cache.read(account, &identity, Instant::now()),
+                expected,
+                "{case}"
+            );
+            server.abort();
+        }
     }
 
     #[tokio::test]
@@ -5773,6 +5960,81 @@ mod disowned_room_tests {
 
         let (live_tx, _rx) = broadcast::channel(16);
         (SdkGateway::new(manager.clone(), store, live_tx), manager)
+    }
+
+    /// Review of #1210: a profile avatar uploads outside the media send, and
+    /// its `413` must still ask for a fresh look at the homeserver's limit.
+    /// Evicting the client then drops the account's entry, since its
+    /// replacement starts with an empty SDK upload-size cache.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn an_avatar_refused_as_too_large_refreshes_the_upload_limit() {
+        use crate::upload_limits::{Identity, Lookup, Read};
+        use tokio::time::Instant;
+
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let account_id = Uuid::new_v4();
+        let router = Router::new()
+            .route(
+                "/_matrix/client/v1/media/config",
+                axum::routing::get(|| async { Json(json!({"m.upload.size": GIB})) }),
+            )
+            .route(
+                "/_matrix/media/v3/upload",
+                post(|| async {
+                    (
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "<html><body>413 Request Entity Too Large</body></html>",
+                    )
+                }),
+            );
+        let (gateway, manager) = gateway_for(serve(router).await, account_id).await;
+        let cache = manager.upload_limit_cache();
+        let identity = Identity::of(&manager.cached(account_id).expect("injected client"));
+        assert!(
+            cache
+                .read(account_id, &identity, Instant::now())
+                .start_refresh
+        );
+        cache.finish(account_id, &identity, Lookup::Answered(GIB), Instant::now());
+
+        let error = gateway
+            .set_account_avatar(
+                account_id,
+                axon_core::MediaAttachment {
+                    kind: MediaSendKind::Image,
+                    filename: "avatar.png".into(),
+                    content_type: Some("image/png".into()),
+                    size_bytes: 3,
+                    bytes: b"abc".to_vec(),
+                    width: None,
+                    height: None,
+                    duration_ms: None,
+                    thumbnail: None,
+                },
+            )
+            .await
+            .expect_err("the upload is refused");
+        assert!(
+            matches!(error, GatewayError::UploadTooLarge(_)),
+            "{error:?}"
+        );
+        assert_eq!(
+            cache.read(account_id, &identity, Instant::now()),
+            Read {
+                max_bytes: Some(GIB),
+                start_refresh: true
+            }
+        );
+
+        cache.finish(account_id, &identity, Lookup::Answered(GIB), Instant::now());
+        manager.evict(account_id).await;
+        assert!(
+            cache
+                .read(account_id, &identity, Instant::now())
+                .start_refresh,
+            "the evicted client's entry is gone"
+        );
     }
 
     const DEAD_ROOM: &str = "!disowned:localhost";

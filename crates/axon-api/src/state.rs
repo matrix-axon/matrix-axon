@@ -37,6 +37,7 @@ use crate::sender::{
 use crate::sync_state::{NoSyncState, SyncStateProvider};
 use crate::sync_status::{NoSyncStatus, SyncStatusProvider};
 use crate::trust::SenderTrustService;
+use crate::upload_limit::{NoUploadLimit, UploadLimitProvider};
 use crate::uploads::{
     StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService, UploadStream,
 };
@@ -218,6 +219,11 @@ pub struct AppState {
     /// injects an adapter over the sync engine via
     /// [`with_backup_state`](Self::with_backup_state).
     pub backup_state: Arc<dyn BackupStateProvider>,
+    /// Effective media upload limit port (ADR 0143 section 6) for
+    /// `AccountDto.media_upload_limit`. Defaults to advertising none; the
+    /// binary injects an adapter over the sync engine's cached homeserver
+    /// limit via [`with_upload_limits`](Self::with_upload_limits).
+    pub upload_limits: Arc<dyn UploadLimitProvider>,
     /// OAuth 2.0 authorization-server runtime for `/v1/oauth/*` (M14, ADR
     /// 0054). `None` when `oauth.enabled = false`, in which case every oauth
     /// handler (and the rate-limiting layer in front of them) returns `404`
@@ -449,6 +455,7 @@ impl AppState {
             room_details: Arc::new(crate::room_details::NoRoomDetailAcquisition),
             sync_state: Arc::new(NoSyncState),
             backup_state: Arc::new(NoBackupState),
+            upload_limits: Arc::new(NoUploadLimit),
             oauth: None,
             bootstrap: None,
             management: ManagementConfig::default(),
@@ -531,6 +538,14 @@ impl AppState {
     /// tests that don't care keep the default unknown snapshot.
     pub fn with_backup_state(mut self, provider: Arc<dyn BackupStateProvider>) -> Self {
         self.backup_state = provider;
+        self
+    }
+
+    /// Inject the effective upload-limit provider
+    /// (`AccountDto.media_upload_limit`; ADR 0143 section 6). Tests that don't
+    /// care keep the default, which advertises no limit.
+    pub fn with_upload_limits(mut self, provider: Arc<dyn UploadLimitProvider>) -> Self {
+        self.upload_limits = provider;
         self
     }
 
@@ -1312,6 +1327,12 @@ impl FromRef<AppState> for Arc<dyn SyncStateProvider> {
 impl FromRef<AppState> for Arc<dyn BackupStateProvider> {
     fn from_ref(state: &AppState) -> Arc<dyn BackupStateProvider> {
         state.backup_state.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn UploadLimitProvider> {
+    fn from_ref(state: &AppState) -> Arc<dyn UploadLimitProvider> {
+        state.upload_limits.clone()
     }
 }
 

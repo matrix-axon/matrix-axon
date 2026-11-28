@@ -59,6 +59,7 @@ mod state_redaction;
 mod supplementary_state;
 mod sync_health;
 mod trust;
+mod upload_limits;
 mod verification;
 
 pub use acquisition::RoomDetailAcquisitions;
@@ -88,4 +89,5 @@ pub use redecrypt::RedecryptSummary;
 pub use room_identity::{RoomIdentityEngine, RoomIdentityError};
 pub use sync_health::{AccountSyncStatus, SyncHealth, SyncState};
 pub use trust::{CurrentTrust, SenderTrustEngine, TrustBundle, TrustError, TrustSnapshot};
+pub use upload_limits::UploadLimits;
 pub use verification::{FlowStage, FlowState, VerificationEngine, VerifyError};
